@@ -1,6 +1,6 @@
 """module: build_identity; responsibility: identify builds of the current source.
 
-operations: module_note, service_binary, release_binary, service_id; entities: none;
+operations: service_binary, service_id; entities: none;
 tests: build_identity_tests. Builds stay in the repository; nothing is installed.
 """
 
@@ -22,42 +22,9 @@ def _run(root: Path, arguments: list[str]) -> Result[bytes]:
     return Ok(process.stdout)
 
 
-def module_note(root: Path) -> Result[bytes]:
-    built = _run(root, ["make", "-C", str(root / "kernel")])
-    if isinstance(built, Rejected):
-        return built
-    note = _run(
-        root,
-        [
-            "objcopy",
-            "-O",
-            "binary",
-            "--only-section=.note.gnu.build-id",
-            str(root / "kernel/v4l2_rkmpp_bridge.ko"),
-            "/dev/stdout",
-        ],
-    )
-    if isinstance(note, Rejected):
-        return note
-    if not note.value:
-        return Rejected(
-            errno.ENODATA,
-            "Local kernel module has no ELF build ID; cannot verify the loaded version",
-        )
-    return note
-
-
 def service_binary(root: Path) -> Result[Path]:
     return _service(
         root, ["cargo", "build", "--offline"], root / "target/debug/v4l2-stateful-rkmpp"
-    )
-
-
-def release_binary(root: Path) -> Result[Path]:
-    return _service(
-        root,
-        ["cargo", "build", "--release", "--offline"],
-        root / "target/release/v4l2-stateful-rkmpp",
     )
 
 

@@ -90,6 +90,13 @@ def test_query_rejects_identity_disagreeing_with_kernel_peer_credentials(
 @pytest.mark.parametrize(
     "response",
     [b"", b"{}\n", b"not-json\n", b"x" * 65537, b'{"error":"counter read failed"}\n'],
+    ids=[
+        "empty-response",
+        "missing-fields",
+        "invalid-json",
+        "oversized-response",
+        "server-error",
+    ],
 )
 def test_query_rejects_malformed_truncated_oversized_and_failed_responses(
     tmp_path: Path, response: bytes

@@ -69,7 +69,9 @@ def test_connect_missing_and_listen_existing_paths_are_rejected(tmp_path: Path) 
     assert occupied.read_bytes() == b"preserve"
 
 
-@pytest.mark.parametrize("body", [b"", bytes(32769)])
+@pytest.mark.parametrize(
+    "body", [b"", bytes(32769)], ids=["empty-packet", "oversized-packet"]
+)
 def test_send_invalid_packet_extent_is_rejected(body: bytes) -> None:
     left, right = accepted(Socket.pair())
     with left, right:

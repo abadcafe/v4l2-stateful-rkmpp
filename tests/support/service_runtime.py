@@ -1,6 +1,6 @@
 """module: service_runtime; responsibility: validate the running broker service.
 
-operations: Running, locate, verify, sample; entities: Running;
+operations: Running, locate, require_idle, sample; entities: Running;
 tests: service_runtime_tests. Only query-only status and device exclusivity are used.
 """
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from tests.support import build_identity, diagnostics, syscalls
+from tests.support import diagnostics, syscalls
 from tests.support.diagnostics import Control, Identity, Snapshot
 from tests.support.outcome import Ok, Rejected, Result
 
@@ -27,34 +27,6 @@ def _stop(details: str) -> str:
         details
         + " Manually stop the service (use systemctl stop for a systemd-managed service), then rerun the browser integration tests. No manual service start is required; the tests will start the latest build."
     )
-
-
-def verify(
-    binaries: tuple[Path, ...], endpoint: Path = ENDPOINT, control: Path = _CONTROL
-) -> Result[Running | None]:
-    if not binaries:
-        return Rejected(
-            errno.EINVAL,
-            "No service binaries built from the current source were provided",
-        )
-    expected: set[str] = set()
-    for binary in binaries:
-        fingerprint = build_identity.service_id(binary)
-        if isinstance(fingerprint, Rejected):
-            return fingerprint
-        expected.add(fingerprint.value)
-    located = locate(endpoint, control)
-    if isinstance(located, Rejected) or located.value is None:
-        return located
-    actual = located.value
-    if actual.identity.build_id not in expected:
-        return Rejected(
-            errno.ESTALE,
-            _stop(
-                f"Running service PID {actual.identity.pid} does not match a binary built from the current source."
-            ),
-        )
-    return located
 
 
 def locate(
@@ -112,6 +84,20 @@ def locate(
             "Service is stopping; wait for it to exit before rerunning the integration tests",
         )
     return Ok(Running(identity=actual.identity, endpoint=endpoint))
+
+
+def require_idle(endpoint: Path = ENDPOINT, control: Path = _CONTROL) -> Result[None]:
+    running = locate(endpoint, control)
+    if isinstance(running, Rejected):
+        return running
+    if running.value is not None:
+        return Rejected(
+            errno.EBUSY,
+            _stop(
+                f"Service PID {running.value.identity.pid} is already running. Browser integration tests must start and stop their own service."
+            ),
+        )
+    return Ok(None)
 
 
 def sample(running: Running) -> Result[Snapshot]:

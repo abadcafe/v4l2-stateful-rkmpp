@@ -6,6 +6,7 @@ tests: tests/kernel, tests/service, tests/browser, tests/support.
 External contracts only: compiler CLI, sysfs, /proc, and device nodes.
 """
 
+import os
 import threading
 from collections.abc import Callable, Generator
 from contextlib import ExitStack
@@ -34,8 +35,16 @@ def executable() -> Path:
 
 
 @pytest.fixture(scope="session")
-def kernel_owner() -> Path:
-    control = accepted(verify(ROOT))
+def kernel_owner(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    control = accepted(verify())
+    directory = tmp_path_factory.mktemp("kernel-runtime")
+    _ = (directory / "kernel-release.txt").write_text(os.uname().release)
+    note = Path("/sys/module/v4l2_rkmpp_bridge/notes/.note.gnu.build-id")
+    try:
+        identity = note.read_bytes().hex()
+    except OSError as error:
+        identity = f"Unavailable: {error}"
+    _ = (directory / "build-id-note.txt").write_text(identity)
     assert control.is_char_device(), (
         f"Loaded module is missing control device {control}"
     )

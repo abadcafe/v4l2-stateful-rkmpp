@@ -21,7 +21,11 @@ def test_request_roundtrip_preserves_command_and_complete_payload() -> None:
     assert empty.command == ACCEPT and not empty.body
 
 
-@pytest.mark.parametrize("raw", [b"", bytes(31), bytes(32), b"RBM2" + bytes(40)])
+@pytest.mark.parametrize(
+    "raw",
+    [b"", bytes(31), bytes(32), b"RBM2" + bytes(40)],
+    ids=["empty-request", "truncated-header", "invalid-magic", "invalid-request-kind"],
+)
 def test_read_request_invalid_header_is_rejected(raw: bytes) -> None:
     assert isinstance(read_request(raw), Rejected)
 

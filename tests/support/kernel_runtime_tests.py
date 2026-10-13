@@ -1,12 +1,11 @@
 """module: kernel_runtime_tests; responsibility: define real-kernel readiness.
 
-operations: pytest cases; entities: none; tests: loaded identity/exclusive access.
-Only compiler process boundaries, sysfs files, and open syscall are substituted.
+operations: pytest cases; entities: none; tests: loaded module/exclusive access.
+Only sysfs files and the open syscall are substituted.
 """
 
 import errno
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -15,89 +14,16 @@ from tests.support.kernel_runtime import exclusive, verify
 from tests.support.outcome import Ok, Rejected
 
 
-@pytest.fixture
-def kernel_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    root, modules = tmp_path / "source", tmp_path / "sys/module"
-    (root / "kernel").mkdir(parents=True)
-    modules.mkdir(parents=True)
-    _ = (root / "kernel/device.c").write_bytes(b"new module note")
-
-    def compile_process(
-        arguments: list[str], *, cwd: Path, capture_output: bool
-    ) -> subprocess.CompletedProcess[bytes]:
-        assert cwd == root and capture_output
-        output = (
-            (root / "kernel/device.c").read_bytes()
-            if arguments[0] == "objcopy"
-            else b""
-        )
-        return subprocess.CompletedProcess(arguments, 0, output, b"")
-
-    monkeypatch.setattr(subprocess, "run", compile_process)
-    return root, modules
-
-
-def _loaded(modules: Path, note: bytes) -> None:
-    notes = modules / "v4l2_rkmpp_bridge/notes"
-    notes.mkdir(parents=True)
-    _ = (notes / ".note.gnu.build-id").write_bytes(note)
-
-
-def test_verify_matching_loaded_build_is_accepted(
-    kernel_tree: tuple[Path, Path],
-) -> None:
-    root, modules = kernel_tree
-    _loaded(modules, b"new module note")
-    result = verify(root, modules)
+def test_verify_loaded_module_is_ready(tmp_path: Path) -> None:
+    (tmp_path / "v4l2_rkmpp_bridge").mkdir()
+    result = verify(tmp_path)
     assert isinstance(result, Ok) and result.value == Path("/dev/v4l2-rkmpp-control")
 
 
-def test_verify_changed_source_requires_manual_module_update(
-    kernel_tree: tuple[Path, Path],
-) -> None:
-    root, modules = kernel_tree
-    _loaded(modules, b"new module note")
-    _ = (root / "kernel/device.c").write_bytes(b"edited module note")
-    result = verify(root, modules)
-    assert isinstance(result, Rejected) and result.code == errno.ESTALE
-    assert "Manually" in result.operation and "install" in result.operation
-    assert "v4l2_rkmpp_bridge" in result.operation and "stop" in result.operation
-
-
-def test_verify_unloaded_module_requires_manual_install(
-    kernel_tree: tuple[Path, Path],
-) -> None:
-    root, modules = kernel_tree
-    result = verify(root, modules)
+def test_verify_unloaded_module_requires_manual_load(tmp_path: Path) -> None:
+    result = verify(tmp_path)
     assert isinstance(result, Rejected) and result.code == errno.ENOENT
     assert "not loaded" in result.operation and "Manually" in result.operation
-
-
-def test_verify_loaded_module_without_identity_is_rejected(
-    kernel_tree: tuple[Path, Path],
-) -> None:
-    root, modules = kernel_tree
-    (modules / "v4l2_rkmpp_bridge").mkdir()
-    result = verify(root, modules)
-    assert isinstance(result, Rejected)
-    assert "build ID" in result.operation and "install" in result.operation
-
-
-def test_verify_failed_rebuild_does_not_accept_old_module(
-    kernel_tree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root, modules = kernel_tree
-    _loaded(modules, b"new module note")
-
-    def fail(
-        arguments: list[str], *, cwd: Path, capture_output: bool
-    ) -> subprocess.CompletedProcess[bytes]:
-        assert arguments[0] == "make" and cwd == root and capture_output
-        return subprocess.CompletedProcess(arguments, 2, b"", b"invalid C source")
-
-    monkeypatch.setattr(subprocess, "run", fail)
-    result = verify(root, modules)
-    assert isinstance(result, Rejected) and "invalid C source" in result.operation
 
 
 def test_exclusive_available_control_releases_descriptor(tmp_path: Path) -> None:

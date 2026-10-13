@@ -1,6 +1,6 @@
 """module: browser fixtures; responsibility: lease functional acceptance sessions.
 
-operations: browser_factory, bridge_service, browser_binaries;
+operations: browser_factory, bridge_service;
 entities: BrowserFactory; tests: test_graphics, test_playback, test_sessions.
 Frequency policy and utilization sampling belong exclusively to tests/tools.
 """
@@ -11,10 +11,16 @@ from pathlib import Path
 import pytest
 
 from tests.support.browser import Browser
-from tests.support.build_identity import release_binary
+from tests.support.build_identity import service_binary
 from tests.support.outcome import accepted
 from tests.support.service_process import Lease
-from tests.support.service_runtime import ENDPOINT, Running, sample, verify
+from tests.support.service_runtime import (
+    ENDPOINT,
+    Running,
+    locate,
+    require_idle,
+    sample,
+)
 
 type BrowserFactory = Callable[[tuple[str, ...]], Browser]
 
@@ -44,28 +50,22 @@ def browser_factory(
 
 
 @pytest.fixture
-def bridge_service(
-    kernel_owner: Path, browser_binaries: tuple[Path, Path], tmp_path: Path
-) -> Generator[Running]:
-    running = accepted(verify(browser_binaries))
-    lease = (
-        accepted(Lease.borrow(running))
-        if running is not None
-        else accepted(
-            Lease.start(
-                browser_binaries[0], kernel_owner, ENDPOINT, tmp_path / "service.log"
-            )
+def bridge_service(kernel_owner: Path, tmp_path: Path) -> Generator[Running]:
+    accepted(require_idle(control=kernel_owner))
+    lease = accepted(
+        Lease.start(
+            accepted(service_binary(Path(__file__).resolve().parents[2])),
+            kernel_owner,
+            ENDPOINT,
+            tmp_path / "service.log",
         )
     )
     try:
-        confirmed = accepted(verify(browser_binaries))
+        confirmed = accepted(locate())
         assert confirmed is not None and confirmed.identity == lease.running.identity
+        _ = (tmp_path / "service-identity.json").write_text(
+            lease.running.identity.model_dump_json(indent=2)
+        )
         yield lease.running
     finally:
         _ = accepted(lease.close())
-
-
-@pytest.fixture(scope="session")
-def browser_binaries(executable: Path) -> tuple[Path, Path]:
-    root = Path(__file__).resolve().parents[2]
-    return executable, accepted(release_binary(root))

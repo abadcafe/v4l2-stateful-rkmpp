@@ -62,7 +62,7 @@ chromium --ozone-platform=wayland \
 
 ## 测试命令
 
-需要 RK3588 实机、Python 3.14+、uv、Rust nightly、FFmpeg、Chromium、GTK3 和现有 GNOME Wayland 会话。使用 video 组普通用户，在项目根目录执行。内核集测要求控制设备空闲；内核/浏览器集测要求已加载模块与当前源码构建一致。
+需要 RK3588 实机、Python 3.14+、uv、Rust nightly、FFmpeg、Chromium、GTK3 和现有 GNOME Wayland 会话。使用 video 组普通用户，在项目根目录执行。内核集测要求控制设备空闲；内核/浏览器集测要求模块已加载，且运行前手动停止现有桥接服务。浏览器集测发现已有服务会报错提示停止；服务由集测从当前源码构建并负责启停。测试不检查已加载模块是否与源码一致，请自行更新模块；通过只代表实际加载的模块通过验收。实际内核身份和浏览器使用的服务身份分别记录在 pytest 临时目录的 `kernel-runtime*/` 和各浏览器 case 的 `service-identity.json`。
 
 测试拦截库使用 Rust 的 `c_variadic` 特性实现 C 可变参数接口，因此其 Clippy、编译和测试需要 nightly；主服务使用 stable。
 
