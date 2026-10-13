@@ -40,10 +40,24 @@ def test_launch_inherits_current_session_and_requests_background_start(
         start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
         assert arguments[0] == "/usr/lib/chromium/chromium"
-        assert (
-            "--no-startup-window" in arguments
-            and "--ozone-platform=wayland" in arguments
+        assert "--no-startup-window" in arguments
+        assert not any(
+            argument.startswith(
+                (
+                    "--gtk-version=",
+                    "--ozone-platform=",
+                    "--use-gl=",
+                    "--use-angle=",
+                    "--ignore-gpu-blocklist",
+                )
+            )
+            for argument in arguments
         )
+        assert (
+            "--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL"
+            in arguments
+        )
+        assert "--disable-features=ResolutionBasedDecoderPriority" in arguments
         assert all(env[name] == value for name, value in environment.items())
         assert "XDG_ACTIVATION_TOKEN" not in env and "DESKTOP_STARTUP_ID" not in env
         assert stdout is stderr and start_new_session
@@ -52,7 +66,7 @@ def test_launch_inherits_current_session_and_requests_background_start(
     monkeypatch.setattr(subprocess, "Popen", start)
     profile = tmp_path / "profile"
     with (tmp_path / "browser.log").open("wb") as log:
-        process = accepted(launch(profile, log, ("--ozone-platform=wayland",)))
+        process = accepted(launch(profile, log, ()))
         assert process.wait(timeout=5) == 0
     assert profile.stat().st_uid == os.geteuid()
     assert profile.stat().st_mode & 0o777 == 0o700

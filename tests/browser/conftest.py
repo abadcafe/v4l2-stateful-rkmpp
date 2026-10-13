@@ -5,13 +5,14 @@ entities: BrowserFactory; tests: test_graphics, test_playback, test_sessions.
 Frequency policy and utilization sampling belong exclusively to tests/tools.
 """
 
+import json
 from collections.abc import Callable, Generator
 from pathlib import Path
 
 import pytest
 
 from tests.support.browser import Browser
-from tests.support.build_identity import service_binary
+from tests.support.build_identity import existing_service_binary
 from tests.support.outcome import accepted
 from tests.support.service_process import Lease
 from tests.support.service_runtime import (
@@ -40,6 +41,9 @@ def browser_factory(
             Browser.open(tmp_path / f"browser-{len(browsers)}", media, flags)
         )
         browsers.append(browser)
+        _ = (tmp_path / f"graphics-{len(browsers)}.json").write_text(
+            json.dumps(accepted(browser.control.call("SystemInfo.getInfo")), indent=2)
+        )
         return browser
 
     try:
@@ -54,7 +58,7 @@ def bridge_service(kernel_owner: Path, tmp_path: Path) -> Generator[Running]:
     accepted(require_idle(control=kernel_owner))
     lease = accepted(
         Lease.start(
-            accepted(service_binary(Path(__file__).resolve().parents[2])),
+            accepted(existing_service_binary(Path(__file__).resolve().parents[2])),
             kernel_owner,
             ENDPOINT,
             tmp_path / "service.log",

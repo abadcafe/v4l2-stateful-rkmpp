@@ -25,7 +25,7 @@ class Running(BaseModel, frozen=True):
 def _stop(details: str) -> str:
     return (
         details
-        + " Manually stop the service (use systemctl stop for a systemd-managed service), then rerun the browser integration tests. No manual service start is required; the tests will start the latest build."
+        + " Manually stop the service (use systemctl stop for a systemd-managed service), then rerun the browser integration tests. No manual service start is required; the tests will start the prebuilt service from the test checkout."
     )
 
 

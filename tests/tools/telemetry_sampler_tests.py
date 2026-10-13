@@ -37,17 +37,15 @@ def counters(
     def now() -> float:
         return clock[0]
 
-    def processes(browser_pid: int, desktop_pid: int) -> Result[Processes]:
-        assert (browser_pid, desktop_pid) == (1, 2)
+    def processes(browser_pid: int, desktop_pid: int | None) -> Result[Processes]:
+        assert browser_pid == 1 and desktop_pid in (None, 2)
         delta = int((clock[0] - 10) * 100)
         return Ok(
             {
                 1: Process(
                     parent=0, start=1, ticks=delta, name="chromium", kind="browser"
                 ),
-                2: Process(
-                    parent=0, start=1, ticks=0, name="gnome-shell", kind="browser"
-                ),
+                2: Process(parent=0, start=1, ticks=0, name="desktop", kind="browser"),
             }
         )
 
@@ -115,3 +113,16 @@ def test_open_invalid_workload_pid_is_an_error(
 ) -> None:
     running, _, _ = counters
     assert isinstance(Sampler.open(0, running, 2), Rejected)
+
+
+def test_read_without_compositor_keeps_decode_counters(
+    counters: tuple[Running, list[float], list[float]],
+) -> None:
+    running, clock, service_cpu = counters
+    sampler = accepted(Sampler.open(1, running))
+    clock[0] = 11
+    service_cpu[0] = 1.25
+    sample = accepted(sampler.read())
+    assert "desktop-compositor" not in sample.cpu
+    assert sample.cpu["bridge"] == 25 and sample.cpu["chromium"] > 0
+    assert sample.gpu_percent == 25 and sample.mpp == {"core0": 12}

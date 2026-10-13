@@ -48,17 +48,9 @@ def test_browser_hardware_frames_are_visible(
     height: int,
     frames: int,
 ) -> None:
-    flags = (
-        "--ignore-gpu-blocklist",
-        "--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,Vulkan",
-        "--disable-features=SkiaGraphite,ResolutionBasedDecoderPriority",
-        "--ozone-platform=wayland",
-        "--use-gl=angle",
-        "--use-angle=gl",
-    )
-    browser = browser_factory(flags)
+    browser = browser_factory(())
     info = accepted(get_info(browser.control))
-    assert info.skia == "GaneshVulkan" and "Mali-G610" in info.renderer
+    assert info.skia and "Mali-G610" in info.renderer
     assert accepted(browser.player.load(browser.url(file)))
     deadline = time.monotonic() + 20
     state = accepted(browser.player.state())
@@ -99,17 +91,9 @@ def test_browser_hardware_frames_are_visible(
 def test_browser_replay_resumes_hardware_decoder(
     browser_factory: BrowserFactory, tmp_path: Path, file: str
 ) -> None:
-    flags = (
-        "--ignore-gpu-blocklist",
-        "--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,Vulkan",
-        "--disable-features=SkiaGraphite,ResolutionBasedDecoderPriority",
-        "--ozone-platform=wayland",
-        "--use-gl=angle",
-        "--use-angle=gl",
-    )
-    browser = browser_factory(flags)
+    browser = browser_factory(())
     info = accepted(get_info(browser.control))
-    assert info.skia == "GaneshVulkan" and "Mali-G610" in info.renderer
+    assert info.skia and "Mali-G610" in info.renderer
     _ = accepted(browser.player.load(browser.url(file)))
     properties: dict[str, str] = {}
     for round in range(2):
@@ -145,17 +129,9 @@ def test_browser_hdr_inputs_complete_hardware_decode(
     file: str,
     frames: int,
 ) -> None:
-    flags = (
-        "--ignore-gpu-blocklist",
-        "--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,Vulkan",
-        "--disable-features=SkiaGraphite,ResolutionBasedDecoderPriority",
-        "--ozone-platform=wayland",
-        "--use-gl=angle",
-        "--use-angle=gl",
-    )
-    browser = browser_factory(flags)
+    browser = browser_factory(())
     info = accepted(get_info(browser.control))
-    assert info.skia == "GaneshVulkan" and "Mali-G610" in info.renderer
+    assert info.skia and "Mali-G610" in info.renderer
     _ = accepted(browser.player.load(browser.url(file)))
     deadline = time.monotonic() + 20
     state = accepted(browser.player.state())
@@ -175,17 +151,9 @@ def test_browser_hdr_inputs_complete_hardware_decode(
 def test_browser_pause_stops_clock_and_seek_resumes_hardware_decode(
     browser_factory: BrowserFactory,
 ) -> None:
-    flags = (
-        "--ignore-gpu-blocklist",
-        "--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,Vulkan",
-        "--disable-features=SkiaGraphite,ResolutionBasedDecoderPriority",
-        "--ozone-platform=wayland",
-        "--use-gl=angle",
-        "--use-angle=gl",
-    )
-    browser = browser_factory(flags)
+    browser = browser_factory(())
     info = accepted(get_info(browser.control))
-    assert info.skia == "GaneshVulkan" and "Mali-G610" in info.renderer
+    assert info.skia and "Mali-G610" in info.renderer
     _ = accepted(browser.player.load(browser.url("browser-vp9-10.webm")))
     deadline = time.monotonic() + 10
     state = accepted(browser.player.state())

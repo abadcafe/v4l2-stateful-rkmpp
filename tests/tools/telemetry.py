@@ -41,28 +41,30 @@ class Sampler:
         self,
         browser_pid: int,
         bridge: Running,
-        desktop_pid: int,
+        desktop_pid: int | None,
         initial: cpu.Processes,
         bridge_cpu: float,
     ) -> None:
         self._browser_pid: int = browser_pid
         self._bridge: Running = bridge
         self._bridge_cpu: float = bridge_cpu
-        self._desktop_pid: int = desktop_pid
+        self._desktop_pid: int | None = desktop_pid
         self._start: float = time.monotonic()
         self._previous_time: float = self._start
         self._previous: cpu.Processes = initial
 
     @classmethod
     def open(
-        cls, browser_pid: int, bridge: Running, desktop_pid: int
+        cls, browser_pid: int, bridge: Running, desktop_pid: int | None = None
     ) -> Result[Sampler]:
-        if browser_pid <= 0 or desktop_pid <= 0:
+        if browser_pid <= 0 or (desktop_pid is not None and desktop_pid <= 0):
             return Rejected(errno.EINVAL, "invalid workload process identity")
         counters = cpu.processes(browser_pid, desktop_pid)
         if isinstance(counters, Rejected):
             return counters
-        if any(pid not in counters.value for pid in (browser_pid, desktop_pid)):
+        if browser_pid not in counters.value or (
+            desktop_pid is not None and desktop_pid not in counters.value
+        ):
             return Rejected(errno.ESRCH, "workload process disappeared")
         status = service_runtime.sample(bridge)
         if isinstance(status, Rejected):

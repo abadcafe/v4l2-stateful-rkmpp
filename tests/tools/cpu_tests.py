@@ -11,13 +11,12 @@ CPU accounting defines one core as 100% and excludes unrelated browsers.
 """
 
 import errno
-import os
 from pathlib import Path
 
 import pytest
 
 from tests.support.outcome import Rejected, accepted
-from tests.tools.cpu import Process, account, compositor, parse_stat, processes
+from tests.tools.cpu import Process, account, parse_stat, processes
 
 
 def test_parse_stat_handles_process_names_with_parentheses() -> None:
@@ -48,8 +47,8 @@ def test_account_uses_owned_browser_descendants_and_one_core_percent() -> None:
         5: Process(
             parent=0, start=5, ticks=40, name="v4l2-stateful-rkmpp", kind="browser"
         ),
-        6: Process(parent=0, start=6, ticks=50, name="gnome-shell", kind="browser"),
-        7: Process(parent=0, start=7, ticks=60, name="gnome-shell", kind="browser"),
+        6: Process(parent=0, start=6, ticks=50, name="desktop-shell", kind="browser"),
+        7: Process(parent=0, start=7, ticks=60, name="desktop-shell", kind="browser"),
         8: Process(parent=7, start=8, ticks=70, name="desktop-agent", kind="browser"),
     }
     now = {
@@ -155,16 +154,15 @@ def test_processes_required_counters_permission_denied_is_not_omitted(
     assert isinstance(result, Rejected) and result.code == errno.EACCES
 
 
-def test_compositor_uses_current_user_without_rebuilding_desktop_environment(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "1").mkdir()
-    _ = (tmp_path / "1/comm").write_text("gnome-shell\n")
-    assert (tmp_path / "1").stat().st_uid == os.geteuid()
-    assert accepted(compositor(tmp_path)) == 1
-    (tmp_path / "2").mkdir()
-    _ = (tmp_path / "2/comm").write_text("gnome-shell\n")
-    assert isinstance(compositor(tmp_path), Rejected)
+def test_processes_without_compositor_reads_only_browser_tree(tmp_path: Path) -> None:
+    _process(tmp_path, 1, "2")
+    _process(tmp_path, 2)
+    (tmp_path / "99").mkdir()
+    values = accepted(processes(1, None, tmp_path))
+    assert set(values) == {1, 2}
+    groups = accepted(account(values, values, 1.0, 100, 1, None))
+    assert "desktop-compositor" not in groups
+    assert groups["chromium"] == 0
 
 
 @pytest.mark.parametrize("children", ["NaN", "0", "-1"])

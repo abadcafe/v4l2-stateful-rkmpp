@@ -35,6 +35,7 @@ class Options(BaseModel, frozen=True):
     warmup_seconds: float = Field(ge=0, allow_inf_nan=False)
     output: Path
     service_binary: Path
+    compositor_pid: int | None = Field(default=None, gt=0)
 
 
 _PRESETS = {
@@ -51,6 +52,7 @@ _SINGLE = {
     "--output",
     "--video",
     "--service",
+    "--compositor-pid",
 }
 
 
@@ -74,6 +76,9 @@ def parse(arguments: tuple[str, ...], root: Path) -> Result[Options]:
     if "--video" in values and codecs:
         return Rejected(errno.EINVAL, "--video and --codec cannot be combined")
     try:
+        compositor_pid = (
+            int(values["--compositor-pid"]) if "--compositor-pid" in values else None
+        )
         rounds = int(values.get("--rounds", "1"))
         interval = int(values.get("--interval-ms", "1000"))
         minimum = int(values["--gpu-min-hz"]) if "--gpu-min-hz" in values else None
@@ -113,6 +118,7 @@ def parse(arguments: tuple[str, ...], root: Path) -> Result[Options]:
     try:
         options = Options(
             workloads=workloads,
+            compositor_pid=compositor_pid,
             rounds=rounds,
             gpu_minimum_hz=minimum,
             interval_ms=interval,

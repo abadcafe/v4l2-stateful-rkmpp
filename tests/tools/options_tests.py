@@ -116,3 +116,10 @@ def test_parse_invalid_or_ambiguous_arguments_return_error(
 def test_parse_missing_video_returns_error_before_any_measurement(source: Path) -> None:
     result = parse(("--video", str(source / "missing.webm")), source)
     assert isinstance(result, Rejected) and result.code == errno.ENOENT
+
+
+def test_parse_compositor_sampling_is_opt_in(source: Path) -> None:
+    assert accepted(parse((), source)).compositor_pid is None
+    assert accepted(parse(("--compositor-pid", "123"), source)).compositor_pid == 123
+    for value in ("0", "-1", "invalid"):
+        assert isinstance(parse(("--compositor-pid", value), source), Rejected)

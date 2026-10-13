@@ -18,7 +18,7 @@ flowchart TD
     VPU -->|10-bit NV15| Vulkan[Vulkan 解包与抖动量化]
     Vulkan -->|8-bit NV12| Capture
     Capture -->|DMA-BUF 导入| GPU[Chromium GPU 合成]
-    GPU -->|Wayland| Display[桌面合成与显示]
+    GPU --> Display[桌面合成与显示]
 ```
 
 8-bit 解码直接写入 CAPTURE 缓冲区；10-bit 转换直接写入最终 CAPTURE 缓冲区，桥接过程没有 CPU 整帧复制。
@@ -51,18 +51,18 @@ v4l2-stateful-rkmpp serve /dev/v4l2-rkmpp-control /run/v4l2-stateful-rkmpp/statu
 启动 Chromium：
 
 ```sh
-chromium --ozone-platform=wayland \
-  --ignore-gpu-blocklist \
-  --use-gl=angle --use-angle=gl \
-  --enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,Vulkan \
-  --disable-features=SkiaGraphite,ResolutionBasedDecoderPriority
+chromium \
+  --enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL \
+  --disable-features=ResolutionBasedDecoderPriority
 ```
+
+Chromium 的 GTK、显示后端、ANGLE 和合成后端均使用其默认选择。只保留硬解功能开关及禁用小分辨率优先软解的开关；集测仍要求实际使用硬解，不以软解通过验收。
 
 播放视频后，在 `chrome://media-internals` 确认 `kVideoDecoderName` 为 `V4L2VideoDecoder`。
 
 ## 测试命令
 
-需要 RK3588 实机、Python 3.14+、uv、Rust nightly、FFmpeg、Chromium、GTK3 和现有 GNOME Wayland 会话。使用 video 组普通用户，在项目根目录执行。内核集测要求控制设备空闲；内核/浏览器集测要求模块已加载，且运行前手动停止现有桥接服务。浏览器集测发现已有服务会报错提示停止；服务由集测从当前源码构建并负责启停。测试不检查已加载模块是否与源码一致，请自行更新模块；通过只代表实际加载的模块通过验收。实际内核身份和浏览器使用的服务身份分别记录在 pytest 临时目录的 `kernel-runtime*/` 和各浏览器 case 的 `service-identity.json`。
+需要 RK3588 实机、Python 3.14+、uv、Rust nightly、FFmpeg、Chromium 及可用的桌面图形会话。使用 video 组普通用户，在项目根目录执行。内核集测要求控制设备空闲；内核/浏览器集测要求模块已加载，且运行前手动停止现有桥接服务。浏览器集测发现已有服务会报错提示停止；请先运行 `cargo build`，浏览器集测只检查并使用当前目录的 `target/debug/v4l2-stateful-rkmpp`，负责启停但不自动编译，未构建时直接报错。修改源码后需自行重新构建服务。测试不检查已加载模块是否与源码一致，请自行更新模块；通过只代表实际加载的模块通过验收。实际内核身份和浏览器使用的服务身份分别记录在 pytest 临时目录的 `kernel-runtime*/` 和各浏览器 case 的 `service-identity.json`。
 
 测试拦截库使用 Rust 的 `c_variadic` 特性实现 C 可变参数接口，因此其 Clippy、编译和测试需要 nightly；主服务使用 stable。
 
@@ -96,3 +96,5 @@ uv run python -m tests.tools.performance
 ```
 
 性能工具测量 H.264、VP9、AV1 4K30 的 CPU/GPU/MPP 占用与丢帧，报告保存到 `target/benchmarks/`；需对 `/proc/mpp_service/load_interval` 配置 video 组写权限。
+
+性能工具默认不采集合成器 CPU，可用 `--compositor-pid PID` 显式指定；报告中的 GPU、MPP 和合成器负载是共享负载。

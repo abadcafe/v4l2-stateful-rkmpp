@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.build_identity import (
+    existing_service_binary,
     service_binary,
     service_id,
 )
@@ -146,3 +147,42 @@ def test_service_id_missing_or_malformed_note_is_rejected(
 
     monkeypatch.setattr(subprocess, "run", extract)
     assert isinstance(service_id(tmp_path / "binary"), Rejected)
+
+
+def test_existing_service_binary_missing_reports_build_command(tmp_path: Path) -> None:
+    result = existing_service_binary(tmp_path)
+    assert isinstance(result, Rejected) and result.code == errno.ENOENT
+    assert "cargo build" in result.operation
+    assert "target/debug/v4l2-stateful-rkmpp" in result.operation
+
+
+def test_existing_service_binary_returns_executable_without_spawning_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary = tmp_path / "target/debug/v4l2-stateful-rkmpp"
+    binary.parent.mkdir(parents=True)
+    _ = binary.write_bytes(b"existing executable")
+    binary.chmod(0o755)
+
+    def unexpected(
+        arguments: list[str], *, cwd: Path, capture_output: bool
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert False, (
+            f"Unexpected subprocess: {arguments} at {cwd}, capture={capture_output}"
+        )
+
+    monkeypatch.setattr(subprocess, "run", unexpected)
+    result = existing_service_binary(tmp_path)
+    assert isinstance(result, Ok) and result.value == binary
+    assert binary.read_bytes() == b"existing executable"
+
+
+def test_existing_service_binary_not_executable_reports_permissions(
+    tmp_path: Path,
+) -> None:
+    binary = tmp_path / "target/debug/v4l2-stateful-rkmpp"
+    binary.parent.mkdir(parents=True)
+    _ = binary.write_bytes(b"not executable")
+    binary.chmod(0o644)
+    result = existing_service_binary(tmp_path)
+    assert isinstance(result, Rejected) and result.code == errno.EACCES

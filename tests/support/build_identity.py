@@ -1,10 +1,11 @@
 """module: build_identity; responsibility: identify builds of the current source.
 
-operations: service_binary, service_id; entities: none;
+operations: service_binary, existing_service_binary, service_id; entities: none;
 tests: build_identity_tests. Builds stay in the repository; nothing is installed.
 """
 
 import errno
+import os
 import subprocess
 from pathlib import Path
 
@@ -20,6 +21,18 @@ def _run(root: Path, arguments: list[str]) -> Result[bytes]:
         output = (process.stdout + process.stderr).decode(errors="replace")
         return Rejected(errno.EIO, f"Command {' '.join(arguments)} failed:\n{output}")
     return Ok(process.stdout)
+
+
+def existing_service_binary(root: Path) -> Result[Path]:
+    binary = root / "target/debug/v4l2-stateful-rkmpp"
+    if not binary.is_file():
+        return Rejected(
+            errno.ENOENT,
+            f"Service binary has not been built: {binary}. Run cargo build in the project root before running browser integration tests.",
+        )
+    if not os.access(binary, os.X_OK):
+        return Rejected(errno.EACCES, f"Service binary is not executable: {binary}")
+    return Ok(binary)
 
 
 def service_binary(root: Path) -> Result[Path]:

@@ -21,7 +21,7 @@ from tests.tools.report import Utilization
 
 _ROOT = Path(__file__).resolve().parents[2]
 _CONTROL = Path("/dev/v4l2-rkmpp-control")
-_HELP = """Video playback performance measurement (normal user, existing Wayland session).
+_HELP = """Video playback performance measurement (normal user, existing desktop session).
 Usage: uv run python -m tests.tools.performance [options]
   --codec h264|vp9|av1   Select presets; repeat to choose several, default all three.
   --video PATH          Measure a custom browser-compatible video instead of presets.
@@ -31,6 +31,7 @@ Usage: uv run python -m tests.tools.performance [options]
   --interval-ms MS      CPU/GPU/MPP sampling period (default 1000).
   --gpu-min-hz HZ       Request GPU minimum; omit to keep the system policy.
   --output DIRECTORY    New persistent output directory (default target/benchmarks/<time>).
+  --compositor-pid PID  Optionally sample this desktop compositor process; omitted by default.
   --service PATH        Service executable used only if no valid service is running.
   --help                Show this help.
 """

@@ -36,21 +36,11 @@ class Screenshot(BaseModel):
     data: str
 
 
-FLAGS = (
-    "--ignore-gpu-blocklist",
-    "--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,Vulkan",
-    "--disable-features=SkiaGraphite,ResolutionBasedDecoderPriority",
-    "--ozone-platform=wayland",
-    "--use-gl=angle",
-    "--use-angle=gl",
-)
-
-
 def test_browser_source_change_replaces_capture_and_displays_new_extent(
     browser_factory: BrowserFactory,
     tmp_path: Path,
 ) -> None:
-    browser = browser_factory(FLAGS)
+    browser = browser_factory(())
     assert accepted(
         browser.tab.evaluate(
             """(()=>{window.extents=[];const v=document.querySelector('#video');
@@ -114,7 +104,7 @@ def test_browser_source_change_replaces_capture_and_displays_new_extent(
 def test_browser_two_hardware_videos_complete_independently(
     browser_factory: BrowserFactory,
 ) -> None:
-    browser = browser_factory(FLAGS)
+    browser = browser_factory(())
     assert accepted(browser.player.load(browser.url("browser-vp9-10.webm")))
     assert accepted(browser.player.pause())
     assert accepted(
@@ -168,7 +158,7 @@ def test_browser_navigation_cancels_decode_releases_service_and_starts_fresh(
     bridge_service: Running,
     tmp_path: Path,
 ) -> None:
-    browser = browser_factory(FLAGS)
+    browser = browser_factory(())
     existing_sessions = set(accepted(sample(bridge_service)).sessions)
     # Establish a warm baseline after MPP/Vulkan initialization. Reload
     # destroys the old document; normal navigation may retain it in BFCache.

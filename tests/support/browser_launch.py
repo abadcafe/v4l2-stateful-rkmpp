@@ -1,6 +1,6 @@
 """module: browser_launch; responsibility: launch an owned background browser.
 
-operations: launch; entities: none; tests: browser_launch_tests.
+operations: launch, DECODE_FLAGS; entities: none; tests: browser_launch_tests.
 The current desktop environment is inherited; activation tokens are removed.
 """
 
@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import BinaryIO
 
 from tests.support.outcome import Ok, Rejected, Result
+
+DECODE_FLAGS = (
+    "--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL",
+    "--disable-features=ResolutionBasedDecoderPriority",
+)
 
 _CHROMIUM = Path("/usr/lib/chromium/chromium")
 
@@ -40,8 +45,8 @@ def launch(
                 "--disable-renderer-backgrounding",
                 "--disable-backgrounding-occluded-windows",
                 "--password-store=basic",
-                "--gtk-version=3",
                 "--enable-logging=stderr",
+                *DECODE_FLAGS,
                 *flags,
             ],
             env=environment,

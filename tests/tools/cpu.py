@@ -1,11 +1,10 @@
 """module: cpu; responsibility: account CPU time for owned process trees.
 
-operations: parse_stat, processes, compositor, account; entities: Process, Processes;
+operations: parse_stat, processes, account; entities: Process, Processes;
 tests: cpu_tests, direct performance tool runs; unit is one CPU core = 100%.
 """
 
 import errno
-import os
 import re
 from pathlib import Path
 
@@ -56,12 +55,14 @@ def parse_stat(raw: str, arguments: bytes) -> Result[Process]:
 
 
 def processes(
-    browser_pid: int, desktop_pid: int, proc: Path = _PROC
+    browser_pid: int, desktop_pid: int | None = None, proc: Path = _PROC
 ) -> Result[Processes]:
-    if browser_pid <= 0 or desktop_pid <= 0:
+    if browser_pid <= 0 or (desktop_pid is not None and desktop_pid <= 0):
         return Rejected(errno.EINVAL, "invalid workload process identity")
     values: Processes = {}
-    pending = [browser_pid, desktop_pid]
+    pending = [browser_pid]
+    if desktop_pid is not None:
+        pending.append(desktop_pid)
     visited: set[int] = set()
     while pending:
         pid = pending.pop()
@@ -102,31 +103,6 @@ def processes(
     return Ok(values)
 
 
-def compositor(proc: Path = _PROC) -> Result[int]:
-    pids: list[int] = []
-    try:
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                if (
-                    entry.stat().st_uid == os.geteuid()
-                    and (entry / "comm").read_text().strip() == "gnome-shell"
-                ):
-                    pids.append(int(entry.name))
-            except FileNotFoundError, ProcessLookupError:
-                continue
-    except OSError as error:
-        return Rejected(
-            error.errno or 0, f"read current user's compositor counters: {error}"
-        )
-    if len(pids) != 1:
-        return Rejected(
-            errno.ESRCH, "CPU sampling requires one current-user GNOME compositor"
-        )
-    return Ok(pids[0])
-
-
 def _descendants(values: Processes, root: int) -> set[int]:
     descendants = {root}
     while True:
@@ -142,7 +118,7 @@ def account(
     elapsed: float,
     ticks: int,
     browser_pid: int,
-    desktop_pid: int,
+    desktop_pid: int | None,
 ) -> Result[dict[str, float]]:
     if elapsed <= 0 or ticks <= 0:
         return Rejected(errno.EINVAL, "invalid CPU interval")
@@ -154,10 +130,11 @@ def account(
             "renderer",
             "gpu-process",
             "other-chromium",
-            "desktop-compositor",
         ],
         0.0,
     )
+    if desktop_pid is not None:
+        groups["desktop-compositor"] = 0.0
     for pid, p in now.items():
         old = previous.get(pid)
         if old is None or old.start != p.start:

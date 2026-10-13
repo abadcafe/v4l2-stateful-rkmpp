@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from tests.support.browser import Browser
+from tests.support.browser_launch import DECODE_FLAGS
 from tests.support.cdp import Payload
 from tests.support.diagnostics import Identity
 from tests.support.graphics import Info, get_info
@@ -26,21 +27,11 @@ from tests.support.pixels import crop_rgb, decode_png
 from tests.support.player import Playback, media_properties
 from tests.support.service_runtime import Running
 from tests.tools.controls import Settings
-from tests.tools.cpu import compositor
 from tests.tools.media import expand
 from tests.tools.options import Options, Workload
 from tests.tools.presentation import Monitor, Presentation
 from tests.tools.report import Sample, Utilization, summarize
 from tests.tools.telemetry import Sampler
-
-_FLAGS = (
-    "--ignore-gpu-blocklist",
-    "--enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,Vulkan",
-    "--disable-features=SkiaGraphite,ResolutionBasedDecoderPriority",
-    "--ozone-platform=wayland",
-    "--use-gl=angle",
-    "--use-angle=gl",
-)
 
 
 class Recording(BaseModel):
@@ -59,7 +50,7 @@ class Recording(BaseModel):
     source_metadata: VideoInfo | None = None
     chromium: Payload = Field(default_factory=dict)
     graphics: Info | None = None
-    flags: tuple[str, ...] = _FLAGS
+    flags: tuple[str, ...] = DECODE_FLAGS
     shared_desktop_pid: int | None = None
     counter_scope: str = "Chromium: owned process tree; service: entire process; desktop/GPU/MPP: shared system workload"
     outcome: Literal["running", "ended", "duration-limit", "failed", "cancelled"] = (
@@ -119,7 +110,7 @@ def record(
         if isinstance(setup, Rejected):
             output.failure = setup
         else:
-            opened = Browser.open(directory / "browser", (playback_source,), _FLAGS)
+            opened = Browser.open(directory / "browser", (playback_source,), ())
             if isinstance(opened, Rejected):
                 output.failure = opened
             else:
@@ -195,23 +186,15 @@ def _measure(
     if isinstance(info, Rejected):
         return info
     output.graphics = info.value
-    if info.value.skia != "GaneshVulkan" or "Mali-G610" not in info.value.renderer:
-        return Rejected(
-            errno.ENOTSUP,
-            "measurement requires the supported Mali/GaneshVulkan compositor",
-        )
     version = browser.control.call("Browser.getVersion")
     if isinstance(version, Rejected):
         return version
     output.chromium = version.value
-    desktop = compositor()
-    if isinstance(desktop, Rejected):
-        return desktop
-    output.shared_desktop_pid = desktop.value
+    output.shared_desktop_pid = options.compositor_pid
     loaded = browser.player.load(browser.url(playback_source.name))
     if isinstance(loaded, Rejected):
         return loaded
-    sampler = Sampler.open(browser.pid, running, desktop.value)
+    sampler = Sampler.open(browser.pid, running, options.compositor_pid)
     if isinstance(sampler, Rejected):
         return sampler
     observer = Monitor.start(browser.tab)
