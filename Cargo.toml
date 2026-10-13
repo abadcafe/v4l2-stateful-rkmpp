@@ -1,0 +1,15 @@
+[package]
+name = "v4l2-stateful-rkmpp"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+ash = { version = "0.38.0", default-features = false, features = ["linked", "std", "debug"] }
+libc = "0.2.189"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.143"
+
+[[bin]]
+name = "v4l2-stateful-rkmpp"
+path = "src/main.rs"

@@ -1,0 +1,31 @@
+[project]
+name = "v4l2-stateful-rkmpp"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic>=2.14",
+    "pytest>=8",
+    "ruff>=0.16",
+    "basedpyright>=1.31",
+    "websockets>=17",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_tests.py"]
+addopts = "-v --strict-config --strict-markers -ra"
+filterwarnings = ["error"]
+
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "ANN", "UP"]
+
+[tool.basedpyright]
+include = ["tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "all"

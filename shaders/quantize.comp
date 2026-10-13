@@ -1,0 +1,33 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Input { uint src[]; };
+layout(set=0,binding=1,std430) writeonly buffer Output { uint dst[]; };
+layout(push_constant) uniform Layout {
+  uint width,height,src_stride,src_rows,dst_stride,dst_rows;
+} p;
+void main() {
+  uint x=gl_GlobalInvocationID.x*4u, row=gl_GlobalInvocationID.y;
+  bool chroma=row>=p.height;
+  uint width=chroma?((p.width+1u)&~1u):p.width;
+  if(x>=width || row>=p.height+(p.height+1u)/2u)return;
+  uint y=chroma?row-p.height:row;
+  uint base=(y+(chroma?p.src_rows:0u))*p.src_stride;
+  // Four 10-bit samples span at most two uints; load each source word once.
+  uint bit=x*10u, index=base/4u+bit/32u, shift=bit%32u;
+  uint a=src[index], b=0u;
+  if(shift+min(4u,width-x)*10u>32u)b=src[index+1u];
+  uint low=shift==0u?a:((a>>shift)|(b<<(32u-shift)));
+  uint high=shift==0u?b:(b>>shift);
+  uint packed=0u;
+  const uint bayer[4]=uint[4](0u,2u,3u,1u);
+  for(uint i=0u;i<4u;i++) {
+    uint v=0u;
+    if(x+i<width) {
+      uint cx=chroma?(x+i)/2u:x+i;
+      uint t=bayer[(y&1u)*2u+(cx&1u)];
+      v=min(255u,(((i==3u?((low>>30u)|(high<<2u)):(low>>(i*10u)))&1023u)+t)/4u);
+    }
+    packed|=v<<(i*8u);
+  }
+  dst[((y+(chroma?p.dst_rows:0u))*p.dst_stride+x)/4u]=packed;
+}
