@@ -1,5 +1,7 @@
 # v4l2-stateful-rkmpp
 
+[简体中文](README.md) | [English](README.en.md)
+
 ## 简介
 
 为 RK3588 vendor 内核提供 V4L2 stateful 解码设备，通过 Rust 服务调用 Rockchip MPP，使 Chromium 使用硬件解码，无需修改 Chromium、Mesa 或 MPP。
