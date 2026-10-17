@@ -7,10 +7,12 @@
 //! test_reap_preserves_running_workers_until_join
 //! test_reap_completed_workers_allows_next_session
 use super::supervisor::Supervisor;
+use crate::shutdown::Signals;
 
 #[test]
 fn test_join_propagates_owned_worker_programming_panic() {
-  let mut supervisor = Supervisor::default();
+  let signals = Signals::install().unwrap();
+  let mut supervisor = Supervisor::new(signals.shutdown()).unwrap();
   supervisor.start(|| panic!("worker programming error")).unwrap();
   assert!(
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -24,12 +26,14 @@ use std::sync::{Arc, Barrier};
 
 #[test]
 fn test_join_empty_supervisor_completes() {
-  Supervisor::default().join();
+  let signals = Signals::install().unwrap();
+  Supervisor::new(signals.shutdown()).unwrap().join();
 }
 #[test]
 fn test_join_waits_for_all_owned_workers() {
   let completed = Arc::new(AtomicUsize::new(0));
-  let mut supervisor = Supervisor::default();
+  let signals = Signals::install().unwrap();
+  let mut supervisor = Supervisor::new(signals.shutdown()).unwrap();
   for _ in 0..4 {
     let completed = completed.clone();
     supervisor
@@ -45,7 +49,8 @@ fn test_join_waits_for_all_owned_workers() {
 fn test_reap_preserves_running_workers_until_join() {
   let completed = Arc::new(AtomicUsize::new(0));
   let barrier = Arc::new(Barrier::new(2));
-  let mut supervisor = Supervisor::default();
+  let signals = Signals::install().unwrap();
+  let mut supervisor = Supervisor::new(signals.shutdown()).unwrap();
   let signal = barrier.clone();
   let result = completed.clone();
   supervisor
@@ -63,7 +68,8 @@ fn test_reap_preserves_running_workers_until_join() {
 #[test]
 fn test_reap_completed_workers_allows_next_session() {
   let completed = Arc::new(AtomicUsize::new(0));
-  let mut supervisor = Supervisor::default();
+  let signals = Signals::install().unwrap();
+  let mut supervisor = Supervisor::new(signals.shutdown()).unwrap();
   for target in 1..4 {
     let counter = completed.clone();
     supervisor
@@ -81,4 +87,32 @@ fn test_reap_completed_workers_allows_next_session() {
   }
   supervisor.join();
   assert_eq!(completed.load(Ordering::Acquire), 3);
+}
+
+#[test]
+fn test_reap_panic_notifies_without_new_session_and_teardown_joins_survivor()
+ {
+  let signals = Signals::install().unwrap();
+  let mut supervisor = Supervisor::new(signals.shutdown()).unwrap();
+  let wake = supervisor.notification();
+  let finished = Arc::new(AtomicUsize::new(0));
+  let done = finished.clone();
+  let stop = signals.shutdown();
+  supervisor
+    .start(move || {
+      while !stop.stopping() {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+      }
+      done.store(1, Ordering::Release);
+    })
+    .unwrap();
+  supervisor.start(|| panic!("worker sentinel")).unwrap();
+  assert!(wake.wait(std::time::Duration::from_secs(5)).unwrap());
+  assert!(
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+      supervisor.reap();
+    }))
+    .is_err()
+  );
+  assert_eq!(finished.load(Ordering::Acquire), 1);
 }

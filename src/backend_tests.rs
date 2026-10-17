@@ -1,8 +1,9 @@
 //! module: backend_tests; responsibility: define the corresponding
 //! public module contract. operations: Rust test entrypoints; entities:
 //! none; tests:
-//! test_event_validates_events_and_resets_without_decoder
-//! test_register_and_event_reject_missing_pool_or_decoder_preconditions
+//! test_event_drains_and_resets_without_decoder
+//! test_register_accepts_early_capture_but_rejects_duplicate_pool
+//! test_register_defers_undersized_capture_until_layout_reset
 //! test_event_packet_rejects_pool_slot_length_and_duplicate_leases
 //! test_event_old_capture_recycle_cannot_acknowledge_new_layout
 use std::time::{Duration, Instant};
@@ -12,24 +13,66 @@ use crate::dma::Buffer;
 use crate::pool::{Direction, Pool};
 use crate::protocol::{Event, Message, Reply, VERSION};
 
+fn dispatch(
+  backend: &mut Backend,
+  message: Message,
+) -> std::io::Result<()> {
+  backend.event(crate::protocol::command::Command::try_from(message)?)
+}
+
 #[test]
-fn test_event_validates_events_and_resets_without_decoder() {
+fn test_invalid_input_completion_cannot_overtake_initial_picture() {
+  let bytes =
+    &include_bytes!("../tests/artifacts/h264-yuv420p.h264")[..4454];
+  let buffers = vec![
+    Buffer::allocate(bytes.len()).unwrap(),
+    Buffer::allocate(4096).unwrap(),
+  ];
+  let mut access = buffers[0].write().unwrap();
+  access[..bytes.len()].copy_from_slice(bytes);
+  access.finish().unwrap();
+  let mut access = buffers[1].write().unwrap();
+  access[0] = 0;
+  access.finish().unwrap();
+  let mut backend = Backend::new().unwrap();
+  backend
+    .register(Pool::new(Direction::Output, 1, buffers).unwrap())
+    .unwrap();
+  for (index, length) in [(0, bytes.len()), (1, 1)] {
+    dispatch(
+      &mut backend,
+      Message {
+        version: VERSION,
+        kind: Event::Packet as u32,
+        epoch: 1,
+        pool_id: 1,
+        index,
+        bytesused: length as u32,
+        codec: u32::from_le_bytes(*b"H264"),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+  }
+  assert!(backend.take_reply().is_none());
+}
+
+#[test]
+fn test_event_drains_and_resets_without_decoder() {
   let mut backend = Backend::new().unwrap();
   assert!(backend.take_reply().is_none());
   assert!(!backend.step().unwrap());
-  assert!(backend.event(Message::default()).is_err());
   let mut event = Message {
     version: VERSION,
     kind: Event::Drain as u32,
     ..Default::default()
   };
-  assert!(backend.event(event).is_err());
-  event.kind = 999;
-  assert!(backend.event(event).is_err());
+  dispatch(&mut backend, event).unwrap();
+  assert_eq!(backend.take_reply().unwrap().kind, Reply::Eos as u32);
   event.kind = Event::Reset as u32;
   event.epoch = 3;
   event.generation = 7;
-  backend.event(event).unwrap();
+  dispatch(&mut backend, event).unwrap();
   let reply = backend.take_reply().unwrap();
   assert_eq!(
     (reply.kind, reply.epoch, reply.generation),
@@ -39,29 +82,40 @@ fn test_event_validates_events_and_resets_without_decoder() {
 }
 
 #[test]
-fn test_register_and_event_reject_missing_pool_or_decoder_preconditions()
- {
-  for kind in [Event::Packet, Event::Recycle, Event::Drain] {
+fn test_register_accepts_early_capture_but_rejects_duplicate_pool() {
+  for kind in [Event::Packet, Event::Recycle] {
     let mut backend = Backend::new().unwrap();
     assert!(
-      backend
-        .event(Message {
+      dispatch(
+        &mut backend,
+        Message {
           version: VERSION,
           kind: kind as u32,
           epoch: 1,
           ..Default::default()
-        })
-        .is_err()
+        }
+      )
+      .is_err()
     );
     assert!(backend.take_reply().is_none());
   }
   let mut backend = Backend::new().unwrap();
+  backend
+    .register(
+      Pool::new(
+        Direction::Capture,
+        1,
+        vec![Buffer::allocate(4096).unwrap()],
+      )
+      .unwrap(),
+    )
+    .unwrap();
   assert!(
     backend
       .register(
         Pool::new(
           Direction::Capture,
-          1,
+          2,
           vec![Buffer::allocate(4096).unwrap()]
         )
         .unwrap()
@@ -69,50 +123,194 @@ fn test_register_and_event_reject_missing_pool_or_decoder_preconditions()
       .is_err()
   );
   assert!(
-    backend
-      .event(Message {
+    dispatch(
+      &mut backend,
+      Message {
         version: VERSION,
         kind: Event::Reset as u32,
         flags: Message::RESET_CAPTURE_ONLY,
         ..Default::default()
-      })
-      .is_err()
+      }
+    )
+    .is_ok()
   );
-  backend
-    .event(Message {
+  dispatch(
+    &mut backend,
+    Message {
       version: VERSION,
       kind: Event::Resume as u32,
       ..Default::default()
-    })
-    .unwrap();
-  backend
-    .event(Message {
+    },
+  )
+  .unwrap();
+  dispatch(
+    &mut backend,
+    Message {
       version: VERSION,
       kind: Event::Close as u32,
       ..Default::default()
-    })
+    },
+  )
+  .unwrap();
+}
+
+#[test]
+fn test_register_defers_undersized_capture_until_layout_reset() {
+  let bytes = std::fs::read(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/artifacts/vp9-yuv420p.ivf"
+  ))
+  .unwrap();
+  let size =
+    u32::from_le_bytes(bytes[32..36].try_into().unwrap()) as usize;
+  let input = Buffer::allocate(size).unwrap();
+  input.write().unwrap().copy_from_slice(&bytes[44..44 + size]);
+  let mut backend = Backend::new().unwrap();
+  backend
+    .register(Pool::new(Direction::Output, 1, vec![input]).unwrap())
     .unwrap();
+  let base =
+    Message { version: VERSION, epoch: 1, ..Default::default() };
+  dispatch(
+    &mut backend,
+    Message {
+      kind: Event::Packet as u32,
+      pool_id: 1,
+      codec: u32::from_le_bytes(*b"VP90"),
+      bytesused: size as u32,
+      ..base
+    },
+  )
+  .unwrap();
+  let deadline = Instant::now() + Duration::from_secs(5);
+  let mut input_returned = false;
+  loop {
+    assert!(Instant::now() < deadline);
+    backend.step().unwrap();
+    if let Some(reply) = backend.take_reply() {
+      if reply.kind == Reply::InputDone as u32 {
+        input_returned = true;
+      }
+      if reply.kind == Reply::Layout as u32 {
+        break;
+      }
+    }
+    std::thread::yield_now();
+  }
+  // REQBUFS used the initial 64x64 layout; STREAMON arrived after
+  // LAYOUT.
+  backend
+    .register(
+      Pool::new(
+        Direction::Capture,
+        1,
+        vec![Buffer::allocate(6144).unwrap()],
+      )
+      .unwrap(),
+    )
+    .unwrap();
+  dispatch(
+    &mut backend,
+    Message {
+      kind: Event::Capture as u32,
+      pool_id: 1,
+      count: 1,
+      ..base
+    },
+  )
+  .unwrap();
+  dispatch(
+    &mut backend,
+    Message { kind: Event::Recycle as u32, pool_id: 1, ..base },
+  )
+  .unwrap();
+  for _ in 0..32 {
+    backend.step().unwrap();
+    while let Some(reply) = backend.take_reply() {
+      assert_ne!(reply.kind, Reply::Frame as u32);
+      input_returned |= reply.kind == Reply::InputDone as u32;
+    }
+  }
+  dispatch(
+    &mut backend,
+    Message {
+      kind: Event::Reset as u32,
+      flags: Message::RESET_CAPTURE_ONLY,
+      generation: 1,
+      ..base
+    },
+  )
+  .unwrap();
+  assert_eq!(backend.take_reply().unwrap().kind, Reply::Stopped as u32);
+  backend
+    .register(
+      Pool::new(
+        Direction::Capture,
+        2,
+        (0..20)
+          .map(|_| Buffer::allocate(256 * 128 * 2).unwrap())
+          .collect(),
+      )
+      .unwrap(),
+    )
+    .unwrap();
+  let capture = Message { pool_id: 2, generation: 1, ..base };
+  dispatch(
+    &mut backend,
+    Message { kind: Event::Capture as u32, count: 20, ..capture },
+  )
+  .unwrap();
+  for _ in 0..32 {
+    backend.step().unwrap();
+    assert!(
+      backend.take_reply().is_none(),
+      "unqueued capture became writable"
+    );
+  }
+  for index in 0..20 {
+    dispatch(
+      &mut backend,
+      Message { kind: Event::Recycle as u32, index, ..capture },
+    )
+    .unwrap();
+  }
+  let mut frame_seen = false;
+  loop {
+    assert!(Instant::now() < deadline);
+    backend.step().unwrap();
+    while let Some(reply) = backend.take_reply() {
+      if reply.kind == Reply::Frame as u32 {
+        frame_seen = true;
+      }
+      if reply.kind == Reply::InputDone as u32 {
+        input_returned = true;
+      }
+    }
+    if frame_seen && input_returned {
+      return;
+    }
+    std::thread::yield_now();
+  }
 }
 
 #[test]
 fn test_event_packet_rejects_pool_slot_length_and_duplicate_leases() {
   let mut backend = Backend::new().unwrap();
+  let input = Buffer::allocate(8192).unwrap();
+  let stream = include_bytes!("../tests/artifacts/vp9-yuv420p.ivf");
+  let size =
+    u32::from_le_bytes(stream[32..36].try_into().unwrap()) as usize;
+  input.write().unwrap()[..size]
+    .copy_from_slice(&stream[44..44 + size]);
   backend
-    .register(
-      Pool::new(
-        Direction::Output,
-        7,
-        vec![Buffer::allocate(4096).unwrap()],
-      )
-      .unwrap(),
-    )
+    .register(Pool::new(Direction::Output, 7, vec![input]).unwrap())
     .unwrap();
   let base = Message {
     version: VERSION,
     kind: Event::Packet as u32,
     pool_id: 7,
-    codec: u32::from_le_bytes(*b"H264"),
-    bytesused: 16,
+    codec: u32::from_le_bytes(*b"VP90"),
+    bytesused: size as u32,
     epoch: 1,
     ..Default::default()
   };
@@ -120,33 +318,35 @@ fn test_event_packet_rejects_pool_slot_length_and_duplicate_leases() {
     Message { pool_id: 8, ..base },
     Message { index: 1, ..base },
     Message { bytesused: 0, ..base },
-    Message { bytesused: 4097, ..base },
+    Message { bytesused: 8193, ..base },
   ] {
-    assert!(backend.event(event).is_err());
+    assert!(dispatch(&mut backend, event).is_err());
   }
-  backend.event(base).unwrap();
-  assert!(backend.event(base).is_err());
+  dispatch(&mut backend, base).unwrap();
+  assert!(dispatch(&mut backend, base).is_err());
   assert!(
     backend
       .register(
         Pool::new(
           Direction::Output,
           8,
-          vec![Buffer::allocate(4096).unwrap()]
+          vec![Buffer::allocate(8192).unwrap()]
         )
         .unwrap()
       )
       .is_err()
   );
-  backend
-    .event(Message {
+  dispatch(
+    &mut backend,
+    Message {
       version: VERSION,
       kind: Event::Reset as u32,
       epoch: 2,
       generation: 3,
       ..Default::default()
-    })
-    .unwrap();
+    },
+  )
+  .unwrap();
   let reply = backend.take_reply().unwrap();
   assert_eq!(
     (reply.kind, reply.epoch, reply.generation),
@@ -199,26 +399,27 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
     if input_free && next < packets.len() {
       input.write().unwrap()[..packets[next].len()]
         .copy_from_slice(packets[next]);
-      backend
-        .event(Message {
+      dispatch(
+        &mut backend,
+        Message {
           kind: Event::Packet as u32,
           pool_id: 1,
           codec: u32::from_le_bytes(*b"VP90"),
           bytesused: packets[next].len() as u32,
           timestamp: next as u64,
           ..base(generation)
-        })
-        .unwrap();
+        },
+      )
+      .unwrap();
       next += 1;
       input_free = false;
     }
     if next == packets.len() && input_free && !draining {
-      backend
-        .event(Message {
-          kind: Event::Drain as u32,
-          ..base(generation)
-        })
-        .unwrap();
+      dispatch(
+        &mut backend,
+        Message { kind: Event::Drain as u32, ..base(generation) },
+      )
+      .unwrap();
       draining = true;
     }
     backend.step().unwrap();
@@ -227,14 +428,16 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
         input_free = true;
       } else if reply.kind == Reply::Frame as u32 {
         frames += 1;
-        backend
-          .event(Message {
+        dispatch(
+          &mut backend,
+          Message {
             kind: Event::Recycle as u32,
             pool_id: capture_id,
             index: reply.index,
             ..base(generation)
-          })
-          .unwrap();
+          },
+        )
+        .unwrap();
       } else if reply.kind == Reply::Layout as u32 {
         layouts += 1;
         if layouts == 2 {
@@ -242,13 +445,15 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
           assert_eq!((reply.width, reply.height), (512, 256));
           // Deliberately recycle the old pool before acknowledging its
           // replacement.
-          backend
-            .event(Message {
+          dispatch(
+            &mut backend,
+            Message {
               kind: Event::Recycle as u32,
               pool_id: capture_id,
               ..base(generation)
-            })
-            .unwrap();
+            },
+          )
+          .unwrap();
           let settle = Instant::now() + Duration::from_millis(250);
           while Instant::now() < settle {
             backend.step().unwrap();
@@ -264,13 +469,15 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
             wake.drain().unwrap();
           }
           generation += 1;
-          backend
-            .event(Message {
+          dispatch(
+            &mut backend,
+            Message {
               kind: Event::Reset as u32,
               flags: Message::RESET_CAPTURE_ONLY,
               ..base(generation)
-            })
-            .unwrap();
+            },
+          )
+          .unwrap();
         }
         capture_id += 1;
         backend
@@ -285,23 +492,27 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
             .unwrap(),
           )
           .unwrap();
-        backend
-          .event(Message {
+        dispatch(
+          &mut backend,
+          Message {
             kind: Event::Capture as u32,
             pool_id: capture_id,
             count: 8,
             ..base(generation)
-          })
-          .unwrap();
+          },
+        )
+        .unwrap();
         for index in 0..8 {
-          backend
-            .event(Message {
+          dispatch(
+            &mut backend,
+            Message {
               kind: Event::Recycle as u32,
               pool_id: capture_id,
               index,
               ..base(generation)
-            })
-            .unwrap();
+            },
+          )
+          .unwrap();
         }
       } else if reply.kind == Reply::Eos as u32 {
         eos = true;
@@ -313,4 +524,46 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
     wake.drain().unwrap();
   }
   assert_eq!((layouts, frames), (2, 48));
+}
+
+#[test]
+fn test_event_drain_accepts_maximum_registered_inputs() {
+  let codec = u32::from_le_bytes(*b"H264");
+  let picture =
+    &include_bytes!("../tests/artifacts/h264-yuv420p.h264")[..4454];
+  let buffers = (0..32)
+    .map(|_| {
+      let buffer = Buffer::allocate(picture.len()).unwrap();
+      buffer.write().unwrap().copy_from_slice(picture);
+      buffer
+    })
+    .collect();
+  let mut backend = Backend::new().unwrap();
+  backend
+    .register(Pool::new(Direction::Output, 1, buffers).unwrap())
+    .unwrap();
+  for index in 0..32 {
+    dispatch(
+      &mut backend,
+      Message {
+        version: VERSION,
+        kind: Event::Packet as u32,
+        pool_id: 1,
+        index,
+        codec,
+        bytesused: picture.len() as u32,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+  }
+  dispatch(
+    &mut backend,
+    Message {
+      version: VERSION,
+      kind: Event::Drain as u32,
+      ..Default::default()
+    },
+  )
+  .unwrap();
 }

@@ -122,3 +122,29 @@ fn test_block_worker_blocks_termination_on_owned_thread() {
   .join()
   .unwrap();
 }
+
+#[test]
+fn test_wait_timeout_and_cross_thread_shutdown() {
+  let signals = Signals::install().unwrap();
+  let started = std::time::Instant::now();
+  signals.wait(Duration::from_millis(20)).unwrap();
+  assert!(started.elapsed() >= Duration::from_millis(20));
+  let stop = signals.shutdown();
+  let thread = std::thread::spawn(move || stop.request());
+  let began = std::time::Instant::now();
+  signals.wait(Duration::from_secs(5)).unwrap();
+  thread.join().unwrap();
+  assert!(began.elapsed() < Duration::from_secs(1));
+  assert!(signals.shutdown().stopping());
+}
+
+#[test]
+fn test_wait_pending_termination_interrupts_backoff() {
+  let signals = Signals::install().unwrap();
+  assert_eq!(
+    unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) },
+    0
+  );
+  signals.wait(Duration::from_secs(5)).unwrap();
+  assert!(signals.shutdown().stopping());
+}

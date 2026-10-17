@@ -12,8 +12,13 @@ use std::path::Path;
 
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool as RegisteredPool};
-use crate::protocol::{Batch, Pool, VERSION};
+use crate::protocol::registration::Pool;
+use crate::protocol::{Batch, VERSION};
 use crate::shutdown::{Shutdown, Signals};
+mod admission;
+#[cfg(test)]
+mod admission_tests;
+pub use admission::Admission;
 pub struct Broker(OwnedFd);
 pub struct Session(OwnedFd);
 mod registration;
@@ -45,7 +50,8 @@ impl Broker {
   pub fn accept(
     &self,
     signals: &Signals,
-  ) -> io::Result<Option<Session>> {
+    workers: &Notify,
+  ) -> io::Result<Admission> {
     let mut fds = [
       libc::pollfd {
         fd: self.0.as_raw_fd(),
@@ -57,25 +63,49 @@ impl Broker {
         events: libc::POLLIN,
         revents: 0,
       },
+      libc::pollfd {
+        fd: workers.as_fd().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+      },
+      libc::pollfd {
+        fd: signals.shutdown().as_fd().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+      },
     ];
-    if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
-      return Err(io::Error::last_os_error());
+    if unsafe {
+      libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1)
+    } < 0
+    {
+      let error = io::Error::last_os_error();
+      return if error.kind() == io::ErrorKind::Interrupted {
+        Ok(Admission::Idle)
+      } else {
+        Err(error)
+      };
     }
     if fds[1].revents & libc::POLLIN != 0 {
       signals.consume()?;
-      return Ok(None);
+      return Ok(Admission::Idle);
     }
     if signals.shutdown().stopping() {
-      return Ok(None);
+      return Ok(Admission::Idle);
+    }
+    if fds[2].revents & libc::POLLIN != 0 {
+      workers.drain()?;
+      return Ok(Admission::Idle);
     }
     const ACCEPT: libc::c_ulong = ((b'R' as libc::c_ulong) << 8) | 0x80;
     let fd = unsafe { libc::ioctl(self.0.as_raw_fd(), ACCEPT) };
     if fd < 0 {
-      return Err(io::Error::last_os_error());
+      return Admission::classify(io::Error::last_os_error());
     }
     // SAFETY: ACCEPT installs and returns a fresh session fd in this
     // process.
-    Ok(Some(Session::from(unsafe { OwnedFd::from_raw_fd(fd) })))
+    Ok(Admission::Accepted(Session::from(unsafe {
+      OwnedFd::from_raw_fd(fd)
+    })))
   }
 }
 impl Session {

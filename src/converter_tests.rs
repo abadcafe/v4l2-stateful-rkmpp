@@ -24,7 +24,7 @@ fn take<T: Input>(
 ) -> Completion<T> {
   let deadline = Instant::now() + Duration::from_secs(5);
   loop {
-    if let Some(completion) = converter.take() {
+    if let Some(completion) = converter.take().unwrap() {
       return completion;
     }
     assert!(
@@ -39,7 +39,7 @@ fn take<T: Input>(
 fn test_new_empty_converter_has_no_completion() {
   let mut converter =
     Converter::<Image>::new(Notify::new().unwrap()).unwrap();
-  assert!(converter.take().is_none());
+  assert!(converter.take().unwrap().is_none());
 }
 #[test]
 fn test_submit_completions_preserve_fifo_tokens_and_input_ownership() {
@@ -60,7 +60,7 @@ fn test_submit_completions_preserve_fifo_tokens_and_input_ownership() {
       (64, 32)
     );
   }
-  assert!(converter.take().is_none());
+  assert!(converter.take().unwrap().is_none());
 }
 #[test]
 fn test_submit_full_retains_rejected_job_and_completion_releases_capacity()
@@ -161,6 +161,64 @@ fn test_drop_propagates_worker_programming_panic() {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(
       converter
     )))
+    .is_err()
+  );
+}
+
+#[test]
+fn test_take_observes_worker_panic_without_drop_and_rejects_more_work()
+{
+  let wake = Notify::new().unwrap();
+  let mut converter = Converter::new(wake.clone()).unwrap();
+  converter
+    .submit(Job::new(
+      0,
+      (32, 32),
+      PanickingInput(Arc::new(AtomicBool::new(false))),
+      image(),
+    ))
+    .unwrap();
+  assert!(wake.wait(Duration::from_secs(5)).unwrap());
+  assert!(
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      converter.take()
+    }))
+    .is_err()
+  );
+  let rejected = converter
+    .submit(Job::new(
+      1,
+      (32, 32),
+      PanickingInput(Arc::new(AtomicBool::new(false))),
+      image(),
+    ))
+    .unwrap_err();
+  assert!(!rejected.is_full());
+  assert!(converter.take().is_err());
+}
+
+#[test]
+fn test_submit_observes_worker_panic_before_admitting_new_job() {
+  let wake = Notify::new().unwrap();
+  let mut converter = Converter::new(wake.clone()).unwrap();
+  converter
+    .submit(Job::new(
+      0,
+      (32, 32),
+      PanickingInput(Arc::new(AtomicBool::new(false))),
+      image(),
+    ))
+    .unwrap();
+  assert!(wake.wait(Duration::from_secs(5)).unwrap());
+  assert!(
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      converter.submit(Job::new(
+        1,
+        (32, 32),
+        PanickingInput(Arc::new(AtomicBool::new(false))),
+        image(),
+      ))
+    }))
     .is_err()
   );
 }

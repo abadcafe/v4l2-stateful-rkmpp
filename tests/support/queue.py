@@ -75,9 +75,12 @@ class Queue:
         result = ioctl(self._fd, command(3, "V", 9, ctypes.sizeof(payload)), payload)
         return Ok(self._describe(payload, planes)) if isinstance(result, Ok) else result
 
-    def queue(self, index: int, bytesused: int = 0, timestamp: int = 0) -> Result[None]:
+    def queue(
+        self, index: int, bytesused: int = 0, timestamp: int = 0, data_offset: int = 0
+    ) -> Result[None]:
         payload, planes = self._buffer(index)
         Plane.from_buffer(planes).bytesused = bytesused
+        Plane.from_buffer(planes).data_offset = data_offset
         payload.timestamp.seconds, payload.timestamp.microseconds = divmod(
             timestamp, 1000000
         )

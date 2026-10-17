@@ -9,6 +9,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::notify::Notify;
 struct State {
@@ -96,6 +97,52 @@ impl Signals {
       || info.ssi_signo == libc::SIGINT as u32
     {
       self.shutdown.request();
+    }
+    Ok(())
+  }
+
+  /// Wait without consuming broker readiness; termination interrupts
+  /// backoff.
+  pub fn wait(&self, duration: Duration) -> io::Result<()> {
+    let started = Instant::now();
+    while !self.shutdown.stopping() {
+      let remaining = duration.saturating_sub(started.elapsed());
+      if remaining.is_zero() {
+        return Ok(());
+      }
+      let mut fds = [
+        libc::pollfd {
+          fd: self.fd.as_raw_fd(),
+          events: libc::POLLIN,
+          revents: 0,
+        },
+        libc::pollfd {
+          fd: self.shutdown.as_fd().as_raw_fd(),
+          events: libc::POLLIN,
+          revents: 0,
+        },
+      ];
+      let milliseconds =
+        remaining.as_millis().saturating_add(1).min(i32::MAX as u128)
+          as i32;
+      let status =
+        unsafe { libc::poll(fds.as_mut_ptr(), 2, milliseconds) };
+      if status < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+          continue;
+        }
+        return Err(error);
+      }
+      if fds.iter().any(|fd| {
+        fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
+          != 0
+      }) {
+        return Err(io::Error::other("termination descriptor failed"));
+      }
+      if fds[0].revents & libc::POLLIN != 0 {
+        self.consume()?;
+      }
     }
     Ok(())
   }

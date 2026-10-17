@@ -36,7 +36,8 @@ from tests.support.stream import Codec
         ),
     ],
 )
-def test_decode_changed_layout_replaces_pool_and_preserves_every_pixel(
+@pytest.mark.parametrize("reuse", [False, True])
+def test_decode_changed_layout_preserves_every_pixel(
     mock_service: Process,
     artifacts: Path,
     codec: Codec,
@@ -45,15 +46,37 @@ def test_decode_changed_layout_replaces_pool_and_preserves_every_pixel(
     second: str,
     depth: int,
     second_count: int,
+    reuse: bool,
 ) -> None:
     expected = accepted(frame_hashes(artifacts / first, depth, 256, 128)) + accepted(
         frame_hashes(artifacts / second, depth, 512, 256)
     )
-    result = accepted(play(mock_service, codec, artifacts / file))
+    result = accepted(
+        play(
+            mock_service,
+            codec,
+            artifacts / file,
+            initial_capture_size=512 * 256 * 3 if reuse else 0,
+            reuse_capture=reuse,
+        )
+    )
+    assert all(frame.flags == 0 for frame in result.frames), [
+        frame.flags for frame in result.frames
+    ]
     assert result.eos and len(result.frames) == 36 + second_count
-    assert tuple(frame.digest for frame in result.frames) == expected
+    assert len(result.frames) == len(expected)
+    mismatches = [
+        (index, frame.width, frame.height, frame.digest, digest)
+        for index, (frame, digest) in enumerate(
+            zip(result.frames, expected, strict=True)
+        )
+        if frame.digest != digest
+    ]
+    assert not mismatches, mismatches
     assert [(frame.width, frame.height) for frame in result.frames] == [
         (256, 128)
     ] * 36 + [(512, 256)] * second_count
     assert result.layouts == ((256, 128), (512, 256))
-    assert result.registrations == ((10, 1), (9, 1), (9, 2))
+    assert result.registrations == (
+        ((9, 1), (10, 1)) if reuse else ((10, 1), (9, 1), (9, 2))
+    )

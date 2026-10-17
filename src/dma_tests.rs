@@ -78,3 +78,46 @@ fn test_from_owned_non_dma_mapping_error_does_not_poison_cpu_access() {
   }
   assert_eq!(buffer.size(), 4096);
 }
+
+#[test]
+fn test_from_owned_duplicate_storage_shares_cpu_lease_across_sizes() {
+  let original = Buffer::allocate(4096).unwrap();
+  let alias = Buffer::from_owned(
+    original.as_fd().try_clone_to_owned().unwrap(),
+    2048,
+  )
+  .unwrap();
+  assert_eq!(alias.size(), 2048);
+  let lease = original.write().unwrap();
+  assert_eq!(
+    alias.read().err().unwrap().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+  assert_eq!(
+    alias.write().err().unwrap().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+  drop(original);
+  assert!(alias.read().is_err());
+  lease.finish().unwrap();
+  alias.write().unwrap().finish().unwrap();
+}
+
+#[test]
+fn test_from_owned_concurrent_import_cannot_acquire_active_storage() {
+  let original = Buffer::allocate(4096).unwrap();
+  let lease = original.read().unwrap();
+  std::thread::scope(|scope| {
+    for _ in 0..8 {
+      let fd = original.as_fd().try_clone_to_owned().unwrap();
+      scope.spawn(move || {
+        let alias = Buffer::from_owned(fd, 4096).unwrap();
+        assert_eq!(
+          alias.write().err().unwrap().kind(),
+          std::io::ErrorKind::WouldBlock
+        );
+      });
+    }
+  });
+  lease.finish().unwrap();
+}

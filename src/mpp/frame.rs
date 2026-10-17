@@ -15,6 +15,8 @@ unsafe extern "C" {
   fn mpp_frame_get_hor_stride(frame: *mut c_void) -> u32;
   fn mpp_frame_get_ver_stride(frame: *mut c_void) -> u32;
   fn mpp_frame_get_buf_size(frame: *mut c_void) -> usize;
+  fn mpp_frame_get_mode(frame: *mut c_void) -> u32;
+  fn mpp_frame_get_dts(frame: *mut c_void) -> i64;
   fn mpp_frame_get_pts(frame: *mut c_void) -> i64;
   fn mpp_frame_get_errinfo(frame: *mut c_void) -> u32;
   fn mpp_frame_get_discard(frame: *mut c_void) -> u32;
@@ -53,6 +55,8 @@ pub struct FrameInfo {
   pub size: usize,
   pub format: u32,
   pub timestamp: u64,
+  pub timestamp_source: u32,
+  pub field: u32,
   pub eos: bool,
   pub info_change: bool,
   pub failed: bool,
@@ -85,6 +89,15 @@ impl Frame {
         size: mpp_frame_get_buf_size(frame),
         format: mpp_frame_get_fmt(frame) & !0x0c000000,
         timestamp: mpp_frame_get_pts(frame) as u64,
+        timestamp_source: mpp_frame_get_dts(frame) as u32,
+        field: match mpp_frame_get_mode(frame) & 15 {
+          1 => 3,
+          2 => 4,
+          7 => 1,
+          11 => 2,
+          3 | 15 => 5,
+          _ => 0,
+        },
         eos: mpp_frame_get_eos(frame) != 0,
         info_change: mpp_frame_get_info_change(frame) != 0,
         failed: mpp_frame_get_errinfo(frame) != 0

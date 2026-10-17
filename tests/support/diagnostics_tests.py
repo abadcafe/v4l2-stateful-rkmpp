@@ -9,7 +9,9 @@ import json
 import os
 import socket
 import threading
+import time
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -140,3 +142,32 @@ def test_query_invalid_session_inventory_is_rejected(
     endpoint = tmp_path / "status.sock"
     with _server(endpoint, json.dumps(status).encode() + b"\n"):
         assert isinstance(query(endpoint), Rejected)
+
+
+def test_query_waits_for_peer_to_close_its_transient_descriptor(tmp_path: Path) -> None:
+    endpoint = tmp_path / "status.sock"
+    sent = threading.Event()
+    close = threading.Event()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(endpoint))
+        listener.listen(1)
+
+        def respond() -> None:
+            connection = listener.accept()[0]
+            with connection:
+                assert connection.recv(64) == b"snapshot\n"
+                connection.sendall(json.dumps(_status()).encode() + b"\n")
+                sent.set()
+                assert close.wait(2)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            server = executor.submit(respond)
+            client = executor.submit(query, endpoint)
+            try:
+                assert sent.wait(1)
+                time.sleep(0.05)
+                assert not client.done()
+            finally:
+                close.set()
+            assert accepted(client.result(timeout=1)).fds == 7
+            server.result(timeout=1)

@@ -27,6 +27,7 @@ use super::worker::{Channel, Engine, run};
 use crate::dma::Buffer;
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
+use crate::protocol::command::Command;
 use crate::protocol::{Batch, Event, Message, Reply, VERSION};
 use crate::shutdown::{Shutdown, Signals};
 
@@ -99,8 +100,8 @@ impl Engine for Decoder {
     Ok(())
   }
 
-  fn event(&mut self, message: Message) -> io::Result<()> {
-    self.seen.borrow_mut().events.push(message);
+  fn event(&mut self, command: Command) -> io::Result<()> {
+    self.seen.borrow_mut().events.push(*command.message());
     if self.event_error {
       Err(io::Error::other("event rejected"))
     } else {
@@ -414,4 +415,33 @@ fn test_run_backend_progress_error_sends_failed_reply() {
     seen.borrow().replies.last().unwrap()[0].kind,
     Reply::Failed as u32
   );
+}
+
+#[test]
+fn test_run_rejects_reserved_before_close_registration_or_engine_mutation()
+ {
+  for kind in [
+    Event::Packet,
+    Event::Capture,
+    Event::Recycle,
+    Event::Drain,
+    Event::Reset,
+    Event::Close,
+    Event::Resume,
+  ] {
+    let mut invalid = message(kind as u32, 9);
+    invalid.reserved = [1];
+    let (mut control, engine, seen) =
+      fixture(vec![Ok(batch(&[invalid]))]);
+    let signals = Signals::install().unwrap();
+    assert!(run(&mut control, engine, &signals.shutdown()).is_err());
+    let seen = seen.borrow();
+    assert!(seen.events.is_empty() && seen.pools.is_empty());
+    assert!(seen.dropped);
+    let failed = seen.replies.last().unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].kind, Reply::Failed as u32);
+    assert_eq!(failed[0].reserved, [0]);
+    assert_eq!(failed[0].epoch, invalid.epoch);
+  }
 }

@@ -7,6 +7,7 @@ use super::worker::{self, Channel, Engine};
 use crate::backend::Backend;
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
+use crate::protocol::command::Command;
 use crate::protocol::{Batch, Message};
 use crate::shutdown::{Shutdown, Signals};
 use crate::transport::Session;
@@ -41,8 +42,8 @@ impl Engine for Backend {
     Backend::register(self, pool)
   }
 
-  fn event(&mut self, message: Message) -> io::Result<()> {
-    Backend::event(self, message)
+  fn event(&mut self, command: Command) -> io::Result<()> {
+    Backend::event(self, command)
   }
 
   fn step(&mut self) -> io::Result<bool> {

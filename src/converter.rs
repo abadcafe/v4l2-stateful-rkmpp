@@ -4,14 +4,18 @@
 //! tests: converter_tests; ownership is returned on backpressure or
 //! completion, and Drop joins GPU work.
 use std::collections::VecDeque;
+use std::io;
 use std::sync::{Arc, Condvar, Mutex};
-use std::{io, thread};
 
-use crate::image::{Image, Plane};
+use crate::image::{Depth, Image, Plane};
 use crate::notify::Notify;
 use crate::quantize::Quantizer;
+use crate::task::Task;
 pub trait Input: Send + 'static {
   fn plane(&self) -> Plane<'_>;
+  fn depth(&self) -> Depth {
+    Depth::Ten
+  }
 }
 impl Input for Image {
   fn plane(&self) -> Plane<'_> {
@@ -73,7 +77,7 @@ struct State<T> {
 }
 pub struct Converter<T: Input> {
   state: Arc<(Mutex<State<T>>, Condvar)>,
-  worker: Option<thread::JoinHandle<()>>,
+  worker: Option<Task>,
 }
 impl<T: Input> Converter<T> {
   pub fn new(notify: Notify) -> io::Result<Self> {
@@ -88,9 +92,8 @@ impl<T: Input> Converter<T> {
       Condvar::new(),
     ));
     let shared = state.clone();
-    let worker = thread::Builder::new()
-      .name("nv15-quantize".into())
-      .spawn(move || {
+    let worker =
+      Task::spawn("nv15-quantize", notify.clone(), move || {
         let (mutex, ready) = &*shared;
         loop {
           let job = {
@@ -104,6 +107,7 @@ impl<T: Input> Converter<T> {
             state.jobs.pop_front().unwrap()
           };
           let result = quantizer.convert(
+            job.input.depth(),
             job.extent.0,
             job.extent.1,
             job.input.plane(),
@@ -120,6 +124,9 @@ impl<T: Input> Converter<T> {
   }
 
   pub fn submit(&mut self, job: Job<T>) -> Result<(), SubmitError<T>> {
+    if !self.running() {
+      return Err(SubmitError { job, full: false });
+    }
     let (mutex, ready) = &*self.state;
     let mut state = mutex.lock().unwrap();
     if state.stop || state.outstanding == 3 {
@@ -131,24 +138,49 @@ impl<T: Input> Converter<T> {
     Ok(())
   }
 
-  pub fn take(&mut self) -> Option<Completion<T>> {
+  fn running(&mut self) -> bool {
+    if self.worker.as_ref().is_some_and(Task::finished)
+      && let Err(panic) = self.worker.take().unwrap().join()
+    {
+      std::panic::resume_unwind(panic);
+    }
+    self.worker.is_some()
+  }
+
+  pub fn take(&mut self) -> io::Result<Option<Completion<T>>> {
+    if !self.running() {
+      return Err(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "conversion worker terminated",
+      ));
+    }
     let mut state = self.state.0.lock().unwrap();
-    let result = state.completed.pop_front()?;
-    state.outstanding -= 1;
-    Some(result)
+    let result = state.completed.pop_front();
+    if result.is_some() {
+      state.outstanding -= 1;
+    }
+    Ok(result)
   }
 }
 impl<T: Input> Drop for Converter<T> {
   fn drop(&mut self) {
     {
-      let mut state = self.state.0.lock().unwrap();
+      let mut state = self
+        .state
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
       state.stop = true;
       self.state.1.notify_one();
     }
     if let Some(worker) = self.worker.take()
       && let Err(panic) = worker.join()
     {
-      std::panic::resume_unwind(panic);
+      if std::thread::panicking() {
+        eprintln!("additional converter panic during unwind");
+      } else {
+        std::panic::resume_unwind(panic);
+      }
     }
     // Queued inputs and completed results retain their frame/buffer
     // leases until the worker stops.

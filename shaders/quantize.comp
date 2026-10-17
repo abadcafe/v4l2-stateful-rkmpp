@@ -3,7 +3,7 @@ layout(local_size_x=64) in;
 layout(set=0,binding=0,std430) readonly buffer Input { uint src[]; };
 layout(set=0,binding=1,std430) writeonly buffer Output { uint dst[]; };
 layout(push_constant) uniform Layout {
-  uint width,height,src_stride,src_rows,dst_stride,dst_rows;
+  uint width,height,src_stride,src_rows,dst_stride,dst_rows,depth;
 } p;
 void main() {
   uint x=gl_GlobalInvocationID.x*4u, row=gl_GlobalInvocationID.y;
@@ -12,6 +12,12 @@ void main() {
   if(x>=width || row>=p.height+(p.height+1u)/2u)return;
   uint y=chroma?row-p.height:row;
   uint base=(y+(chroma?p.src_rows:0u))*p.src_stride;
+  if(p.depth==8u) {
+    uint word=src[(base+x)/4u];
+    if(width-x<4u)word&=(1u<<((width-x)*8u))-1u;
+    dst[((y+(chroma?p.dst_rows:0u))*p.dst_stride+x)/4u]=word;
+    return;
+  }
   // Four 10-bit samples span at most two uints; load each source word once.
   uint bit=x*10u, index=base/4u+bit/32u, shift=bit%32u;
   uint a=src[index], b=0u;

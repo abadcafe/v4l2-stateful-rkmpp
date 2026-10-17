@@ -33,13 +33,19 @@ def test_parse_ivf_preserves_payloads_and_converts_timebase(codec: Codec) -> Non
     assert [(p.data, p.timestamp) for p in packets] == [(b"one", 0), (b"two", 500000)]
 
 
-@pytest.mark.parametrize("codec", [Codec.H264, Codec.HEVC])
-def test_parse_annex_b_preserves_complete_compressed_input(codec: Codec) -> None:
-    payload = b"\x00\x00\x00\x01sample"
-    packets = accepted(parse(codec, payload))
-    assert (
-        len(packets) == 1 and packets[0].data == payload and packets[0].timestamp == 0
-    )
+@pytest.mark.parametrize(
+    "codec,file,first_size",
+    [(Codec.H264, "h264-yuv420p.h264", 4454), (Codec.HEVC, "hevc-yuv420p.hevc", 5496)],
+)
+def test_parse_annex_b_produces_complete_client_access_units(
+    codec: Codec, file: str, first_size: int
+) -> None:
+    data = (Path(__file__).parents[1] / "artifacts" / file).read_bytes()
+    packets = accepted(parse(codec, data))
+    assert len(packets) == 36
+    assert len(packets[0].data) == first_size
+    assert b"".join(packet.data for packet in packets) == data
+    assert all(packet.timestamp == 0 for packet in packets)
 
 
 @pytest.mark.parametrize(

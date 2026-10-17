@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
-/* V4L2 ownership and service transport. Codec parsing stays in MPP. */
+/* module: session; responsibility: enforce V4L2 buffer ownership transitions.
+ * operations: video file/ioctl operations; entity: opaque rb_session;
+ * tests: tests/kernel queue, commands, frame replies and reconfiguration.
+ * Format negotiation and broker discovery are independent child contracts. */
 #include "session.h"
 #include "bridge_uapi.h"
+#include "format.h"
 #include "memory.h"
+#include "session/broker.h"
+#include "session/capture.h"
 #include <linux/anon_inodes.h>
 #include <linux/dma-buf.h>
 #include <linux/fdtable.h>
@@ -19,37 +25,49 @@
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-v4l2.h>
 #define RB_EVENTS 128
-#define RB_CAPTURE_OFFSET (1UL << 30)
-#ifndef V4L2_PIX_FMT_AV1
-#define V4L2_PIX_FMT_AV1 v4l2_fourcc('A', 'V', '0', '1')
-#endif
+#define RB_CAPTURE_SLOT VIDEO_MAX_FRAME
+enum rb_flow {
+  RB_FLOW_RUNNING,
+  RB_FLOW_DRAINING,
+  RB_FLOW_DRAINED,
+  RB_FLOW_RESTARTABLE
+};
 struct rb_session {
   struct kref ref;
-  struct mutex lock;
+  struct mutex lock, ioctls;
   struct v4l2_fh fh;
   struct vb2_queue output, capture;
   struct v4l2_ctrl_handler ctrls;
-  struct list_head pending;
+  struct rb_offer *offer;
   wait_queue_head_t wait;
   struct rb_message events[RB_EVENTS];
-  unsigned head, tail;
-  u64 epoch;
+  unsigned head, tail, capture_dequeuers, dequeuers;
+  u64 epoch, incarnation;
   u32 generation, codec, input_size, sequence, output_pool, capture_pool;
-  struct rb_message layout;
-  struct v4l2_pix_format_mplane input_format;
-  bool reconfig;
+  struct rb_format *format;
+  struct rb_capture *capture_contract;
+  u32 output_sequence;
   bool attached, closed, failed, stopping, stopped, out_started, cap_started,
-      eos, draining;
+      eos;
+  enum rb_flow flow;
   bool output_sent[RB_MAX_BUFFERS], available[RB_MAX_BUFFERS];
+  bool before_stop[RB_MAX_BUFFERS];
+  u32 input_serial, output_serial[RB_MAX_BUFFERS];
+  u32 unpaired_field;
 };
-static LIST_HEAD(pending_sessions);
-static DEFINE_MUTEX(broker_lock);
-static DECLARE_WAIT_QUEUE_HEAD(broker_wait);
-static unsigned live_sessions;
-static bool broker_opened;
-static const u32 codecs[] = {V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC,
-                             V4L2_PIX_FMT_VP8, V4L2_PIX_FMT_VP9,
-                             V4L2_PIX_FMT_AV1};
+/* An endpoint belongs to one decoder incarnation, not the lifetime of the
+ * video fd. Old DMA-BUF exports retain old storage but cannot acquire new work. */
+struct rb_endpoint {
+  struct rb_session *session;
+  u64 incarnation;
+};
+static bool drain_busy(const struct rb_session *s) {
+  return s->flow == RB_FLOW_DRAINING || s->flow == RB_FLOW_DRAINED;
+}
+static bool drain_complete(const struct rb_session *s) {
+  return s->flow == RB_FLOW_DRAINED || s->flow == RB_FLOW_RESTARTABLE;
+}
+static int attach_service(void *owner);
 static struct rb_session *session(void *priv) {
   return container_of(priv, struct rb_session, fh);
 }
@@ -62,6 +80,8 @@ static struct vb2_queue *queue_for(struct rb_session *s, unsigned type) {
 }
 static void fail(struct rb_session *s) {
   s->failed = true;
+  memset(s->available, 0, sizeof(s->available));
+  memset(s->output_sent, 0, sizeof(s->output_sent));
   vb2_queue_error(&s->output);
   vb2_queue_error(&s->capture);
   wake_up_all(&s->wait);
@@ -86,9 +106,9 @@ static void return_all(struct vb2_queue *q, enum vb2_buffer_state state) {
 }
 static void destroy(struct kref *ref) {
   struct rb_session *s = container_of(ref, struct rb_session, ref);
-  mutex_lock(&broker_lock);
-  live_sessions--;
-  mutex_unlock(&broker_lock);
+  rb_broker_destroy(s->offer);
+  rb_format_free(s->format);
+  rb_capture_free(s->capture_contract);
   kfree(s);
 }
 static int setup(struct vb2_queue *q, unsigned *nb, unsigned *np,
@@ -97,28 +117,17 @@ static int setup(struct vb2_queue *q, unsigned *nb, unsigned *np,
   unsigned size;
   if (s->failed || s->stopping)
     return -EIO;
-  size = V4L2_TYPE_IS_OUTPUT(q->type) ? s->input_size : s->layout.size;
+  size = V4L2_TYPE_IS_OUTPUT(q->type) ? s->input_size
+                                      : rb_capture_size(s->capture_contract);
   if (!size)
     return -EINVAL;
-  if (!V4L2_TYPE_IS_OUTPUT(q->type) && s->layout.format == RB_FMT_P010) {
-    unsigned y = s->layout.stride * s->layout.rows;
-    if (*np) {
-      if (*np != 2 || sizes[0] < y || sizes[1] < y / 2)
-        return -EINVAL;
-      return 0;
-    }
-    *np = 2;
-    sizes[0] = y;
-    sizes[1] = y / 2;
-  } else {
-    if (*np) {
-      if (*np != 1 || sizes[0] < size)
-        return -EINVAL;
-      return 0;
-    }
-    *np = 1;
-    sizes[0] = size;
+  if (*np) {
+    if (*np != 1 || sizes[0] < size)
+      return -EINVAL;
+    return 0;
   }
+  *np = 1;
+  sizes[0] = size;
   *nb = min_t(unsigned, *nb, RB_MAX_BUFFERS);
   if (!V4L2_TYPE_IS_OUTPUT(q->type))
     *nb = max_t(unsigned, *nb, 18);
@@ -131,17 +140,36 @@ static int prepare(struct vb2_buffer *b) {
   if (V4L2_TYPE_IS_OUTPUT(b->type) &&
       vb2_get_plane_payload(b, 0) > vb2_plane_size(b, 0))
     return -EINVAL;
+  if (!V4L2_TYPE_IS_OUTPUT(b->type))
+    return rb_capture_prepare(s->capture_contract, vb2_plane_size(b, 0));
   return 0;
 }
 static void submit_packet(struct rb_session *s, struct vb2_buffer *b) {
-  if (s->output_sent[b->index])
+  if (s->output_sent[b->index] || s->flow != RB_FLOW_RUNNING)
     return;
+  if (s->input_serial == U32_MAX) {
+    fail(s);
+    return;
+  }
+  s->output_serial[b->index] = ++s->input_serial;
   s->output_sent[b->index] = true;
   push(s, (struct rb_message){.type = RB_PACKET,
+                              .count = s->input_serial,
                               .index = b->index,
-                              .bytesused = vb2_get_plane_payload(b, 0),
+                              .bytesused = vb2_get_plane_payload(b, 0) -
+                                           b->planes[0].data_offset,
+                              .data_offset = b->planes[0].data_offset,
                               .timestamp = b->timestamp,
+                              .flags = to_vb2_v4l2_buffer(b)->flags &
+                                       V4L2_BUF_FLAG_TSTAMP_SRC_MASK,
                               .codec = s->codec});
+}
+/* vb2's queued list preserves QBUF order, including deferred input. */
+static void submit_queued(struct rb_session *s) {
+  struct vb2_buffer *b;
+  list_for_each_entry(b, &s->output.queued_list,
+                      queued_entry) if (b->state == VB2_BUF_STATE_ACTIVE)
+      submit_packet(s, b);
 }
 static bool last_buffer(struct rb_session *s) {
   unsigned i;
@@ -158,19 +186,60 @@ static bool last_buffer(struct rb_session *s) {
     }
   return false;
 }
+/* A sufficient pool may resume before the client dequeues the source-change
+ * marker. Keep that empty marker pending until DQBUF requests it; otherwise
+ * START would leave a stale LAST buffer in videobuf2's completed queue. */
+static void complete_last(struct rb_session *s) {
+  if (s->eos &&
+      (!rb_capture_pending(s->capture_contract) || s->capture_dequeuers))
+    last_buffer(s);
+  if (s->eos)
+    wake_up_all(&s->capture.done_wq);
+}
 static void queued(struct vb2_buffer *b) {
   struct rb_session *s = vb2_get_drv_priv(b->vb2_queue);
   if (V4L2_TYPE_IS_OUTPUT(b->type)) {
+    to_vb2_v4l2_buffer(b)->sequence = s->output_sequence++;
     if (s->out_started)
       submit_packet(s, b);
   } else {
     s->available[b->index] = true;
     if (s->cap_started && s->out_started) {
-      if (s->eos && last_buffer(s))
-        return;
+      if (s->eos) {
+        complete_last(s);
+        if (!s->available[b->index])
+          return;
+      }
       push(s, (struct rb_message){.type = RB_RECYCLE, .index = b->index});
     }
   }
+}
+static unsigned long capture_capacity(struct rb_session *s) {
+  unsigned long capacity = ULONG_MAX;
+  for (unsigned i = 0; i < s->capture.num_buffers; i++) {
+    struct vb2_buffer *b = s->capture.bufs[i];
+    if (b->num_planes != 1)
+      return 0;
+    capacity = min(capacity, vb2_plane_size(b, 0));
+  }
+  return capacity;
+}
+static bool capture_fits(struct rb_session *s) {
+  return rb_capture_fits(s->capture_contract, s->capture.num_buffers,
+                         capture_capacity(s));
+}
+static void activate_capture(struct rb_session *s) {
+  if (WARN_ON_ONCE(rb_capture_activate(
+          s->capture_contract, s->capture.num_buffers, capture_capacity(s))))
+    return;
+  s->eos = false;
+  s->capture.last_buffer_dequeued = false;
+  push(s, (struct rb_message){.type = RB_CAPTURE,
+                              .count = s->capture.num_buffers,
+                              .flags = RB_CAPTURE_REUSE});
+  for (unsigned i = 0; i < s->capture.num_buffers; i++)
+    if (s->available[i])
+      push(s, (struct rb_message){.type = RB_RECYCLE, .index = i});
 }
 static int start(struct vb2_queue *q, unsigned count) {
   struct rb_session *s = vb2_get_drv_priv(q);
@@ -181,22 +250,41 @@ static int start(struct vb2_queue *q, unsigned count) {
   }
   if (V4L2_TYPE_IS_OUTPUT(q->type)) {
     s->out_started = true;
-    for (i = 0; i < q->num_buffers; i++)
-      if (q->bufs[i]->state == VB2_BUF_STATE_ACTIVE)
-        submit_packet(s, q->bufs[i]);
+    submit_queued(s);
   } else {
+    if (!rb_capture_pending(s->capture_contract) &&
+        rb_capture_activate(s->capture_contract, q->num_buffers,
+                            capture_capacity(s))) {
+      return_all(q, VB2_BUF_STATE_QUEUED);
+      return -EINVAL;
+    }
     s->cap_started = true;
+    s->sequence = 0;
+    s->unpaired_field = 0;
+    if (rb_capture_pending(s->capture_contract) && capture_fits(s)) {
+      activate_capture(s);
+      return 0;
+    }
+    complete_last(s);
     push(s, (struct rb_message){.type = RB_CAPTURE, .count = q->num_buffers});
     for (i = 0; i < q->num_buffers; i++)
       if (s->available[i])
         push(s, (struct rb_message){.type = RB_RECYCLE, .index = i});
+    if (drain_complete(s)) {
+      s->flow = RB_FLOW_RUNNING;
+      memset(s->before_stop, 0, sizeof(s->before_stop));
+      push(s, (struct rb_message){.type = RB_RESUME});
+      if (s->out_started)
+        submit_queued(s);
+    }
   }
   return 0;
 }
 static void stop(struct vb2_queue *q) {
   struct rb_session *s = vb2_get_drv_priv(q);
   long waited;
-  bool capture_only = !V4L2_TYPE_IS_OUTPUT(q->type) && s->reconfig;
+  bool capture_only = !V4L2_TYPE_IS_OUTPUT(q->type);
+  bool abort_drain = capture_only && s->flow != RB_FLOW_RUNNING;
   if (!s->attached && !capture_only) {
     s->epoch++;
     s->tail = s->head;
@@ -211,7 +299,8 @@ static void stop(struct vb2_queue *q) {
     }
     push(s, (struct rb_message){
                 .type = RB_RESET,
-                .flags = q->type | (capture_only ? RB_RESET_CAPTURE_ONLY : 0)});
+                .flags = q->type | (capture_only ? RB_RESET_CAPTURE_ONLY : 0) |
+                         (abort_drain ? RB_RESET_ABORT_DRAIN : 0)});
     mutex_unlock(&s->lock);
     waited = wait_event_timeout(s->wait,
                                 READ_ONCE(s->stopped) || READ_ONCE(s->failed),
@@ -223,6 +312,7 @@ static void stop(struct vb2_queue *q) {
   }
   if (V4L2_TYPE_IS_OUTPUT(q->type)) {
     s->out_started = false;
+    s->output_sequence = 0;
     memset(s->output_sent, 0, sizeof(s->output_sent));
   } else {
     s->cap_started = false;
@@ -230,9 +320,11 @@ static void stop(struct vb2_queue *q) {
   }
   return_all(q, VB2_BUF_STATE_ERROR);
   s->eos = false;
-  if (!capture_only)
-    s->draining = false;
-  s->reconfig = false;
+  if (abort_drain || !capture_only) {
+    s->flow = abort_drain ? RB_FLOW_RESTARTABLE : RB_FLOW_RUNNING;
+    memset(s->before_stop, 0, sizeof(s->before_stop));
+  }
+  rb_capture_stop(s->capture_contract);
 }
 static const struct vb2_ops queue_ops = {.queue_setup = setup,
                                          .buf_prepare = prepare,
@@ -248,67 +340,16 @@ static int querycap(struct file *f, void *p, struct v4l2_capability *c) {
   return 0;
 }
 static int enum_fmt(struct file *f, void *p, struct v4l2_fmtdesc *d) {
-  if (V4L2_TYPE_IS_OUTPUT(d->type)) {
-    if (d->index >= ARRAY_SIZE(codecs))
-      return -EINVAL;
-    d->pixelformat = codecs[d->index];
-    d->flags = V4L2_FMT_FLAG_COMPRESSED | V4L2_FMT_FLAG_DYN_RESOLUTION;
-    strscpy(d->description, "Compressed bitstream", sizeof(d->description));
-  } else {
-    struct rb_session *s = session(p);
-    if (d->index)
-      return -EINVAL;
-    d->pixelformat =
-        s->layout.format == RB_FMT_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
-  }
-  return 0;
-}
-static void capture_fmt(struct rb_session *s,
-                        struct v4l2_pix_format_mplane *p) {
-  memset(p, 0, sizeof(*p));
-  p->width = s->layout.width ?: 64;
-  p->height = s->layout.rows ?: 64;
-  p->pixelformat =
-      s->layout.format == RB_FMT_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
-  p->num_planes = 1;
-  p->field = V4L2_FIELD_NONE;
-  p->plane_fmt[0].bytesperline = s->layout.stride ?: 64;
-  p->plane_fmt[0].sizeimage = s->layout.size ?: 6144;
-  if (s->layout.format == RB_FMT_P010) {
-    p->num_planes = 2;
-    p->plane_fmt[0].sizeimage = s->layout.stride * s->layout.rows;
-    p->plane_fmt[1].sizeimage = p->plane_fmt[0].sizeimage / 2;
-    p->plane_fmt[1].bytesperline = s->layout.stride;
-  }
-  p->colorspace = s->layout.colorspace ?: s->input_format.colorspace;
-  p->xfer_func = s->layout.xfer_func ?: s->input_format.xfer_func;
-  p->ycbcr_enc = s->layout.ycbcr_enc ?: s->input_format.ycbcr_enc;
-  p->quantization = s->layout.quantization ?: s->input_format.quantization;
+  return rb_format_enumerate(session(p)->format, d);
 }
 static int try_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
   struct rb_session *s = session(p);
-  unsigned i;
   if (!queue_for(s, fmt->type))
     return -EINVAL;
-  if (!V4L2_TYPE_IS_OUTPUT(fmt->type)) {
-    capture_fmt(s, &fmt->fmt.pix_mp);
-    return 0;
-  }
-  for (i = 0; i < ARRAY_SIZE(codecs); i++)
-    if (codecs[i] == fmt->fmt.pix_mp.pixelformat)
-      break;
-  if (i == ARRAY_SIZE(codecs))
-    fmt->fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264;
-  fmt->fmt.pix_mp.width = clamp_t(u32, fmt->fmt.pix_mp.width, 64, 8192);
-  fmt->fmt.pix_mp.height = clamp_t(u32, fmt->fmt.pix_mp.height, 64, 8192);
-  if (!fmt->fmt.pix_mp.colorspace ||
-      fmt->fmt.pix_mp.colorspace > V4L2_COLORSPACE_DCI_P3)
-    fmt->fmt.pix_mp.colorspace = V4L2_COLORSPACE_REC709;
-  fmt->fmt.pix_mp.num_planes = 1;
-  fmt->fmt.pix_mp.field = V4L2_FIELD_NONE;
-  fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
-      clamp_t(u32, fmt->fmt.pix_mp.plane_fmt[0].sizeimage, 1024 * 1024,
-              16 * 1024 * 1024);
+  if (V4L2_TYPE_IS_OUTPUT(fmt->type))
+    rb_format_normalize(&fmt->fmt.pix_mp);
+  else
+    rb_format_capture(s->format, &fmt->fmt.pix_mp);
   return 0;
 }
 static int get_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
@@ -316,18 +357,21 @@ static int get_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
   if (!queue_for(s, fmt->type))
     return -EINVAL;
   if (V4L2_TYPE_IS_OUTPUT(fmt->type)) {
-    fmt->fmt.pix_mp = s->input_format;
+    fmt->fmt.pix_mp = *rb_format_input(s->format);
   } else
-    capture_fmt(s, &fmt->fmt.pix_mp);
+    rb_format_capture(s->format, &fmt->fmt.pix_mp);
   return 0;
 }
 static int set_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
   struct rb_session *s = session(p);
   struct vb2_queue *q = queue_for(s, fmt->type);
   int r;
+  if (s->failed)
+    return -EIO;
   if (!q)
     return -EINVAL;
-  if (vb2_is_busy(q))
+  if (vb2_is_busy(q) ||
+      (V4L2_TYPE_IS_OUTPUT(fmt->type) && vb2_is_busy(&s->capture)))
     return -EBUSY;
   r = try_fmt(f, p, fmt);
   if (r)
@@ -335,47 +379,41 @@ static int set_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
   if (V4L2_TYPE_IS_OUTPUT(fmt->type)) {
     s->codec = fmt->fmt.pix_mp.pixelformat;
     s->input_size = fmt->fmt.pix_mp.plane_fmt[0].sizeimage;
-    s->input_format = fmt->fmt.pix_mp;
+    rb_format_set(s->format, &fmt->fmt.pix_mp);
+    rb_capture_update(s->capture_contract, rb_format_layout(s->format)->size,
+                      false);
   }
   return 0;
 }
 static int selection(struct file *f, void *p, struct v4l2_selection *sel) {
-  struct rb_session *s = session(p);
-  if (sel->type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
-      sel->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
-    return -EINVAL;
-  switch (sel->target) {
-  case V4L2_SEL_TGT_COMPOSE:
-  case V4L2_SEL_TGT_COMPOSE_DEFAULT:
-    sel->r = (struct v4l2_rect){.width = s->layout.width,
-                                .height = s->layout.height};
-    break;
-  case V4L2_SEL_TGT_COMPOSE_BOUNDS:
-  case V4L2_SEL_TGT_COMPOSE_PADDED:
-    sel->r =
-        (struct v4l2_rect){.width = s->layout.width, .height = s->layout.rows};
-    break;
-  default:
-    return -EINVAL;
-  }
-  return 0;
+  return rb_format_selection(session(p)->format, sel);
 }
 static int reqbufs(struct file *f, void *p, struct v4l2_requestbuffers *r) {
   struct rb_session *s = session(p);
   struct vb2_queue *q = queue_for(s, r->type);
-  int ret = q ? vb2_reqbufs(q, r) : -EINVAL;
+  int ret;
+  if (r->count && (s->failed || s->stopping))
+    return -EIO;
+  ret = q ? vb2_reqbufs(q, r) : -EINVAL;
   if (!ret) {
     u32 *id = V4L2_TYPE_IS_OUTPUT(r->type) ? &s->output_pool : &s->capture_pool;
-    if (++*id == 0) ++*id;
+    if (++*id == 0)
+      ++*id;
   }
   return ret;
+}
+/* mmap offsets are opaque cookies, independent of allocation sizes. */
+static void buffer_cookie(struct v4l2_buffer *b) {
+  if (b->memory == V4L2_MEMORY_MMAP)
+    b->m.planes[0].m.mem_offset =
+        (b->index + (V4L2_TYPE_IS_OUTPUT(b->type) ? 0 : RB_CAPTURE_SLOT))
+        << PAGE_SHIFT;
 }
 static int querybuf(struct file *f, void *p, struct v4l2_buffer *b) {
   struct vb2_queue *q = queue_for(session(p), b->type);
   int r = q ? vb2_querybuf(q, b) : -EINVAL;
-  if (!r && !V4L2_TYPE_IS_OUTPUT(b->type) && b->memory == V4L2_MEMORY_MMAP)
-    for (unsigned i = 0; i < b->length; i++)
-      b->m.planes[i].m.mem_offset += RB_CAPTURE_OFFSET;
+  if (!r)
+    buffer_cookie(b);
   return r;
 }
 static int qbuf(struct file *f, void *p, struct v4l2_buffer *b) {
@@ -383,19 +421,44 @@ static int qbuf(struct file *f, void *p, struct v4l2_buffer *b) {
   struct vb2_queue *q = queue_for(s, b->type);
   if (s->failed || s->stopping)
     return -EIO;
-  if (V4L2_TYPE_IS_OUTPUT(b->type) && s->draining)
-    return -EPIPE;
-  return q ? vb2_qbuf(q, NULL, b) : -EINVAL;
+  int r = q ? vb2_qbuf(q, NULL, b) : -EINVAL;
+  if (!r)
+    buffer_cookie(b);
+  return r;
 }
 static int dqbuf(struct file *f, void *p, struct v4l2_buffer *b) {
-  struct vb2_queue *q = queue_for(session(p), b->type);
-  return q ? vb2_dqbuf(q, b, f->f_flags & O_NONBLOCK) : -EINVAL;
+  struct rb_session *s = session(p);
+  struct vb2_queue *q = queue_for(s, b->type);
+  int ret;
+  bool capture = q == &s->capture;
+  s->dequeuers++;
+  if (capture) {
+    s->capture_dequeuers++;
+    if (s->cap_started)
+      complete_last(s);
+  }
+  ret = q ? vb2_dqbuf(q, b, f->f_flags & O_NONBLOCK) : -EINVAL;
+  if (capture)
+    s->capture_dequeuers--;
+  s->dequeuers--;
+  wake_up_all(&s->wait);
+  if (!ret)
+    buffer_cookie(b);
+  if (!ret && V4L2_TYPE_IS_OUTPUT(b->type))
+    s->before_stop[b->index] = false;
+  if (drain_complete(s) && !rb_capture_pending(s->capture_contract) &&
+      s->capture.last_buffer_dequeued &&
+      !memchr_inv(s->before_stop, 0, sizeof(s->before_stop)))
+    s->flow = RB_FLOW_RESTARTABLE;
+  return ret;
 }
 static int expbuf(struct file *f, void *p, struct v4l2_exportbuffer *e) {
   struct vb2_queue *q = queue_for(session(p), e->type);
   return q ? vb2_expbuf(q, e) : -EINVAL;
 }
 static int streamon(struct file *f, void *p, enum v4l2_buf_type type) {
+  if (session(p)->failed)
+    return -EIO;
   struct vb2_queue *q = queue_for(session(p), type);
   return q ? vb2_streamon(q, type) : -EINVAL;
 }
@@ -412,18 +475,36 @@ static int try_cmd(struct file *f, void *p, struct v4l2_decoder_cmd *c) {
 }
 static int cmd(struct file *f, void *p, struct v4l2_decoder_cmd *c) {
   struct rb_session *s = session(p);
+  if (s->failed)
+    return -EIO;
   int r = try_cmd(f, p, c);
   if (r)
     return r;
+  if (c->cmd == V4L2_DEC_CMD_START && rb_capture_pending(s->capture_contract)) {
+    if (!s->cap_started || !capture_fits(s))
+      return -EINVAL;
+    activate_capture(s);
+    return 0;
+  }
+  if (drain_busy(s))
+    return -EBUSY;
   if (c->cmd == V4L2_DEC_CMD_STOP) {
-    if (!s->out_started || s->draining)
+    if (!s->out_started || !s->cap_started || drain_complete(s))
       return 0;
-    s->draining = true;
+    s->flow = RB_FLOW_DRAINING;
+    for (unsigned i = 0; i < s->output.num_buffers; i++)
+      s->before_stop[i] = s->output.bufs[i]->state == VB2_BUF_STATE_ACTIVE ||
+                          (s->output.bufs[i]->state == VB2_BUF_STATE_DONE ||
+                           s->output.bufs[i]->state == VB2_BUF_STATE_ERROR);
     push(s, (struct rb_message){.type = RB_DRAIN});
   } else {
+    if (!drain_complete(s))
+      return 0;
     s->capture.last_buffer_dequeued = false;
-    s->draining = false;
+    s->flow = RB_FLOW_RUNNING;
     push(s, (struct rb_message){.type = RB_RESUME});
+    if (s->out_started)
+      submit_queued(s);
   }
   return 0;
 }
@@ -438,17 +519,7 @@ static int subscribe(struct v4l2_fh *fh,
   return -EINVAL;
 }
 static int sizes(struct file *f, void *p, struct v4l2_frmsizeenum *e) {
-  unsigned i;
-  if (e->index)
-    return -EINVAL;
-  for (i = 0; i < ARRAY_SIZE(codecs); i++)
-    if (e->pixel_format == codecs[i])
-      break;
-  if (i == ARRAY_SIZE(codecs))
-    return -EINVAL;
-  e->type = V4L2_FRMSIZE_TYPE_STEPWISE;
-  e->stepwise = (struct v4l2_frmsize_stepwise){64, 8192, 2, 64, 8192, 2};
-  return 0;
+  return rb_format_sizes(e);
 }
 const struct v4l2_ioctl_ops rb_video_ioctls = {
     .vidioc_querycap = querycap,
@@ -488,37 +559,28 @@ static int init_queue(struct rb_session *s, struct vb2_queue *q,
 static int video_open(struct file *f) {
   struct rb_session *s;
   int r;
-  mutex_lock(&broker_lock);
-  live_sessions++;
-  mutex_unlock(&broker_lock);
   s = kzalloc(sizeof(*s), GFP_KERNEL);
   if (!s) {
-    mutex_lock(&broker_lock);
-    live_sessions--;
-    mutex_unlock(&broker_lock);
     return -ENOMEM;
   }
   kref_init(&s->ref);
   mutex_init(&s->lock);
+  mutex_init(&s->ioctls);
   init_waitqueue_head(&s->wait);
-  INIT_LIST_HEAD(&s->pending);
   s->epoch = 1;
+  s->incarnation = 1;
   s->codec = V4L2_PIX_FMT_H264;
   s->input_size = 1024 * 1024;
-  s->input_format =
-      (struct v4l2_pix_format_mplane){.width = 64,
-                                      .height = 64,
-                                      .pixelformat = V4L2_PIX_FMT_H264,
-                                      .num_planes = 1,
-                                      .field = V4L2_FIELD_NONE,
-                                      .colorspace = V4L2_COLORSPACE_REC709};
-  s->input_format.plane_fmt[0].sizeimage = s->input_size;
-  s->layout = (struct rb_message){.width = 64,
-                                  .height = 64,
-                                  .stride = 64,
-                                  .rows = 64,
-                                  .size = 6144,
-                                  .format = RB_FMT_NV12};
+  s->format = rb_format_new();
+  if (!s->format) {
+    kref_put(&s->ref, destroy);
+    return -ENOMEM;
+  }
+  s->capture_contract = rb_capture_new(rb_format_layout(s->format)->size);
+  if (!s->capture_contract) {
+    kref_put(&s->ref, destroy);
+    return -ENOMEM;
+  }
   v4l2_fh_init(&s->fh, video_devdata(f));
   f->private_data = &s->fh;
   v4l2_ctrl_handler_init(&s->ctrls, 1);
@@ -545,10 +607,15 @@ static int video_open(struct file *f) {
     goto error;
   }
   v4l2_fh_add(&s->fh);
-  mutex_lock(&broker_lock);
-  list_add_tail(&s->pending, &pending_sessions);
-  mutex_unlock(&broker_lock);
-  wake_up_all(&broker_wait);
+  s->offer = rb_broker_publish(s, attach_service);
+  if (IS_ERR(s->offer)) {
+    r = PTR_ERR(s->offer);
+    s->offer = NULL;
+    v4l2_fh_del(&s->fh);
+    vb2_queue_release(&s->capture);
+    vb2_queue_release(&s->output);
+    goto error;
+  }
   return 0;
 error:
   v4l2_ctrl_handler_free(&s->ctrls);
@@ -558,9 +625,7 @@ error:
 }
 static int video_release(struct file *f) {
   struct rb_session *s = session(f->private_data);
-  mutex_lock(&broker_lock);
-  list_del_init(&s->pending);
-  mutex_unlock(&broker_lock);
+  rb_broker_withdraw(s->offer);
   mutex_lock(&s->lock);
   vb2_queue_release(&s->output);
   vb2_queue_release(&s->capture);
@@ -573,13 +638,80 @@ static int video_release(struct file *f) {
   kref_put(&s->ref, destroy);
   return 0;
 }
+/* Called with the video ioctl transaction held, but without session.lock:
+ * broker callbacks acquire session.lock, so withdrawal must precede it. */
+static int reinitialize(struct rb_session *s) {
+  struct rb_format *format = rb_format_new();
+  struct rb_capture *capture;
+  struct v4l2_event discarded;
+  if (!format)
+    return -ENOMEM;
+  capture = rb_capture_new(rb_format_layout(format)->size);
+  if (!capture) {
+    rb_format_free(format);
+    return -ENOMEM;
+  }
+  rb_broker_withdraw(s->offer);
+  wait_event(s->wait, !READ_ONCE(s->dequeuers));
+  mutex_lock(&s->lock);
+  /* Queue teardown has already returned every buffer. Existing blocked DQBUF
+   * callers must finish observing that teardown before initialization. */
+  while (!v4l2_event_dequeue(&s->fh, &discarded, 1))
+    ;
+  s->incarnation++;
+  s->epoch++;
+  s->attached = false;
+  s->head = s->tail = 0;
+  s->generation = 0;
+  s->codec = V4L2_PIX_FMT_H264;
+  s->input_size = 1024 * 1024;
+  s->sequence = s->output_sequence = s->input_serial = 0;
+  s->unpaired_field = 0;
+  s->eos = s->stopping = s->stopped = false;
+  s->out_started = s->cap_started = false;
+  s->flow = RB_FLOW_RUNNING;
+  memset(s->output_sent, 0, sizeof(s->output_sent));
+  memset(s->available, 0, sizeof(s->available));
+  memset(s->before_stop, 0, sizeof(s->before_stop));
+  memset(s->output_serial, 0, sizeof(s->output_serial));
+  rb_format_free(s->format);
+  rb_capture_free(s->capture_contract);
+  s->format = format;
+  s->capture_contract = capture;
+  /* REQBUFS(0) cancels vb2 queues, including their error state. */
+  s->failed = false;
+  wake_up_all(&s->wait);
+  mutex_unlock(&s->lock);
+  rb_broker_reoffer(s->offer);
+  return 0;
+}
 static long video_ioctl(struct file *f, unsigned cmd, unsigned long arg) {
   struct rb_session *s = session(f->private_data);
+  bool serial = cmd != VIDIOC_DQBUF;
+  bool recover = false;
   long r;
-  if (mutex_lock_interruptible(&s->lock))
+  /* Event dequeue owns its event lock. DQBUF releases the session lock
+   * while waiting. Neither may prevent QBUF or service acknowledgements. */
+  if (cmd == VIDIOC_DQEVENT)
+    return video_ioctl2(f, cmd, arg);
+  /* stop_streaming drops lock to await the service. Keep other mutating
+   * ioctls serialized across that entire transaction, including both queues. */
+  if (serial && mutex_lock_interruptible(&s->ioctls))
     return -ERESTARTSYS;
+  if (mutex_lock_interruptible(&s->lock)) {
+    r = -ERESTARTSYS;
+    goto out;
+  }
   r = video_ioctl2(f, cmd, arg);
+  recover = !r && cmd == VIDIOC_REQBUFS && s->failed &&
+            !s->output.num_buffers && !s->capture.num_buffers &&
+            !vb2_is_streaming(&s->output) && !vb2_is_streaming(&s->capture);
   mutex_unlock(&s->lock);
+  if (recover)
+    r = reinitialize(s);
+out:
+  if (serial)
+    mutex_unlock(&s->ioctls);
   return r;
 }
 static __poll_t video_poll(struct file *f, poll_table *wait) {
@@ -591,6 +723,9 @@ static __poll_t video_poll(struct file *f, poll_table *wait) {
     mask |= EPOLLPRI;
   mask |= vb2_poll(&s->output, f, wait);
   mask |= vb2_poll(&s->capture, f, wait);
+  if (s->cap_started && rb_capture_pending(s->capture_contract) && s->eos &&
+      memchr_inv(s->available, 0, sizeof(s->available)))
+    mask |= EPOLLIN | EPOLLRDNORM;
   if (!s->failed && (s->out_started || s->cap_started))
     mask &= ~EPOLLERR;
   mutex_unlock(&s->lock);
@@ -598,14 +733,19 @@ static __poll_t video_poll(struct file *f, poll_table *wait) {
 }
 static int video_mmap(struct file *f, struct vm_area_struct *vma) {
   struct rb_session *s = session(f->private_data);
-  struct vb2_queue *q = &s->output;
-  int r;
-  if (vma->vm_pgoff >= (RB_CAPTURE_OFFSET >> PAGE_SHIFT)) {
-    vma->vm_pgoff -= RB_CAPTURE_OFFSET >> PAGE_SHIFT;
-    q = &s->capture;
-  }
+  unsigned long slot = vma->vm_pgoff;
+  struct vb2_queue *q;
+  unsigned index;
+  int r = -EINVAL;
+  if (slot >= 2 * RB_CAPTURE_SLOT)
+    return -EINVAL;
+  q = slot < RB_CAPTURE_SLOT ? &s->output : &s->capture;
+  index = slot % RB_CAPTURE_SLOT;
   mutex_lock(&s->lock);
-  r = vb2_mmap(q, vma);
+  if (index < q->num_buffers && q->bufs[index]) {
+    vma->vm_pgoff = q->bufs[index]->planes[0].m.offset >> PAGE_SHIFT;
+    r = vb2_mmap(q, vma);
+  }
   mutex_unlock(&s->lock);
   return r;
 }
@@ -616,33 +756,64 @@ const struct v4l2_file_operations rb_video_fops = {.owner = THIS_MODULE,
                                                        video_ioctl,
                                                    .poll = video_poll,
                                                    .mmap = video_mmap};
+static u32 frame_sequence(struct rb_session *s, u32 field) {
+  if (field == 3 || field == 4) {
+    if (s->unpaired_field && s->unpaired_field != field) {
+      s->unpaired_field = 0;
+      return s->sequence - 1;
+    }
+    s->unpaired_field = field;
+  } else {
+    s->unpaired_field = 0;
+  }
+  return s->sequence++;
+}
+/* State admission precedes all reply-specific mutations. Storage identity is
+ * checked separately: a valid slot/generation never authorizes an illegal
+ * transition (notably a second EOS or a frame after the drain boundary). */
+static int admit_reply(const struct rb_session *s, u32 type) {
+  if (s->closed || s->failed)
+    return -EPIPE;
+  if (type == RB_FAILED)
+    return 0;
+  switch (type) {
+  case RB_STOPPED:
+    return s->stopping && !s->stopped ? 0 : -EBUSY;
+  case RB_EOS:
+    return s->flow == RB_FLOW_DRAINING ? 0 : -EBUSY;
+  case RB_LAYOUT:
+  case RB_FRAME:
+  case RB_DRAINING:
+    return s->flow == RB_FLOW_RUNNING || s->flow == RB_FLOW_DRAINING
+               ? 0 : -EBUSY;
+  default:
+    return 0;
+  }
+}
 static int reply(struct rb_session *s, const struct rb_message *m) {
   struct vb2_buffer *b;
   struct v4l2_event ev = {0};
   unsigned i;
+  int admitted;
   if (m->version != RB_VERSION ||
       memchr_inv(m->reserved, 0, sizeof(m->reserved)))
     return -EINVAL;
   if (m->epoch != s->epoch)
     return -ESTALE;
-  if (s->closed)
-    return -EPIPE;
+  admitted = admit_reply(s, m->type);
+  if (admitted)
+    return admitted;
   switch (m->type) {
   case RB_LAYOUT:
-    if (m->width < 64 || m->width > 8192 || m->height < 64 ||
-        m->height > 8192 || (m->width & 1) || (m->height & 1) ||
-        m->rows < m->height || m->rows > 16384 || (m->rows & 1) ||
-        m->stride < m->width * (m->format == RB_FMT_P010 ? 2 : 1) ||
-        m->stride > 65536 || m->size < (u64)m->stride * m->rows * 3 / 2 ||
-        m->size > 128 * 1024 * 1024 ||
-        (m->format != RB_FMT_NV12 && m->format != RB_FMT_P010))
+    if (rb_format_update(s->format, m))
       return -EINVAL;
-    if (s->cap_started) {
-      s->reconfig = true;
+    rb_capture_update(s->capture_contract, rb_format_layout(s->format)->size,
+                      vb2_is_busy(&s->capture));
+    if (rb_capture_pending(s->capture_contract)) {
       s->eos = true;
-      last_buffer(s);
+      if (s->cap_started)
+        complete_last(s);
     }
-    s->layout = *m;
     s->generation++;
     ev.type = V4L2_EVENT_SOURCE_CHANGE;
     ev.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION;
@@ -657,27 +828,50 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
     if (b->state != VB2_BUF_STATE_ACTIVE)
       return -EINVAL;
     s->output_sent[m->index] = false;
-    vb2_buffer_done(b, VB2_BUF_STATE_DONE);
+    vb2_buffer_done(b, m->flags & RB_FRAME_ERROR ? VB2_BUF_STATE_ERROR
+                                                 : VB2_BUF_STATE_DONE);
     return 0;
   case RB_FRAME:
-    if (m->pool_id != s->capture_pool || m->generation != s->generation || m->index >= s->capture.num_buffers ||
-        !s->available[m->index] || !s->cap_started)
+    if (rb_capture_pending(s->capture_contract) ||
+        m->pool_id != s->capture_pool || m->generation != s->generation ||
+        m->index >= s->capture.num_buffers || !s->available[m->index] ||
+        !s->cap_started)
       return -ESTALE;
     b = s->capture.bufs[m->index];
-    if (m->bytesused > s->layout.size)
+    if (m->field > 5 ||
+        (m->flags & V4L2_BUF_FLAG_TSTAMP_SRC_MASK) >
+            V4L2_BUF_FLAG_TSTAMP_SRC_SOE ||
+        m->bytesused > rb_capture_size(s->capture_contract) ||
+        m->bytesused > vb2_plane_size(b, 0))
       return -EINVAL;
     s->available[m->index] = false;
-    if (b->num_planes == 2) {
-      vb2_set_plane_payload(b, 0, s->layout.stride * s->layout.rows);
-      vb2_set_plane_payload(b, 1, s->layout.stride * s->layout.rows / 2);
-    } else
-      vb2_set_plane_payload(b, 0, m->bytesused);
+    vb2_set_plane_payload(b, 0, m->bytesused);
     b->timestamp = m->timestamp;
-    to_vb2_v4l2_buffer(b)->sequence = s->sequence++;
-    to_vb2_v4l2_buffer(b)->field = V4L2_FIELD_NONE;
-    vb2_buffer_done(b, VB2_BUF_STATE_DONE);
+    to_vb2_v4l2_buffer(b)->flags =
+        (to_vb2_v4l2_buffer(b)->flags & ~V4L2_BUF_FLAG_TSTAMP_SRC_MASK) |
+        (m->flags & V4L2_BUF_FLAG_TSTAMP_SRC_MASK);
+    to_vb2_v4l2_buffer(b)->sequence = frame_sequence(s, m->field);
+    to_vb2_v4l2_buffer(b)->field = rb_format_field(m->field);
+    vb2_buffer_done(b, m->flags & RB_FRAME_ERROR ? VB2_BUF_STATE_ERROR
+                                                 : VB2_BUF_STATE_DONE);
+    return 0;
+  case RB_DRAINING:
+    if (s->flow != RB_FLOW_RUNNING && s->flow != RB_FLOW_DRAINING)
+      return -EBUSY;
+    if (!m->count || m->count > s->input_serial)
+      return -EINVAL;
+    s->flow = RB_FLOW_DRAINING;
+    for (i = 0; i < s->output.num_buffers; i++)
+      s->before_stop[i] = s->output_serial[i] <= m->count &&
+                          (s->output_sent[i] ||
+                           s->output.bufs[i]->state == VB2_BUF_STATE_DONE ||
+                           s->output.bufs[i]->state == VB2_BUF_STATE_ERROR);
     return 0;
   case RB_EOS:
+    if (m->pool_id != s->capture_pool || m->generation != s->generation ||
+        rb_capture_pending(s->capture_contract))
+      return -ESTALE;
+    s->flow = RB_FLOW_DRAINED;
     s->eos = true;
     last_buffer(s);
     ev.type = V4L2_EVENT_EOS;
@@ -701,83 +895,125 @@ static long register_pool(struct rb_session *s, void __user *arg) {
   struct vb2_queue *q;
   unsigned i, exported = 0;
   int r;
-  if (copy_from_user(&pool, arg, sizeof(pool))) return -EFAULT;
-  if (pool.version != RB_VERSION || memchr_inv(pool.reserved, 0, sizeof(pool.reserved))) return -EINVAL;
+  if (copy_from_user(&pool, arg, sizeof(pool)))
+    return -EFAULT;
+  if (pool.version != RB_VERSION ||
+      memchr_inv(pool.reserved, 0, sizeof(pool.reserved)))
+    return -EINVAL;
   q = queue_for(s, pool.type);
-  if (!q) return -EINVAL;
-  if (s->closed || s->failed || s->stopping) return -EPIPE;
+  if (!q)
+    return -EINVAL;
+  if (s->closed || s->failed || s->stopping)
+    return -EPIPE;
   if (!pool.pool_id || pool.epoch != s->epoch ||
-      pool.pool_id != (V4L2_TYPE_IS_OUTPUT(pool.type) ? s->output_pool : s->capture_pool)) return -ESTALE;
+      pool.pool_id !=
+          (V4L2_TYPE_IS_OUTPUT(pool.type) ? s->output_pool : s->capture_pool))
+    return -ESTALE;
   pool.count = q->num_buffers;
-  if (!pool.count || pool.count > RB_MAX_BUFFERS) return -EINVAL;
-  for (i = 0; i < RB_MAX_BUFFERS; i++) pool.buffers[i] = (struct rb_registered_buffer){.fd = -1};
+  if (!pool.count || pool.count > RB_MAX_BUFFERS)
+    return -EINVAL;
+  for (i = 0; i < RB_MAX_BUFFERS; i++)
+    pool.buffers[i] = (struct rb_registered_buffer){.fd = -1};
   for (i = 0; i < pool.count; i++) {
-    struct v4l2_exportbuffer e = {.type = pool.type, .index = i, .flags = O_RDWR | O_CLOEXEC};
+    struct v4l2_exportbuffer e = {
+        .type = pool.type, .index = i, .flags = O_RDWR | O_CLOEXEC};
     r = vb2_expbuf(q, &e);
-    if (r) goto rollback;
+    if (r)
+      goto rollback;
     pool.buffers[i].fd = e.fd;
     pool.buffers[i].size = vb2_plane_size(q->bufs[i], 0);
     exported++;
   }
-  if (!copy_to_user(arg, &pool, sizeof(pool))) return 0;
+  if (!copy_to_user(arg, &pool, sizeof(pool)))
+    return 0;
   r = -EFAULT;
 rollback:
-  for (i = 0; i < exported; i++) close_fd(pool.buffers[i].fd);
+  for (i = 0; i < exported; i++)
+    close_fd(pool.buffers[i].fd);
   return r;
 }
-static long exchange(struct rb_session *s, void __user *arg, struct rb_batch *batch) {
+static long exchange(struct rb_session *s, void __user *arg,
+                     struct rb_batch *batch) {
   unsigned i;
-  if (batch->version != RB_VERSION || batch->reply_count > RB_BATCH_MAX || batch->reserved) return -EINVAL;
-  /* Probe copyout before any mutation; a later concurrent unmap fails closed. */
-  if (copy_to_user(arg, batch, sizeof(*batch))) return -EFAULT;
+  if (batch->version != RB_VERSION || batch->reply_count > RB_BATCH_MAX ||
+      batch->reserved)
+    return -EINVAL;
+  /* Probe copyout before any mutation; a later concurrent unmap fails closed.
+   */
+  if (copy_to_user(arg, batch, sizeof(*batch)))
+    return -EFAULT;
   memset(batch->results, 0, sizeof(batch->results));
-  for (i = 0; i < batch->reply_count; i++) batch->results[i] = reply(s, &batch->replies[i]);
+  for (i = 0; i < batch->reply_count; i++)
+    batch->results[i] = reply(s, &batch->replies[i]);
   batch->event_count = min_t(unsigned, s->head - s->tail, RB_BATCH_MAX);
   memset(batch->events, 0, sizeof(batch->events));
-  for (i = 0; i < batch->event_count; i++) batch->events[i] = s->events[(s->tail + i) % RB_EVENTS];
+  for (i = 0; i < batch->event_count; i++)
+    batch->events[i] = s->events[(s->tail + i) % RB_EVENTS];
   if (copy_to_user(arg, batch, sizeof(*batch))) {
-    if (batch->reply_count) fail(s);
+    if (batch->reply_count)
+      fail(s);
     return -EFAULT;
   }
   s->tail += batch->event_count;
-  if (!batch->event_count && (s->closed || s->failed)) return -EPIPE;
+  if (!batch->event_count && (s->closed || s->failed))
+    return -EPIPE;
   return 0;
 }
 static long service_ioctl(struct file *f, unsigned cmd, unsigned long arg) {
-  struct rb_session *s = f->private_data;
+  struct rb_endpoint *endpoint = f->private_data;
+  struct rb_session *s = endpoint->session;
   struct rb_batch *batch = NULL;
   long r;
   if (cmd == RB_EXCHANGE) {
     batch = memdup_user((void __user *)arg, sizeof(*batch));
-    if (IS_ERR(batch)) return PTR_ERR(batch);
-  } else if (cmd != RB_REGISTER_POOL) return -ENOTTY;
-  if (mutex_lock_interruptible(&s->lock)) { kfree(batch); return -ERESTARTSYS; }
-  r = batch ? exchange(s, (void __user *)arg, batch) : register_pool(s, (void __user *)arg);
+    if (IS_ERR(batch))
+      return PTR_ERR(batch);
+  } else if (cmd != RB_REGISTER_POOL)
+    return -ENOTTY;
+  if (mutex_lock_interruptible(&s->lock)) {
+    kfree(batch);
+    return -ERESTARTSYS;
+  }
+  if (endpoint->incarnation != s->incarnation)
+    r = -EPIPE;
+  else
+    r = batch ? exchange(s, (void __user *)arg, batch)
+              : register_pool(s, (void __user *)arg);
   mutex_unlock(&s->lock);
   kfree(batch);
   return r;
 }
 static __poll_t service_poll(struct file *f, poll_table *wait) {
-  struct rb_session *s = f->private_data;
+  struct rb_endpoint *endpoint = f->private_data;
+  struct rb_session *s = endpoint->session;
   __poll_t mask = 0;
   poll_wait(f, &s->wait, wait);
   mutex_lock(&s->lock);
+  if (endpoint->incarnation != s->incarnation) {
+    mask = EPOLLHUP | EPOLLERR;
+    goto out;
+  }
   if (s->head != s->tail)
     mask |= EPOLLIN;
   if (s->closed)
     mask |= EPOLLHUP;
   if (s->failed)
     mask |= EPOLLERR;
+out:
   mutex_unlock(&s->lock);
   return mask;
 }
 static int service_release(struct inode *inode, struct file *f) {
-  struct rb_session *s = f->private_data;
+  struct rb_endpoint *endpoint = f->private_data;
+  struct rb_session *s = endpoint->session;
   mutex_lock(&s->lock);
-  s->attached = false;
-  if (!s->closed)
-    fail(s);
+  if (endpoint->incarnation == s->incarnation) {
+    s->attached = false;
+    if (!s->closed)
+      fail(s);
+  }
   mutex_unlock(&s->lock);
+  kfree(endpoint);
   kref_put(&s->ref, destroy);
   return 0;
 }
@@ -788,67 +1024,39 @@ static const struct file_operations service_fops = {
     .poll = service_poll,
     .release = service_release,
     .llseek = no_llseek};
-static long broker_ioctl(struct file *f, unsigned cmd, unsigned long arg) {
-  struct rb_session *s;
+static int attach_service(void *owner) {
+  struct rb_session *s = owner;
+  struct rb_endpoint *endpoint;
   int fd;
-  if (cmd != RB_ACCEPT)
-    return -ENOTTY;
-  for (;;) {
-    mutex_lock(&broker_lock);
-    if (!list_empty(&pending_sessions))
-      break;
-    mutex_unlock(&broker_lock);
-    if (f->f_flags & O_NONBLOCK)
-      return -EAGAIN;
-    if (wait_event_interruptible(broker_wait,
-                                 !list_empty_careful(&pending_sessions)))
-      return -ERESTARTSYS;
-  }
-  s = list_first_entry(&pending_sessions, struct rb_session, pending);
-  list_del_init(&s->pending);
-  kref_get(&s->ref);
-  mutex_unlock(&broker_lock);
   mutex_lock(&s->lock);
-  s->attached = true;
-  mutex_unlock(&s->lock);
-  fd = anon_inode_getfd("v4l2-rkmpp-session", &service_fops, s, O_RDWR | O_CLOEXEC);
-  if (fd < 0) {
-    mutex_lock(&s->lock);
-    fail(s);
+  if (s->closed || s->failed || s->attached) {
     mutex_unlock(&s->lock);
+    return -EPIPE;
+  }
+  endpoint = kmalloc(sizeof(*endpoint), GFP_KERNEL);
+  if (!endpoint) {
+    fd = -ENOMEM;
+    goto failed;
+  }
+  kref_get(&s->ref);
+  endpoint->session = s;
+  endpoint->incarnation = s->incarnation;
+  s->attached = true;
+  fd = anon_inode_getfd("v4l2-rkmpp-session", &service_fops, endpoint,
+                        O_RDWR | O_CLOEXEC);
+  if (fd < 0)
+    goto failed;
+  mutex_unlock(&s->lock);
+  return fd;
+failed:
+  /* The broker has consumed this offer. Every allocation failure must
+   * terminate the client queues, including failure before taking a ref. */
+  s->attached = false;
+  fail(s);
+  mutex_unlock(&s->lock);
+  if (endpoint) {
+    kfree(endpoint);
     kref_put(&s->ref, destroy);
   }
   return fd;
 }
-static int broker_open(struct inode *inode, struct file *f) {
-  int r = 0;
-  mutex_lock(&broker_lock);
-  if (broker_opened)
-    r = -EBUSY;
-  else
-    broker_opened = true;
-  mutex_unlock(&broker_lock);
-  return r;
-}
-static int broker_release(struct inode *inode, struct file *f) {
-  mutex_lock(&broker_lock);
-  broker_opened = false;
-  mutex_unlock(&broker_lock);
-  return 0;
-}
-static __poll_t broker_poll(struct file *f, poll_table *wait) {
-  __poll_t mask = 0;
-  poll_wait(f, &broker_wait, wait);
-  mutex_lock(&broker_lock);
-  if (!list_empty(&pending_sessions))
-    mask = EPOLLIN;
-  mutex_unlock(&broker_lock);
-  return mask;
-}
-const struct file_operations rb_broker_fops = {.owner = THIS_MODULE,
-                                               .open = broker_open,
-                                               .release = broker_release,
-                                               .poll = broker_poll,
-                                               .unlocked_ioctl = broker_ioctl,
-                                               .compat_ioctl = broker_ioctl,
-                                               .llseek = no_llseek};

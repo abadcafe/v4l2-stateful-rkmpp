@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use super::registration::adopt;
 use crate::pool::Direction;
-use crate::protocol::{Descriptor, MAX_BUFFERS, Pool, VERSION};
+use crate::protocol::VERSION;
+use crate::protocol::registration::{Descriptor, MAX_BUFFERS, Pool};
 
 fn returned(count: usize) -> Pool {
   let mut pool = Pool {

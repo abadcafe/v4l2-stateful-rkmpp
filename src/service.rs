@@ -1,13 +1,13 @@
 //! module: service; responsibility: supervise the external bridge
 //! daemon lifetime. operations: serve; entities: none; tests:
 //! service_tests and Python process acceptance.
-use std::io;
 use std::os::fd::AsFd;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::diagnostics::Endpoint;
 use crate::shutdown::Signals;
-use crate::transport::Broker;
+use crate::transport::{Admission, Broker};
 mod driver;
 #[cfg(test)]
 mod driver_tests;
@@ -28,31 +28,44 @@ pub fn serve(path: &Path, diagnostics: &Path) -> Result<(), String> {
       format!("open diagnostics {}: {error}", diagnostics.display())
     })?;
   eprintln!("rkmpp service listening on {}", path.display());
-  let mut workers = supervisor::Supervisor::default();
+  let mut workers = supervisor::Supervisor::new(shutdown.clone())
+    .map_err(|e| format!("create supervisor: {e}"))?;
+  let exits = workers.notification();
   let result = (|| {
     while !shutdown.stopping() {
-      let session = match broker.accept(&signals) {
-        Ok(Some(session)) => session,
-        Ok(None) => continue,
-        Err(error)
-          if matches!(
-            error.kind(),
-            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
-          ) =>
-        {
+      workers.reap();
+      let session = match broker.accept(&signals, &exits) {
+        Ok(Admission::Accepted(session)) => session,
+        Ok(Admission::Idle) => continue,
+        Ok(Admission::Rejected(error)) => {
+          eprintln!("rkmpp admission rejected: {error}");
+          workers.reap();
+          continue;
+        }
+        Ok(Admission::Pressure(error)) => {
+          eprintln!("rkmpp admission pressure: {error}");
+          workers.reap();
+          signals
+            .wait(Duration::from_millis(100))
+            .map_err(|e| format!("admission wait: {e}"))?;
           continue;
         }
         Err(error) => return Err(format!("accept control: {error}")),
       };
       workers.reap();
       let shutdown = shutdown.clone();
-      workers
-        .start(move || {
-          if let Err(error) = driver::run(session, shutdown) {
-            eprintln!("rkmpp session: {error}");
-          }
-        })
-        .map_err(|e| format!("start worker: {e}"))?;
+      if let Err(error) = workers.start(move || {
+        if let Err(error) = driver::run(session, shutdown) {
+          eprintln!("rkmpp session: {error}");
+        }
+      }) {
+        // Failed spawn drops the closure and its owned session. Other
+        // workers retain their channels and shutdown state.
+        eprintln!("rkmpp worker admission failed: {error}");
+        signals
+          .wait(Duration::from_millis(100))
+          .map_err(|e| format!("admission wait: {e}"))?;
+      }
     }
     Ok(())
   })();

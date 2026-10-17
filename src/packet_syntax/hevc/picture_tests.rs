@@ -1,0 +1,113 @@
+//! module: picture_tests; responsibility: specify picture-wide HEVC
+//! consistency through the header comparison API. operations: tests;
+//! entities: none; tests: independent/dependent invariants, active RPS,
+//! absent arrays and invalid reference counts (H.265 7.4.7.1).
+use super::super::ffi;
+use super::picture::Picture;
+
+fn header() -> (ffi::GstH265NalUnit, ffi::GstH265SliceHdr) {
+  // Scalar/array-only C input records; null PPS is an opaque identity
+  // here. The owning syntax validator separately validates PPS
+  // existence.
+  let mut nal: ffi::GstH265NalUnit = unsafe { std::mem::zeroed() };
+  let mut slice: ffi::GstH265SliceHdr = unsafe { std::mem::zeroed() };
+  nal.type_ = 20;
+  nal.temporal_id_plus1 = 1;
+  slice.pic_output_flag = 1;
+  slice.num_long_term_sps = 1;
+  slice.num_long_term_pics = 1;
+  slice.short_term_ref_pic_sets.numnegativepics = 1;
+  slice.short_term_ref_pic_sets.numpositivepics = 1;
+  (nal, slice)
+}
+
+#[test]
+fn test_agrees_rejects_every_picture_wide_independent_field() {
+  let (nal, slice) = header();
+  let first = Picture::new(&nal, &slice).unwrap();
+  let changes: [fn(&mut ffi::GstH265SliceHdr); 17] = [
+    |s| s.no_output_of_prior_pics_flag ^= 1,
+    |s| s.pic_output_flag ^= 1,
+    |s| s.pic_order_cnt_lsb += 1,
+    |s| s.short_term_ref_pic_set_sps_flag ^= 1,
+    |s| s.short_term_ref_pic_set_idx += 1,
+    |s| s.num_long_term_sps += 1,
+    |s| s.num_long_term_pics += 1,
+    |s| s.lt_idx_sps[0] += 1,
+    |s| s.poc_lsb_lt[1] += 1,
+    |s| s.used_by_curr_pic_lt_flag[1] ^= 1,
+    |s| s.delta_poc_msb_present_flag[0] ^= 1,
+    |s| s.delta_poc_msb_cycle_lt[0] += 1,
+    |s| s.temporal_mvp_enabled_flag ^= 1,
+    |s| s.short_term_ref_pic_sets.deltapocs0[0] += 1,
+    |s| s.short_term_ref_pic_sets.deltapocs1[0] += 1,
+    |s| s.short_term_ref_pic_sets.usedbycurrpics0[0] ^= 1,
+    |s| s.short_term_ref_pic_sets.usedbycurrpics1[0] ^= 1,
+  ];
+  for (index, change) in changes.into_iter().enumerate() {
+    let mut other = slice;
+    change(&mut other);
+    assert!(
+      !Picture::new(&nal, &other).unwrap().agrees(&first),
+      "field {index}"
+    );
+  }
+}
+
+#[test]
+fn test_agrees_dependent_segment_inherits_only_absent_fields() {
+  let (nal, slice) = header();
+  let first = Picture::new(&nal, &slice).unwrap();
+  let mut dependent = slice;
+  dependent.dependent_slice_segment_flag = 1;
+  dependent.pic_output_flag = 0;
+  dependent.pic_order_cnt_lsb = 99;
+  assert!(Picture::new(&nal, &dependent).unwrap().agrees(&first));
+  dependent.no_output_of_prior_pics_flag = 1;
+  assert!(!Picture::new(&nal, &dependent).unwrap().agrees(&first));
+  dependent.no_output_of_prior_pics_flag = 0;
+  dependent.pps = std::ptr::dangling_mut();
+  assert!(!Picture::new(&nal, &dependent).unwrap().agrees(&first));
+  dependent.pps = slice.pps;
+  for independent in [slice, dependent] {
+    assert!(Picture::new(&nal, &independent).unwrap().agrees(&first));
+    let mut other = nal;
+    other.temporal_id_plus1 += 1;
+    assert!(
+      !Picture::new(&other, &independent).unwrap().agrees(&first)
+    );
+    other = nal;
+    other.type_ += 1;
+    assert!(
+      !Picture::new(&other, &independent).unwrap().agrees(&first)
+    );
+  }
+}
+
+#[test]
+fn test_agrees_ignores_slice_local_fields_and_inactive_array_entries() {
+  let (nal, slice) = header();
+  let first = Picture::new(&nal, &slice).unwrap();
+  let mut other = slice;
+  other.segment_address = 8;
+  other.type_ = 1;
+  other.qp_delta = 4;
+  other.lt_idx_sps[15] = 9;
+  other.short_term_ref_pic_sets.deltapocs0[15] = 8;
+  assert!(Picture::new(&nal, &other).unwrap().agrees(&first));
+}
+
+#[test]
+fn test_new_rejects_out_of_range_reference_counts() {
+  let (nal, slice) = header();
+  let changes: [fn(&mut ffi::GstH265SliceHdr); 3] = [
+    |s| s.num_long_term_pics = 16,
+    |s| s.short_term_ref_pic_sets.numnegativepics = 17,
+    |s| s.short_term_ref_pic_sets.numpositivepics = 17,
+  ];
+  for change in changes {
+    let mut other = slice;
+    change(&mut other);
+    assert!(Picture::new(&nal, &other).is_err());
+  }
+}

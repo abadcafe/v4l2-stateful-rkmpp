@@ -2,21 +2,30 @@
 //! access. operations: allocate/import, read/write; entities: Buffer,
 //! typed CPU mappings. tests: dma_tests, real-GPU quantize_tests;
 //! persistent input maps are private to the crate.
+use std::collections::BTreeMap;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 pub(crate) mod system;
 #[cfg(test)]
 mod system_tests;
+
+// A live mapping keeps its Allocation (and therefore this lease) alive.
+// Weak entries do not extend storage lifetime; import serializes lookup
+// and insertion so dup/reopened descriptors cannot create competing
+// locks.
+type StorageLeases = BTreeMap<(u64, u64), Weak<AtomicBool>>;
+static STORAGE_LEASES: LazyLock<Mutex<StorageLeases>> =
+  LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 #[derive(Debug)]
 struct Allocation {
   fd: OwnedFd,
   size: usize,
-  cpu_busy: AtomicBool,
+  cpu_busy: Arc<AtomicBool>,
 }
 #[derive(Clone, Debug)]
 pub struct Buffer(Arc<Allocation>);
@@ -42,11 +51,24 @@ impl Buffer {
         "DMA buffer smaller than declared size",
       ));
     }
-    Ok(Self(Arc::new(Allocation {
-      fd,
-      size,
-      cpu_busy: AtomicBool::new(false),
-    })))
+    let mut leases = STORAGE_LEASES
+      .lock()
+      .map_err(|_| io::Error::other("DMA storage registry poisoned"))?;
+    leases.retain(|_, lease| lease.strong_count() != 0);
+    let identity = (stat.st_dev, stat.st_ino);
+    let cpu_busy = leases
+      .get(&identity)
+      .and_then(Weak::upgrade)
+      .unwrap_or_else(|| {
+        let lease = Arc::new(AtomicBool::new(false));
+        leases.insert(identity, Arc::downgrade(&lease));
+        lease
+      });
+    Ok(Self(Arc::new(Allocation { fd, size, cpu_busy })))
+  }
+
+  pub(crate) fn same_storage(&self, other: &Self) -> bool {
+    Arc::ptr_eq(&self.0.cpu_busy, &other.0.cpu_busy)
   }
 
   pub fn size(&self) -> usize {

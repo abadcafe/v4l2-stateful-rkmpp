@@ -30,7 +30,7 @@ from tests.support.mock_process import Process
 from tests.support.mock_wire import Patch, Request
 from tests.support.mock_wire import Reply as Response
 from tests.support.outcome import accepted
-from tests.support.stream import Codec
+from tests.support.stream import Codec, load
 
 
 def decoding(process: Process, buffer: Buffer, size: int) -> threading.Event:
@@ -77,7 +77,7 @@ def test_service_sigkill_during_real_mpp_decode_allows_fresh_daemon_restart(
     artifacts: Path,
 ) -> None:
     process = mock_factory()
-    data = (artifacts / "h264-yuv420p.h264").read_bytes()
+    data = accepted(load(Codec.H264, artifacts / "h264-yuv420p.h264"))[0].data
     with accepted(Buffer.allocate(max(4096, len(data)))) as buffer:
         accepted(buffer.write(data))
         assert decoding(process, buffer, len(data)).wait(5)
@@ -104,7 +104,7 @@ def test_service_signal_active_mpp_worker_exits_and_releases_session(
     artifacts: Path,
     number: int,
 ) -> None:
-    data = (artifacts / "h264-yuv420p.h264").read_bytes()
+    data = accepted(load(Codec.H264, artifacts / "h264-yuv420p.h264"))[0].data
     with accepted(Buffer.allocate(max(4096, len(data)))) as buffer:
         accepted(buffer.write(data))
         assert decoding(mock_service, buffer, len(data)).wait(5)

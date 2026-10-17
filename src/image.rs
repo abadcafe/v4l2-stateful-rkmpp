@@ -6,6 +6,13 @@ use std::os::fd::{AsFd, BorrowedFd};
 
 use crate::dma::Buffer;
 
+#[repr(u32)]
+#[derive(Clone, Copy, Debug)]
+pub enum Depth {
+  Eight = 8,
+  Ten = 10,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Plane<'a> {
   fd: BorrowedFd<'a>,

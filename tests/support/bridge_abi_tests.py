@@ -35,28 +35,28 @@ def test_wire_layout_and_command_sizes_match_published_contract() -> None:
     assert [
         (ctypes.sizeof(t), ctypes.alignment(t))
         for t in (Message, Batch, Descriptor, Pool)
-    ] == [(104, 8), (3408, 8), (8, 4), (288, 8)]
-    assert ACCEPT == 0x5280 and EXCHANGE == 0xCD505284 and REGISTER_POOL == 0xC1205285
+    ] == [(120, 8), (3920, 8), (8, 4), (288, 8)]
+    assert ACCEPT == 0x5280 and EXCHANGE == 0xCF505284 and REGISTER_POOL == 0xC1205285
 
 
 def test_wire_defaults_zero_all_reserved_fields() -> None:
-    assert bytes(Message()) == bytes(104)
-    assert bytes(Batch()) == bytes(3408)
+    assert bytes(Message()) == bytes(120)
+    assert bytes(Batch()) == bytes(3920)
     assert bytes(Pool()) == bytes(288)
-    assert VERSION == 2
+    assert VERSION == 7
 
 
 def test_wire_defaults_isolate_each_message() -> None:
     first, second = Message(), Message()
     first.reserved[0] = 7
     first.index = 12
-    assert bytes(second) == bytes(104)
+    assert bytes(second) == bytes(120)
     assert first.index == 12 and first.reserved[0] == 7
 
 
 def test_event_and_reply_discriminants_match_kernel_uapi() -> None:
     assert list(Event) == list(range(1, 8))
-    assert list(Reply) == list(range(32, 38))
+    assert list(Reply) == list(range(32, 39))
 
 
 @pytest.mark.parametrize(
@@ -87,6 +87,12 @@ def test_event_and_reply_discriminants_match_kernel_uapi() -> None:
                 ("ycbcr_enc", "ycbcr_enc"),
                 ("quantization", "quantization"),
                 ("pool_id", "pool_id"),
+                ("data_offset", "data_offset"),
+                ("crop_left", "crop_left"),
+                ("crop_top", "crop_top"),
+                ("coded_width", "coded_width"),
+                ("coded_height", "coded_height"),
+                ("field", "field"),
                 ("reserved", "reserved"),
             ),
         ),

@@ -10,6 +10,7 @@ Actual hardware decoding must reach the composed browser window.
 """
 
 import base64
+import json
 import time
 from pathlib import Path
 
@@ -17,14 +18,24 @@ import pytest
 from pydantic import BaseModel
 
 from tests.browser.conftest import BrowserFactory
+from tests.support.browser import Browser
 from tests.support.graphics import get_info
 from tests.support.outcome import accepted
 from tests.support.pixels import crop_rgb, decode_png
 from tests.support.player import media_properties
+from tests.support.service_runtime import Running, sample
+from tests.tools.media import expand
 
 
 class Screenshot(BaseModel):
     data: str
+
+
+class DecodedColor(BaseModel):
+    primaries: str
+    transfer: str
+    matrix: str
+    fullRange: bool
 
 
 @pytest.mark.parametrize(
@@ -140,10 +151,26 @@ def test_browser_hdr_inputs_complete_hardware_decode(
         time.sleep(0.1)
         state = accepted(browser.player.state())
     properties = accepted(media_properties(browser.tab.events()))
+    _ = (tmp_path / "hdr-media-properties.json").write_text(
+        json.dumps(properties, indent=2)
+    )
     assert properties["kVideoDecoderName"] == "V4L2VideoDecoder"
     assert properties["kIsPlatformVideoDecoder"] == "true"
     assert state.frames.total == frames and state.error is None
     assert 0 <= state.frames.dropped < frames
+    color = accepted(
+        browser.tab.evaluate(
+            "(()=>{const f=new VideoFrame(document.querySelector('video'));"
+            + "const c=f.colorSpace.toJSON();f.close();return c;})()",
+            DecodedColor,
+        )
+    )
+    assert color.primaries == "bt2020" and color.matrix == "bt2020-ncl"
+    assert color.transfer == ("hlg" if "hlg" in file else "pq")
+    assert not color.fullRange
+    _ = (tmp_path / "hdr-decoded-color.json").write_text(
+        color.model_dump_json(indent=2)
+    )
     # The display's dynamic-range result is evidence, not proof of physical HDR output.
     _ = (tmp_path / "hdr-playback.json").write_text(state.model_dump_json(indent=2))
 
@@ -175,3 +202,25 @@ def test_browser_pause_stops_clock_and_seek_resumes_hardware_decode(
         properties["kVideoDecoderName"] == "V4L2VideoDecoder"
         and properties["kIsPlatformVideoDecoder"] == "true"
     )
+
+
+def test_browser_long_h264_stream_preserves_input_backpressure(
+    bridge_service: Running, artifacts: Path, tmp_path: Path
+) -> None:
+    _ = accepted(sample(bridge_service))
+    video = tmp_path / "long.mp4"
+    _ = accepted(expand(artifacts / "h264-4k30-seed.mp4", video, 300))
+    browser = accepted(Browser.open(tmp_path / "browser", (video,), ()))
+    try:
+        assert accepted(browser.player.load(browser.url(video.name)))
+        deadline = time.monotonic() + 30
+        state = accepted(browser.player.state())
+        while not state.ended:
+            assert state.error is None and time.monotonic() < deadline, state
+            time.sleep(0.1)
+            state = accepted(browser.player.state())
+        assert (state.width, state.height, state.frames.total) == (3840, 2160, 300)
+        properties = accepted(media_properties(browser.tab.events()))
+        assert properties["kVideoDecoderName"] == "V4L2VideoDecoder"
+    finally:
+        _ = accepted(browser.close())

@@ -10,7 +10,7 @@ from typing import final
 
 from tests.support.syscalls import command
 
-VERSION = 2
+VERSION = 7
 MAX_BATCH = 16
 MAX_BUFFERS = 32
 
@@ -32,6 +32,7 @@ class Reply(IntEnum):
     EOS = 35
     STOPPED = 36
     FAILED = 37
+    DRAINING = 38
 
 
 @final
@@ -57,7 +58,13 @@ class Message(ctypes.Structure):
     ycbcr_enc: int = 0
     quantization: int = 0
     pool_id: int = 0
-    reserved: ctypes.Array[ctypes.c_uint32] = (ctypes.c_uint32 * 3)()
+    data_offset: int = 0
+    crop_left: int = 0
+    crop_top: int = 0
+    coded_width: int = 0
+    coded_height: int = 0
+    field: int = 0
+    reserved: ctypes.Array[ctypes.c_uint32] = (ctypes.c_uint32 * 1)()
     _fields_ = [
         ("version", ctypes.c_uint32),
         ("kind", ctypes.c_uint32),
@@ -83,9 +90,15 @@ class Message(ctypes.Structure):
                 "ycbcr_enc",
                 "quantization",
                 "pool_id",
+                "data_offset",
+                "crop_left",
+                "crop_top",
+                "coded_width",
+                "coded_height",
+                "field",
             )
         ],
-        ("reserved", ctypes.c_uint32 * 3),
+        ("reserved", ctypes.c_uint32 * 1),
     ]
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from tests.support.annexb import packets as annexb_packets
 from tests.support.outcome import Ok, Rejected, Result
 
 
@@ -35,7 +36,10 @@ def parse(codec: Codec, data: bytes) -> Result[tuple[Packet, ...]]:
     if not data or len(data) > 16 * 1024 * 1024:
         return Rejected(errno.EINVAL, "empty or oversized compressed input")
     if codec in (Codec.H264, Codec.HEVC):
-        return Ok((Packet(data=data, timestamp=0),))
+        framed = annexb_packets(data, "h264" if codec == Codec.H264 else "hevc")
+        if isinstance(framed, Rejected):
+            return framed
+        return Ok(tuple(Packet(data=packet, timestamp=0) for packet in framed.value))
     if len(data) < 32 or data[:4] != b"DKIF":
         return Rejected(errno.EINVAL, "truncated IVF header")
     version, length, fourcc = struct.unpack_from("<HH4s", data, 4)

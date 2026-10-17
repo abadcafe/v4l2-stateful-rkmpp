@@ -35,6 +35,8 @@ from tests.support.stream import Codec, Packet, load
 
 
 class Frame(BaseModel):
+    flags: int
+    field: int
     digest: str
     width: int
     height: int
@@ -46,12 +48,27 @@ class Frame(BaseModel):
     quantization: int
 
 
+class InputCompletion(BaseModel):
+    index: int
+    flags: int
+    timestamp: int
+
+
+class DecodeError(BaseModel):
+    timestamp: int
+    flags: int
+
+
 class Decoded(BaseModel):
     frames: tuple[Frame, ...]
     layouts: tuple[tuple[int, int], ...]
     eos: bool
+    drain_frames: tuple[int, ...]
     registrations: tuple[tuple[int, int], ...]
     maximum_reply_batch: int
+    reply_order: tuple[int, ...]
+    input_completions: tuple[InputCompletion, ...]
+    errors: tuple[DecodeError, ...]
 
 
 class _Stream:
@@ -61,8 +78,27 @@ class _Stream:
         packets: tuple[Packet, ...],
         repetitions: int,
         owned: ExitStack,
+        initial_capture_size: int,
+        reuse_capture: bool,
+        drain_at: int,
+        capture_restart: bool,
+        input_count: int,
+        natural_eos: bool,
+        restart_at_frame: int,
+        abort_drain: bool,
+        natural_sequences: int,
+        capture_count: int,
+        sources: tuple[int, ...],
     ) -> None:
+        self._natural_remaining: int = natural_sequences
+        self._capture_count: int = capture_count
+        self._sources: tuple[int, ...] = sources
+        self._abort_drain: bool = abort_drain
         self._codec: Codec = codec
+        self._natural_eos: bool = natural_eos
+        self._restart_at_frame: int = restart_at_frame
+        self._ordinary_restart: bool = False
+        self._input_count: int = input_count
         self._packets: tuple[Packet, ...] = packets
         self._owned: ExitStack = owned
         self._repetitions: int = repetitions
@@ -85,9 +121,19 @@ class _Stream:
         self._draining: bool = False
         self._replacing: bool = False
         self._eos: bool = False
+        self._drain_frames: list[int] = []
         self._error: Rejected | None = None
         self._registrations: list[tuple[int, int]] = []
         self._maximum_reply_batch: int = 0
+        self._initial_capture_size: int = initial_capture_size
+        self._reuse_capture: bool = reuse_capture
+        self._drain_at: int = drain_at
+        self._capture_restart: bool = capture_restart
+        self._resume_pending: bool = False
+        self._reply_order: list[int] = []
+        self._input_completions: list[InputCompletion] = []
+        self._input_timestamps: dict[int, int] = {}
+        self._errors: list[DecodeError] = []
 
     def _event(self, kind: int, index: int = 0, **fields: int) -> Message:
         return Message(
@@ -105,7 +151,9 @@ class _Stream:
         return Response(code=code)
 
     def _input(self, index: int) -> Result[None]:
-        if self._next == len(self._packets):
+        if self._next == len(self._packets) or (
+            self._drain_at and self._next == self._drain_at
+        ):
             return Ok(None)
         packet = self._packets[self._next]
         written = self._inputs[index].write(packet.data)
@@ -113,22 +161,24 @@ class _Stream:
             return written
         self._next += 1
         self._inflight.add(index)
+        self._input_timestamps[index] = packet.timestamp * 1000
         self._events.append(
             self._event(
                 Event.PACKET,
                 index,
                 codec=self._codec.fourcc,
                 bytesused=len(packet.data),
+                count=self._next,
                 timestamp=packet.timestamp * 1000,
+                flags=self._sources[self._next - 1],
             )
         )
         return Ok(None)
 
-    def _prepare_capture(self) -> Result[None]:
-        assert self._layout is not None
+    def _prepare_capture(self, size: int) -> Result[None]:
         self._capture = []
-        for _ in range(32):
-            buffer = Buffer.allocate(self._layout.size)
+        for _ in range(self._capture_count):
+            buffer = Buffer.allocate(size)
             if isinstance(buffer, Rejected):
                 return buffer
             self._capture.append(self._owned.enter_context(buffer.value))
@@ -169,18 +219,41 @@ class _Stream:
     def _consume(self, message: Message) -> Result[None]:
         if message.version != VERSION or message.epoch != self._epoch:
             return Rejected(errno.EPROTO, "service reply version or epoch changed")
+        self._reply_order.append(message.kind)
         if message.kind == Reply.INPUT_DONE:
             if message.pool_id != self._input_id or message.index not in self._inflight:
                 return Rejected(errno.EPROTO, "service completed an unowned input")
             self._inflight.remove(message.index)
+            self._input_completions.append(
+                InputCompletion(
+                    index=message.index,
+                    flags=message.flags,
+                    timestamp=self._input_timestamps.pop(message.index),
+                )
+            )
             return self._input(message.index)
         if message.kind == Reply.LAYOUT:
             if message.format != 1 or message.size <= 0:
                 return Rejected(errno.EPROTO, "service published invalid NV12 storage")
-            replacing = self._layout is not None
+            replacing = bool(self._capture)
             self._layout = Message.from_buffer_copy(message)
             self._layouts.append((message.width, message.height))
             self._generation += 1
+            if (
+                replacing
+                and self._reuse_capture
+                and all(buffer.size >= message.size for buffer in self._capture)
+            ):
+                self._events = deque(
+                    event for event in self._events if event.kind != Event.RECYCLE
+                )
+                self._events.append(
+                    self._event(Event.CAPTURE, count=len(self._capture), flags=1)
+                )
+                self._events.extend(
+                    self._event(Event.RECYCLE, index) for index in self._available
+                )
+                return Ok(None)
             self._capture_id += 1
             if replacing:
                 self._events = deque(
@@ -189,7 +262,7 @@ class _Stream:
                 self._replacing = True
                 self._events.append(self._event(Event.RESET, flags=9 | (1 << 16)))
                 return Ok(None)
-            return self._prepare_capture()
+            return self._prepare_capture(message.size)
         if message.kind == Reply.STOPPED:
             if self._restarting:
                 self._restarting = False
@@ -208,10 +281,20 @@ class _Stream:
                 return Ok(None)
             if not self._replacing:
                 return Rejected(errno.EPROTO, "unsolicited stop acknowledgement")
+            if self._ordinary_restart:
+                self._ordinary_restart = False
+                self._capture_id += 1
             self._retired.extend(self._capture)
             self._capture = []
             self._replacing = False
-            return self._prepare_capture()
+            assert self._layout is not None
+            prepared = self._prepare_capture(self._layout.size)
+            if isinstance(prepared, Rejected):
+                return prepared
+            if self._resume_pending:
+                self._resume_pending = False
+                return self._resume()
+            return Ok(None)
         if message.kind == Reply.FRAME:
             layout = self._layout
             if (
@@ -219,23 +302,37 @@ class _Stream:
                 or message.pool_id != self._capture_id
                 or message.generation != self._generation
                 or message.index not in self._available
-                or message.bytesused != layout.stride * layout.rows * 3 // 2
+                or (
+                    message.bytesused != layout.stride * layout.rows * 3 // 2
+                    and not (message.bytesused == 0 and message.flags & 2)
+                )
             ):
                 return Rejected(
                     errno.EPROTO, "service completed an unowned capture slot"
                 )
             self._available.remove(message.index)
+            if message.bytesused == 0:
+                self._errors.append(
+                    DecodeError(timestamp=message.timestamp, flags=message.flags)
+                )
+                self._available.add(message.index)
+                self._events.append(self._event(Event.RECYCLE, message.index))
+                return Ok(None)
             pixels = i420(
                 self._capture[message.index].fd,
                 layout.width,
                 layout.height,
                 layout.stride,
                 layout.rows,
+                left=layout.crop_left,
+                top=layout.crop_top,
             )
             if isinstance(pixels, Rejected):
                 return pixels
             self._frames.append(
                 Frame(
+                    flags=message.flags,
+                    field=message.field,
                     digest=hashlib.sha256(pixels.value).hexdigest(),
                     width=layout.width,
                     height=layout.height,
@@ -248,9 +345,53 @@ class _Stream:
                 )
             )
             self._available.add(message.index)
-            self._events.append(self._event(Event.RECYCLE, message.index))
+            if self._draining and self._abort_drain:
+                self._abort_drain = False
+                self._drain_at = 0
+                self._draining = False
+                self._ordinary_restart = True
+                self._replacing = True
+                self._resume_pending = True
+                self._events = deque(
+                    event for event in self._events if event.kind != Event.RECYCLE
+                )
+                self._events.append(
+                    self._event(Event.RESET, flags=9 | (1 << 16) | (1 << 17))
+                )
+            elif len(self._frames) == self._restart_at_frame:
+                self._ordinary_restart = True
+                self._replacing = True
+                self._events = deque(
+                    event for event in self._events if event.kind != Event.RECYCLE
+                )
+                self._events.append(self._event(Event.RESET, flags=9 | (1 << 16)))
+            elif not self._ordinary_restart:
+                self._events.append(self._event(Event.RECYCLE, message.index))
+            return Ok(None)
+        if message.kind == Reply.DRAINING:
+            self._draining = True
             return Ok(None)
         if message.kind == Reply.EOS:
+            self._drain_frames.append(len(self._frames))
+            if self._ordinary_restart and self._resume_pending:
+                return Ok(None)
+            if self._drain_at:
+                self._drain_at = 0
+                self._draining = False
+                if self._capture_restart:
+                    self._events.clear()
+                    self._capture_id += 1
+                    self._replacing = True
+                    self._resume_pending = True
+                    self._events.append(
+                        self._event(Event.RESET, flags=9 | (1 << 16) | (1 << 17))
+                    )
+                    return Ok(None)
+                return self._resume()
+            if self._natural_remaining > 1:
+                self._natural_remaining -= 1
+                self._events.appendleft(self._event(Event.RESUME))
+                return Ok(None)
             self._completed += 1
             self._events.clear()
             if self._completed < self._repetitions:
@@ -262,6 +403,15 @@ class _Stream:
             self._events.append(self._event(Event.CLOSE))
             return Ok(None)
         return Rejected(errno.EPROTO, "unexpected service reply")
+
+    def _resume(self) -> Result[None]:
+        self._events.append(self._event(Event.RESUME))
+        for index in range(len(self._inputs)):
+            if index not in self._inflight:
+                prepared = self._input(index)
+                if isinstance(prepared, Rejected):
+                    return prepared
+        return Ok(None)
 
     def _handle(self, request: Request) -> Response:
         if request.command == REGISTER_POOL:
@@ -281,8 +431,11 @@ class _Stream:
                 return self._fail(consumed.operation, consumed.code)
             batch.results[index] = 0
         if (
-            self._next == len(self._packets)
-            and not self._inflight
+            (
+                self._next == len(self._packets)
+                or (self._drain_at and self._next == self._drain_at)
+            )
+            and not self._natural_eos
             and not self._draining
             and not self._restarting
         ):
@@ -294,8 +447,13 @@ class _Stream:
         return Response(body=bytes(batch))
 
     def run(self, process: Process) -> Result[Decoded]:
+        if self._initial_capture_size:
+            self._capture_id = 1
+            prepared = self._prepare_capture(self._initial_capture_size)
+            if isinstance(prepared, Rejected):
+                return prepared
         size = max(4096, max(len(packet.data) for packet in self._packets))
-        for index in range(min(8, len(self._packets))):
+        for index in range(min(self._input_count, len(self._packets))):
             allocation = Buffer.allocate(size)
             if isinstance(allocation, Rejected):
                 return allocation
@@ -317,19 +475,77 @@ class _Stream:
                 frames=tuple(self._frames),
                 layouts=tuple(self._layouts),
                 eos=self._eos,
+                drain_frames=tuple(self._drain_frames),
                 registrations=tuple(self._registrations),
                 maximum_reply_batch=self._maximum_reply_batch,
+                reply_order=tuple(self._reply_order),
+                input_completions=tuple(self._input_completions),
+                errors=tuple(self._errors),
             )
         )
 
 
 def play(
-    process: Process, codec: Codec, path: Path, repetitions: int = 1
+    process: Process,
+    codec: Codec,
+    path: Path,
+    repetitions: int = 1,
+    *,
+    initial_capture_size: int = 0,
+    reuse_capture: bool = False,
+    drain_at: int = 0,
+    capture_restart: bool = False,
+    submissions: tuple[Packet, ...] | None = None,
+    input_count: int = 8,
+    natural_eos: bool = False,
+    restart_at_frame: int = 0,
+    timestamps: tuple[int, ...] = (),
+    abort_drain: bool = False,
+    natural_sequences: int = 1,
+    capture_count: int = 18,
+    sources: tuple[int, ...] = (),
 ) -> Result[Decoded]:
     if not 1 <= repetitions <= 32:
         return Rejected(errno.EINVAL, "invalid decode repetition count")
-    packets = load(codec, path)
-    if isinstance(packets, Rejected):
-        return packets
+    if submissions is None:
+        packets = load(codec, path)
+        if isinstance(packets, Rejected):
+            return packets
+        chunks = packets.value
+    else:
+        chunks = submissions
+    if not chunks:
+        return Rejected(errno.EINVAL, "no input submissions")
+    if timestamps:
+        if len(timestamps) != len(chunks):
+            return Rejected(errno.EINVAL, "timestamp count does not match packets")
+        chunks = tuple(
+            Packet(data=p.data, timestamp=t)
+            for p, t in zip(chunks, timestamps, strict=True)
+        )
+    if not 18 <= capture_count <= 32:
+        return Rejected(errno.EINVAL, "invalid capture buffer count")
+    if not sources:
+        sources = (0,) * len(chunks)
+    if len(sources) != len(chunks) or any(s not in (0, 0x10000) for s in sources):
+        return Rejected(errno.EINVAL, "invalid timestamp sources")
+    if not 1 <= input_count <= 32:
+        return Rejected(errno.EINVAL, "invalid input buffer count")
     with ExitStack() as owned:
-        return _Stream(codec, packets.value, repetitions, owned).run(process)
+        return _Stream(
+            codec,
+            chunks,
+            repetitions,
+            owned,
+            initial_capture_size,
+            reuse_capture,
+            drain_at,
+            capture_restart,
+            input_count,
+            natural_eos,
+            restart_at_frame,
+            abort_drain,
+            natural_sequences,
+            capture_count,
+            sources,
+        ).run(process)

@@ -68,18 +68,14 @@ def test_exchange_invalid_response_header_reports_failed_and_keeps_broker_alive(
     ("kind", "version", "flags"),
     [
         (999, VERSION, 0),
-        (Event.DRAIN, VERSION, 0),
         (Event.PACKET, VERSION, 0),
         (Event.RECYCLE, VERSION, 0),
-        (Event.RESET, VERSION, 1 << 16),
         (Event.CLOSE, VERSION + 1, 0),
     ],
     ids=[
         "unknown",
-        "uninitialized-drain",
         "zero-packet-pool",
         "zero-recycle-pool",
-        "uninitialized-capture-reset",
         "event-version",
     ],
 )
@@ -229,3 +225,95 @@ def test_accept_fatal_errno_exits_broker_with_failure(mock_service: Process) -> 
     accepted(mock_service.reject_accept(errno.EIO))
     assert mock_service.process.wait(timeout=5) == 1
     assert "accept control" in mock_service.log()
+
+
+def test_exchange_empty_drain_completes_without_initializing_mpp(
+    mock_service: Process,
+) -> None:
+    first = True
+    replies: list[int] = []
+
+    def handle(request: Request) -> Response:
+        nonlocal first
+        assert request.command == EXCHANGE
+        batch = Batch.from_buffer_copy(request.body)
+        if first:
+            first = False
+            batch.event_count = 1
+            batch.events[0] = Message(version=VERSION, kind=Event.DRAIN, epoch=1)
+            return Response(body=bytes(batch))
+        replies.extend(
+            Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message)).kind
+            for i in range(batch.reply_count)
+        )
+        if replies:
+            return closed(request)
+        return Response(body=bytes(batch))
+
+    accepted(accepted(mock_service.session(handle)).wait(5))
+    assert replies == [Reply.EOS]
+
+
+def test_exchange_capture_reset_before_decoder_initialization_completes(
+    mock_service: Process,
+) -> None:
+    sent = False
+    replies: list[int] = []
+
+    def handle(request: Request) -> Response:
+        nonlocal sent
+        assert request.command == EXCHANGE
+        batch = Batch.from_buffer_copy(request.body)
+        if not sent:
+            sent = True
+            batch.event_count = 1
+            batch.events[0] = Message(
+                version=VERSION, kind=Event.RESET, flags=1 << 16, epoch=1
+            )
+            return Response(body=bytes(batch))
+        replies.extend(
+            Message.from_buffer_copy(batch.replies, index * ctypes.sizeof(Message)).kind
+            for index in range(batch.reply_count)
+        )
+        return Response(code=errno.EPIPE)
+
+    accepted(accepted(mock_service.session(handle)).wait(5))
+    assert replies == [Reply.STOPPED]
+    assert mock_service.process.poll() is None
+
+
+@pytest.mark.parametrize("kind", list(Event))
+@pytest.mark.parametrize("reserved", [1, 0xFFFFFFFF])
+def test_event_reserved_is_rejected_before_resource_transfer_or_state_mutation(
+    mock_service: Process, kind: Event, reserved: int
+) -> None:
+    first = True
+    responses: list[Message] = []
+
+    def handle(request: Request) -> Response:
+        nonlocal first
+        # Rejection must precede REGISTER_POOL, CLOSE, or backend RESET.
+        assert request.command == EXCHANGE
+        batch = Batch.from_buffer_copy(request.body)
+        if first:
+            first = False
+            batch.event_count = 1
+            message = Message(
+                version=VERSION, kind=kind, epoch=2, generation=3, pool_id=7
+            )
+            message.reserved[0] = reserved
+            batch.events[0] = message
+            return Response(body=bytes(batch))
+        responses.extend(
+            Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message))
+            for i in range(batch.reply_count)
+        )
+        return Response(code=errno.EPIPE)
+
+    accepted(accepted(mock_service.session(handle)).wait(5))
+    assert len(responses) == 1
+    failed = responses[0]
+    assert (failed.kind, failed.epoch, failed.generation) == (Reply.FAILED, 2, 3)
+    assert list(failed.reserved) == [0]
+    accepted(accepted(mock_service.session(closed)).wait(5))
+    assert mock_service.process.poll() is None

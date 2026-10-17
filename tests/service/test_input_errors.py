@@ -1,0 +1,210 @@
+"""module: test_input_errors; responsibility: submission-local error attribution.
+
+operations: process cases; entities: none; tests: immediate input errors,
+slot reuse, drain and keyframe recovery under the client-framed contract.
+"""
+
+from pathlib import Path
+
+import pytest
+
+from tests.support.mock_decode import play
+from tests.support.mock_process import Process
+from tests.support.outcome import accepted
+from tests.support.reference import frame_hashes
+from tests.support.stream import Codec, Packet, load
+
+
+@pytest.mark.parametrize(
+    "codec,damaged,file",
+    [
+        (Codec.H264, bytes.fromhex("00000165b8"), "h264-yuv420p.h264"),
+        (Codec.HEVC, bytes.fromhex("0000012601e0"), "hevc-yuv420p.hevc"),
+    ],
+)
+@pytest.mark.parametrize("input_count", [1, 8])
+def test_damaged_submission_does_not_poison_reused_input(
+    mock_service: Process,
+    artifacts: Path,
+    codec: Codec,
+    damaged: bytes,
+    file: str,
+    input_count: int,
+) -> None:
+    path = artifacts / file
+    good = accepted(load(codec, path))
+    inputs = (
+        Packet(data=damaged, timestamp=0),
+        Packet(data=damaged, timestamp=1000),
+    ) + tuple(Packet(data=p.data, timestamp=(i + 2) * 1000) for i, p in enumerate(good))
+    result = accepted(
+        play(mock_service, codec, path, input_count=input_count, submissions=inputs)
+    )
+    assert result.eos and not result.errors
+    assert tuple(frame.digest for frame in result.frames) == accepted(
+        frame_hashes(path, 8, 256, 128)
+    )
+    assert len(result.input_completions) == len(inputs)
+    assert [completion.flags & 2 for completion in result.input_completions] == [
+        2,
+        2,
+    ] + [0] * len(good)
+
+
+@pytest.mark.parametrize(
+    "codec,damaged",
+    [
+        (Codec.H264, bytes.fromhex("00000165b8")),
+        (Codec.HEVC, bytes.fromhex("0000012601e0")),
+    ],
+)
+@pytest.mark.parametrize("natural", [False, True])
+def test_damaged_final_submission_completes_before_drain(
+    mock_service: Process,
+    tmp_path: Path,
+    codec: Codec,
+    damaged: bytes,
+    natural: bool,
+) -> None:
+    marker = bytes.fromhex("0000010b" if codec == Codec.H264 else "0000014a01")
+    inputs = (Packet(data=damaged, timestamp=1000),) + (
+        (Packet(data=marker, timestamp=2000),) if natural else ()
+    )
+    result = accepted(
+        play(
+            mock_service,
+            codec,
+            tmp_path / "unused",
+            submissions=inputs,
+            input_count=1,
+            natural_eos=natural,
+        )
+    )
+    assert result.eos and not result.frames and not result.errors
+    assert len(result.input_completions) == len(inputs)
+    assert result.input_completions[0].flags & 2
+    assert all(completion.flags & 2 == 0 for completion in result.input_completions[1:])
+
+
+@pytest.mark.parametrize("established", [False, True])
+@pytest.mark.parametrize("input_count", [1, 8])
+def test_hevc_conflicting_slice_headers_reject_only_damaged_submission(
+    mock_service: Process,
+    artifacts: Path,
+    established: bool,
+    input_count: int,
+) -> None:
+    source = artifacts / "hevc-two-slices.hevc"
+    good = source.read_bytes()
+    # H.265 7.4.7.1: no_output_of_prior_pics_flag must agree across
+    # both IDR slices. Change only that bit in the second slice.
+    assert good[5716:5722] == bytes.fromhex("000001280130")
+    bad = bytearray(good)
+    bad[5721] ^= 0x40
+    payloads = ((good,) if established else ()) + (bytes(bad), good)
+    result = accepted(
+        play(
+            mock_service,
+            Codec.HEVC,
+            source,
+            input_count=input_count,
+            submissions=tuple(
+                Packet(data=data, timestamp=i * 1000) for i, data in enumerate(payloads)
+            ),
+        )
+    )
+    assert result.eos and not result.errors
+    assert tuple(bool(done.flags & 2) for done in result.input_completions) == (
+        ((False,) if established else ()) + (True, False)
+    )
+    expected = accepted(frame_hashes(source, 8, 256, 256))
+    assert tuple(frame.digest for frame in result.frames) == expected * (
+        2 if established else 1
+    )
+
+
+@pytest.mark.parametrize("established", [False, True])
+@pytest.mark.parametrize("input_count", [1, 8])
+@pytest.mark.parametrize("mask", [2, 1], ids=["no-prior-output", "long-term-reference"])
+def test_h264_conflicting_idr_marking_rejects_only_damaged_submission(
+    mock_service: Process,
+    artifacts: Path,
+    established: bool,
+    input_count: int,
+    mask: int,
+) -> None:
+    source = artifacts / "h264-two-slices.h264"
+    good = source.read_bytes()
+    # H.264 7.4.3.3: both slices of the primary picture must carry
+    # identical dec_ref_pic_marking(). Flip only bit 38 or 39 of the
+    # second NAL; all entropy-coded pixel data remains intact.
+    assert good[3146] == 0x65
+    bad = bytearray(good)
+    bad[3150] ^= mask
+    payloads = ((good,) if established else ()) + (bytes(bad), good)
+    result = accepted(
+        play(
+            mock_service,
+            Codec.H264,
+            source,
+            input_count=input_count,
+            submissions=tuple(
+                Packet(data=data, timestamp=i * 1000) for i, data in enumerate(payloads)
+            ),
+        )
+    )
+    assert result.eos and not result.errors
+    assert tuple(bool(done.flags & 2) for done in result.input_completions) == (
+        ((False,) if established else ()) + (True, False)
+    )
+    expected = accepted(frame_hashes(source, 8, 128, 128))
+    assert tuple(frame.digest for frame in result.frames) == expected * (
+        2 if established else 1
+    )
+
+
+@pytest.mark.parametrize("input_count", [1, 8])
+def test_h264_conflicting_mmco_operand_is_submission_local(
+    mock_service: Process, artifacts: Path, input_count: int
+) -> None:
+    source = artifacts / "h264-two-slices-mmco.h264"
+    packets = accepted(load(Codec.H264, source))
+    assert len(packets) == 8
+    assert packets[5].data == source.read_bytes()[10155:11415]
+    bad = bytearray(packets[5].data)
+    # Change only the second slice's MMCO1 operand, 3 -> 4 (bit 47).
+    bad[10633 - 10155] ^= 1
+    inputs = tuple(
+        Packet(data=data, timestamp=i * 1000)
+        for i, data in enumerate((packets[0].data, bytes(bad), packets[0].data))
+    )
+    result = accepted(
+        play(
+            mock_service,
+            Codec.H264,
+            source,
+            input_count=input_count,
+            submissions=inputs,
+        )
+    )
+    assert result.eos and not result.errors
+    assert tuple(bool(done.flags & 2) for done in result.input_completions) == (
+        False,
+        True,
+        False,
+    )
+    expected = accepted(frame_hashes(source, 8, 128, 128))[0]
+    assert tuple(frame.digest for frame in result.frames) == (expected, expected)
+
+
+def test_h264_valid_multi_slice_mmco_preserves_all_pixels(
+    mock_service: Process, artifacts: Path
+) -> None:
+    source = artifacts / "h264-two-slices-mmco.h264"
+    result = accepted(play(mock_service, Codec.H264, source, input_count=1))
+    assert result.eos and not result.errors
+    assert len(result.input_completions) == 8
+    assert all(done.flags & 2 == 0 for done in result.input_completions)
+    assert tuple(frame.digest for frame in result.frames) == accepted(
+        frame_hashes(source, 8, 128, 128)
+    )

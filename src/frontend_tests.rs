@@ -1,0 +1,146 @@
+//! Public codec admission contract across all five framed formats.
+use crate::frontend::{Frontend, Payload};
+use crate::timestamp::Source;
+#[test]
+fn test_admit_all_codecs_carry_identity_and_submission_timestamp() {
+  let h264 =
+    &include_bytes!("../tests/artifacts/h264-yuv420p.h264")[..4454];
+  let hevc =
+    &include_bytes!("../tests/artifacts/hevc-yuv420p.hevc")[..5496];
+  let vp8 = include_bytes!("../tests/artifacts/vp8-yuv420p.ivf");
+  let vp9 = include_bytes!("../tests/artifacts/vp9-yuv420p.ivf");
+  let av1 = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
+  let ivf = |data: &'static [u8]| {
+    &data[44..44
+      + u32::from_le_bytes(data[32..36].try_into().unwrap()) as usize]
+  };
+  for (codec, bytes) in [
+    (*b"H264", h264),
+    (*b"HEVC", hevc),
+    (*b"VP80", ivf(vp8)),
+    (*b"VP90", ivf(vp9)),
+    (*b"AV01", ivf(av1)),
+  ] {
+    let mut frontend =
+      Frontend::new(u32::from_le_bytes(codec)).unwrap();
+    let admitted = frontend.admit(bytes, 123, Source::Start).unwrap();
+    assert!(!admitted.end);
+    assert_eq!(admitted.tasks.len(), 1);
+    assert!(matches!(admitted.tasks[0].payload, Payload::Input(_)));
+    assert_eq!(admitted.tasks[0].descriptor.timestamp, 123);
+    assert_eq!(admitted.tasks[0].descriptor.source, Source::Start);
+  }
+}
+#[test]
+fn test_admit_invalid_input_cannot_create_decode_task() {
+  for codec in [*b"H264", *b"HEVC", *b"VP80", *b"VP90", *b"AV01"] {
+    let mut frontend =
+      Frontend::new(u32::from_le_bytes(codec)).unwrap();
+    assert!(frontend.admit(&[0xff], 0, Source::End).is_err());
+  }
+}
+
+#[test]
+fn test_admit_av1_temporal_unit_assigns_each_coded_frame_its_own_task()
+{
+  let bytes = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
+  let mut frontend =
+    Frontend::new(u32::from_le_bytes(*b"AV01")).unwrap();
+  let mut offset = 32;
+  let mut multiple = false;
+  while offset < bytes.len() {
+    let size =
+      u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+        as usize;
+    let admission = frontend
+      .admit(&bytes[offset + 12..offset + 12 + size], 1, Source::End)
+      .unwrap();
+    multiple |= admission.tasks.len() > 1;
+    assert_eq!(
+      admission
+        .tasks
+        .iter()
+        .filter(|task| task.descriptor.plan.output().display)
+        .count(),
+      1
+    );
+    for pair in admission.tasks.windows(2) {
+      assert_ne!(
+        pair[0].descriptor.plan.id(),
+        pair[1].descriptor.plan.id()
+      );
+    }
+    offset += 12 + size;
+  }
+  assert!(
+    multiple,
+    "fixture includes hidden and displayed frames in one TU"
+  );
+}
+
+#[test]
+fn test_admit_separate_av1_sequence_and_seek_restore_decoder_configuration()
+ {
+  let ivf = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
+  let size =
+    u32::from_le_bytes(ivf[32..36].try_into().unwrap()) as usize;
+  let packet = &ivf[44..44 + size];
+  let mut frontend =
+    Frontend::new(u32::from_le_bytes(*b"AV01")).unwrap();
+  assert!(
+    frontend
+      .admit(&packet[..15], 0, Source::End)
+      .unwrap()
+      .tasks
+      .is_empty()
+  );
+  let admission =
+    frontend.admit(&packet[15..], 1, Source::End).unwrap();
+  let Payload::Owned(bytes) = &admission.tasks[0].payload else {
+    panic!("standalone sequence must reach MPP with its picture");
+  };
+  assert!(bytes.ends_with(&packet[15..]));
+  frontend.seek().unwrap();
+  let admission =
+    frontend.admit(&packet[15..], 2, Source::End).unwrap();
+  assert!(matches!(admission.tasks[0].payload, Payload::Owned(_)));
+}
+
+#[test]
+fn test_admit_oversized_metadata_picture_is_rejected_and_can_recover() {
+  let ivf = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
+  let size =
+    u32::from_le_bytes(ivf[32..36].try_into().unwrap()) as usize;
+  let packet = &ivf[44..44 + size];
+  let mut frontend =
+    Frontend::new(u32::from_le_bytes(*b"AV01")).unwrap();
+  // A legal padding OBU fills the metadata budget, but its eventual
+  // picture must also fit the decoder packet contract.
+  let length = 16 * 1024 * 1024 - 5;
+  let mut padding = vec![0x7a];
+  let mut remaining = length;
+  loop {
+    let mut byte = (remaining & 127) as u8;
+    remaining >>= 7;
+    if remaining != 0 {
+      byte |= 128;
+    }
+    padding.push(byte);
+    if remaining == 0 {
+      break;
+    }
+  }
+  padding.resize(padding.len() + length, 0);
+  assert!(
+    frontend.admit(&padding, 0, Source::End).unwrap().tasks.is_empty()
+  );
+  let error = frontend
+    .admit(packet, 1, Source::End)
+    .err()
+    .expect("oversized combined packet");
+  assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+  assert_eq!(
+    frontend.admit(packet, 2, Source::End).unwrap().tasks.len(),
+    1
+  );
+}

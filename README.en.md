@@ -14,8 +14,13 @@ Supports H.264, HEVC, VP8, VP9, and AV1. Vulkan converts 10-bit video to 8-bit N
 flowchart TD
     Chromium[Chromium] -->|V4L2 OUTPUT: compressed bitstream| Kernel[v4l2_rkmpp_bridge kernel module]
     Kernel <-->|Private ioctl: sessions, buffer pools, batched events| Service[v4l2-stateful-rkmpp Rust service]
-    Service --> MPP[Rockchip MPP]
+    Service --> Frontend[Unified framed input admission]
+    Frontend --> Headers[GStreamer header and boundary validation]
+    Frontend --> Tasks[Coded-frame tasks with input read leases]
+    Tasks --> MPP[Rockchip MPP: synchronous execution]
+    MPP --> Presentation[Unified picture identity and presentation]
     MPP -->|Hardware decoding| VPU[RK3588 VPU]
+    Presentation -.-> Capture
     VPU -->|8-bit NV12| Capture[CAPTURE DMA-BUF]
     VPU -->|10-bit NV15| Vulkan[Vulkan unpacking and dithering]
     Vulkan -->|8-bit NV12| Capture
@@ -23,11 +28,11 @@ flowchart TD
     GPU --> Display[Desktop compositing and display]
 ```
 
-8-bit decoding writes directly to CAPTURE buffers. The 10-bit conversion writes directly to the final CAPTURE buffers. The bridge performs no full-frame CPU copies.
+8-bit decoding normally writes directly to CAPTURE buffers. Vulkan copies a frame into a reserved CAPTURE buffer when its source belongs to a retired pool, remains held by the client, or uses a temporary decode surface because decoding and presentation retain too many pictures simultaneously. Temporary surfaces are allocated on demand within a total limit of 32 decode surfaces; the V4L2 minimum buffer count stays unchanged. The 10-bit conversion writes directly to the final CAPTURE buffers. The bridge performs no full-frame CPU copies.
 
 ## Build, install, and use
 
-Building requires Rust, a C toolchain, matching vendor kernel headers, pahole, glslang, rockchip-mpp, and vulkan-icd-loader. Run from the project root:
+Building requires Rust, a C toolchain, matching vendor kernel headers, pahole, glslang, libclang, GStreamer codecparsers development headers and library, pkg-config, rockchip-mpp, and vulkan-icd-loader. The service does not depend on libavcodec. Clients frame input: complete AUs or separate metadata for H.264/HEVC, frames for VP8/VP9, and temporal units for AV1; the module does not advertise continuous bytestream support. The service validates headers and boundaries, splits coded frames within AV1 TUs and VP9 superframes into separate tasks, and uses synchronous MPP execution for all five codecs. Normative H.264/HEVC POC and reference state drive the shared presentation scheduler. Ordinary STOP/START preserves reference pictures. AV1 uses MPP’s reference-preserving drain at each task completion to publish delayed displays; other codecs do not receive MPP EOS. Interlaced images retain their field order without implicit deinterlacing. Run from the project root:
 
 ```sh
 make -C kernel
@@ -61,6 +66,14 @@ chromium \
 Chromium uses its default choices for GTK, the display backend, ANGLE, and the compositing backend. The flags only enable hardware decoding and disable the preference for software decoding at low resolutions. Integration tests still require actual hardware decoding; software decoding does not satisfy the acceptance criteria.
 
 After starting video playback, open `chrome://media-internals` and confirm that `kVideoDecoderName` is `V4L2VideoDecoder`.
+
+FFmpeg exposes the following V4L2 M2M decoding entry point, but the locally installed version has the compatibility limitations described below:
+
+```sh
+ffmpeg -c:v h264_v4l2m2m -i input.mp4 -an -fps_mode passthrough -f null -
+```
+
+For HEVC, VP8, and VP9, use `hevc_v4l2m2m`, `vp8_v4l2m2m`, and `vp9_v4l2m2m`, respectively, placing the decoder option before `-i`. The locally installed FFmpeg has no AV1 V4L2 M2M decoder. FFmpeg may expose storage padding as part of the output height; crop exported images to their visible dimensions. The locally installed FFmpeg compares only width and height when deciding whether to reallocate CAPTURE buffers. It ignores increases in `sizeimage`, potentially reusing undersized buffers and ending decoding early. Single-frame and other short streams may also trigger an internal assertion if the initial resolution change occurs during draining. Complete FFmpeg decoding is therefore not guaranteed; the bridge retains its buffer capacity checks.
 
 ## Test commands
 

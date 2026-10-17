@@ -1,12 +1,13 @@
-//! module: quantize; responsibility: convert packed NV15 into dithered
-//! NV12 on the GPU. operations: new, convert; entities: Quantizer;
-//! tests: quantize_tests. No CPU pixel maps, no per-frame fd
-//! duplication after an import is cached.
+//! module: quantize; responsibility: produce NV12 on the GPU from
+//! decoded eight-bit or packed ten-bit images. Eight-bit samples are
+//! preserved; ten-bit samples are dithered. operations: new, convert;
+//! entities: Quantizer; tests: quantize_tests. No CPU pixel maps, no
+//! per-frame fd duplication after an import is cached.
 use std::io;
 use std::num::NonZeroUsize;
 
 use crate::dma::system as dma;
-use crate::image::Plane;
+use crate::image::{Depth, Plane};
 mod context;
 #[cfg(test)]
 mod context_tests;
@@ -35,6 +36,7 @@ impl Quantizer {
 
   pub fn convert(
     &mut self,
+    depth: Depth,
     width: u32,
     height: u32,
     source: Plane<'_>,
@@ -45,7 +47,8 @@ impl Quantizer {
         "Vulkan quantizer failed previously",
       ));
     }
-    let layout = Layout::new(width, height, source, destination)?;
+    let layout =
+      Layout::new(depth, width, height, source, destination)?;
     let src = dma::metadata(source.fd())?;
     let dst = dma::metadata(destination.fd())?;
     if (src.st_dev == dst.st_dev && src.st_ino == dst.st_ino)

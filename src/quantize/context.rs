@@ -75,6 +75,7 @@ impl Device {
     let names = [
       ash::khr::external_memory_fd::NAME,
       ash::ext::external_memory_dma_buf::NAME,
+      ash::ext::queue_family_foreign::NAME,
     ];
     for name in names {
       if !available
@@ -188,7 +189,7 @@ impl Context {
       let layouts = [self.descriptor_layout];
       let pushes = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
-        .size(24)];
+        .size(28)];
       self.layout = d
         .create_pipeline_layout(
           &vk::PipelineLayoutCreateInfo::default()
@@ -329,7 +330,7 @@ impl Context {
           } else {
             vk::AccessFlags::SHADER_WRITE
           })
-          .src_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
+          .src_queue_family_index(vk::QUEUE_FAMILY_FOREIGN_EXT)
           .dst_queue_family_index(self.gpu.family)
           .buffer(buffers[i].buffer)
           .size(vk::WHOLE_SIZE)
@@ -358,7 +359,7 @@ impl Context {
       );
       let bytes = std::slice::from_raw_parts(
         parameters.as_ptr().cast::<u8>(),
-        24,
+        28,
       );
       d.cmd_push_constants(
         self.commands,
@@ -373,11 +374,26 @@ impl Context {
         parameters[1] + parameters[1].div_ceil(2),
         1,
       );
+      // MMAP/CPU consumers need a device-to-host domain operation as
+      // well as the foreign queue ownership release. Waiting for the
+      // dispatch fence alone does not make shader writes host-visible.
+      let host = [vk::MemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+        .dst_access_mask(vk::AccessFlags::HOST_READ)];
+      d.cmd_pipeline_barrier(
+        self.commands,
+        vk::PipelineStageFlags::COMPUTE_SHADER,
+        vk::PipelineStageFlags::HOST,
+        vk::DependencyFlags::empty(),
+        &host,
+        &[],
+        &[],
+      );
       for barrier in &mut barriers {
         barrier.src_access_mask = barrier.dst_access_mask;
         barrier.dst_access_mask = vk::AccessFlags::empty();
         barrier.src_queue_family_index = self.gpu.family;
-        barrier.dst_queue_family_index = vk::QUEUE_FAMILY_EXTERNAL;
+        barrier.dst_queue_family_index = vk::QUEUE_FAMILY_FOREIGN_EXT;
       }
       d.cmd_pipeline_barrier(
         self.commands,

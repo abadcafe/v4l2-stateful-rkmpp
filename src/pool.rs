@@ -4,7 +4,7 @@
 use std::io;
 
 use crate::dma::Buffer;
-use crate::protocol::MAX_BUFFERS;
+use crate::protocol::registration::MAX_BUFFERS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -28,6 +28,14 @@ impl Pool {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "invalid buffer registration",
+      ));
+    }
+    if buffers.iter().enumerate().any(|(index, buffer)| {
+      buffers[..index].iter().any(|other| buffer.same_storage(other))
+    }) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "buffer registration contains aliased storage",
       ));
     }
     Ok(Self { direction, id, buffers })

@@ -1,16 +1,17 @@
 //! module: quantize::layout; responsibility: validate linear
-//! NV15-to-NV12 conversion geometry. operations: new, parameters,
-//! source_size, destination_size; entities: Layout; tests:
+//! eight/ten-bit-to-NV12 conversion geometry. operations: new,
+//! parameters, source_size, destination_size; entities: Layout; tests:
 //! layout_tests.
 use std::io;
 
-use crate::image::Plane;
+use crate::image::{Depth, Plane};
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Layout {
-  parameters: [u32; 6],
+  parameters: [u32; 7],
 }
 impl Layout {
   pub(super) fn new(
+    depth: Depth,
     width: u32,
     height: u32,
     source: Plane<'_>,
@@ -29,7 +30,7 @@ impl Layout {
       || !source.stride().is_multiple_of(4)
       || !destination.stride().is_multiple_of(4)
       || (source.stride() as u64)
-        < ((((width + 1) & !1) as u64 * 10).div_ceil(32) * 4)
+        < ((((width + 1) & !1) as u64 * depth as u64).div_ceil(32) * 4)
       || destination.stride() < ((width + 3) & !3)
     {
       return Err(io::Error::new(
@@ -45,11 +46,12 @@ impl Layout {
         source.rows(),
         destination.stride(),
         destination.rows(),
+        depth as u32,
       ],
     })
   }
 
-  pub(super) fn parameters(self) -> [u32; 6] {
+  pub(super) fn parameters(self) -> [u32; 7] {
     self.parameters
   }
 

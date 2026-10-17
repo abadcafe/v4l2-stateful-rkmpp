@@ -40,6 +40,7 @@ type InvalidField = Literal[
     "reserved",
     "missing_fd",
     "duplicate_fd",
+    "aliased_storage",
     "size_zero",
     "size_overflow",
 ]
@@ -57,6 +58,7 @@ type InvalidField = Literal[
         "reserved",
         "missing_fd",
         "duplicate_fd",
+        "aliased_storage",
         "size_zero",
         "size_overflow",
     ],
@@ -122,6 +124,11 @@ def test_register_invalid_pool_response_closes_all_transferred_descriptors(
                 fds, patches = (first.fd,), (Patch(32, 0),)
             elif field == "duplicate_fd":
                 fds, patches = (first.fd,), (Patch(32, 0), Patch(40, 0))
+            elif field == "aliased_storage":
+                # SCM_RIGHTS installs two distinct descriptor numbers, both
+                # referring to the same allocation. Numeric fd checks alone
+                # cannot enforce disjoint slot ownership.
+                fds = (first.fd, first.fd)
             elif field == "size_zero":
                 Descriptor.from_buffer(pool.buffers).size = 0
             else:

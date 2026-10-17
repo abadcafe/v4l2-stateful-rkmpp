@@ -3,9 +3,14 @@
 //! pool and event/reply enums. tests: protocol_tests; end-to-end
 //! tests/kernel.
 use std::io;
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 7;
 pub const MAX_BATCH: usize = 16;
-pub const MAX_BUFFERS: usize = 32;
+pub mod command;
+#[cfg(test)]
+mod command_tests;
+pub mod registration;
+#[cfg(test)]
+mod registration_tests;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +32,7 @@ pub enum Reply {
   Eos,
   Stopped,
   Failed,
+  Draining,
 }
 
 #[repr(C)]
@@ -53,9 +59,18 @@ pub struct Message {
   pub ycbcr_enc: u32,
   pub quantization: u32,
   pub pool_id: u32,
-  pub reserved: [u32; 3],
+  pub data_offset: u32,
+  pub crop_left: u32,
+  pub crop_top: u32,
+  pub coded_width: u32,
+  pub coded_height: u32,
+  pub field: u32,
+  pub reserved: [u32; 1],
 }
 impl Message {
+  pub const CAPTURE_REUSE: u32 = 1;
+  pub const FRAME_ERROR: u32 = 2;
+  pub const RESET_ABORT_DRAIN: u32 = 1 << 17;
   pub const RESET_CAPTURE_ONLY: u32 = 1 << 16;
 }
 #[repr(C)]
@@ -88,32 +103,4 @@ impl Batch {
     }
     Ok(())
   }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Descriptor {
-  pub fd: i32,
-  pub size: u32,
-}
-impl Default for Descriptor {
-  fn default() -> Self {
-    Self { fd: -1, size: 0 }
-  }
-}
-#[repr(C)]
-#[derive(Default)]
-pub struct Pool {
-  pub version: u32,
-  pub kind: u32,
-  pub epoch: u64,
-  pub pool_id: u32,
-  pub count: u32,
-  pub reserved: [u32; 2],
-  pub buffers: [Descriptor; MAX_BUFFERS],
-}
-impl Pool {
-  pub(crate) const IOCTL: libc::c_ulong = (3 << 30)
-    | ((std::mem::size_of::<Self>() as libc::c_ulong) << 16)
-    | (b'R' as libc::c_ulong) << 8
-    | 0x85;
 }

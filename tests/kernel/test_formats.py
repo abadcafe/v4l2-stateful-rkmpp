@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from tests.support.bridge_abi import Message, Reply
-from tests.support.format_abi import Capability, Format, Selection
+from tests.support.format_abi import Capability, Format, FormatDescription, Selection
 from tests.support.framesize_abi import FrameSize
 from tests.support.kernel_peer import Peer
 from tests.support.outcome import Rejected, accepted
@@ -50,6 +50,11 @@ def test_video_capability_and_format_enumeration(video: Video) -> None:
     assert accepted(enumerate_formats(video.fd, QueueType.CAPTURE)) == [
         int.from_bytes(b"NV12", "little")
     ]
+    description = FormatDescription(index=4, kind=QueueType.OUTPUT)
+    _ = accepted(
+        ioctl(video.fd, command(3, "V", 2, ctypes.sizeof(description)), description)
+    )
+    assert bytes(description)[12:44].split(b"\0", 1)[0] == b"AV1 OBU Stream"
     capture = accepted(get_format(video.fd, QueueType.CAPTURE))
     assert (
         capture.width,
@@ -59,6 +64,15 @@ def test_video_capability_and_format_enumeration(video: Video) -> None:
         capture.sizes,
     ) == (64, 64, 1, (64,), (6144,))
     assert accepted(selection(video.fd, QueueType.CAPTURE)) == (64, 64)
+
+
+@pytest.mark.parametrize("index", range(5))
+def test_enumerate_formats_declares_input_framing(video: Video, index: int) -> None:
+    description = FormatDescription(index=index, kind=QueueType.OUTPUT)
+    _ = accepted(
+        ioctl(video.fd, command(3, "V", 2, ctypes.sizeof(description)), description)
+    )
+    assert description.flags & 4 == 0
 
 
 @pytest.mark.parametrize(
@@ -142,7 +156,7 @@ def test_video_unsupported_event_subscription_is_rejected(video: Video) -> None:
 
 
 @pytest.mark.parametrize("codec", list(Codec))
-def test_format_frame_size_enumeration_publishes_full_even_extent_range(
+def test_format_frame_size_enumeration_publishes_full_extent_range(
     video: Video,
     codec: Codec,
 ) -> None:
@@ -159,7 +173,7 @@ def test_format_frame_size_enumeration_publishes_full_even_extent_range(
         limits.min_height,
         limits.max_height,
         limits.step_height,
-    ) == (3, 64, 8192, 2, 64, 8192, 2)
+    ) == (3, 64, 8192, 1, 64, 8192, 1)
     size.index = 1
     result = ioctl(video.fd, command(3, "V", 74, ctypes.sizeof(size)), size)
     assert isinstance(result, Rejected) and result.code == errno.EINVAL
@@ -187,10 +201,36 @@ def test_format_try_does_not_mutate_current_format_and_unknown_codec_falls_back(
     )
 
 
-@pytest.mark.parametrize(("kind", "target"), [(10, 0x100), (9, 0), (9, 0xFFFF)])
+@pytest.mark.parametrize(("kind", "target"), [(10, 0x100), (9, 0xFFFF)])
 def test_selection_invalid_queue_or_target_is_rejected(
     video: Video, kind: int, target: int
 ) -> None:
     payload = Selection(kind=kind, target=target)
     result = ioctl(video.fd, command(3, "V", 94, ctypes.sizeof(payload)), payload)
     assert isinstance(result, Rejected) and result.code == errno.EINVAL
+
+
+@pytest.mark.parametrize(("width", "height"), [(1920, 1080), (1280, 720)])
+def test_output_format_immediately_updates_provisional_capture(
+    video: Video, width: int, height: int
+) -> None:
+    _ = accepted(
+        set_format(
+            video.fd, QueueType.OUTPUT, Codec.H264.fourcc, width=width, height=height
+        )
+    )
+    capture = accepted(get_format(video.fd, QueueType.CAPTURE))
+    assert capture.width >= width and capture.height >= height
+    assert capture.strides[0] >= width
+    assert capture.sizes[0] >= capture.strides[0] * capture.height * 3 // 2
+    assert accepted(selection(video.fd, QueueType.CAPTURE)) == (width, height)
+    for target in (0, 1, 2):
+        value = Selection(kind=QueueType.CAPTURE, target=target)
+        _ = accepted(ioctl(video.fd, command(3, "V", 94, ctypes.sizeof(value)), value))
+
+
+def test_output_format_cannot_invalidate_allocated_capture(video: Video) -> None:
+    capture = Queue(video.fd, QueueType.CAPTURE)
+    _ = accepted(capture.request(18))
+    result = set_format(video.fd, QueueType.OUTPUT, Codec.HEVC.fourcc)
+    assert isinstance(result, Rejected) and result.code == errno.EBUSY

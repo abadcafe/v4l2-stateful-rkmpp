@@ -12,7 +12,7 @@ use super::context::Context;
 use super::imports::Cache;
 use super::layout::Layout;
 use crate::dma::{Buffer, system};
-use crate::image::Plane;
+use crate::image::{Depth, Plane};
 
 #[test]
 fn test_dispatch_real_imports_completes_and_publishes_nv12_pixels() {
@@ -35,6 +35,7 @@ fn test_dispatch_real_imports_completes_and_publishes_nv12_pixels() {
     }
   }
   let layout = Layout::new(
+    Depth::Ten,
     32,
     32,
     Plane::new(source.as_fd(), 64, 32),
@@ -60,6 +61,7 @@ fn test_dispatch_rejects_null_and_undersized_descriptors_before_submission()
   let mut context = Context::new().unwrap();
   let file = std::fs::File::open("/dev/null").unwrap();
   let layout = Layout::new(
+    Depth::Ten,
     32,
     32,
     Plane::new(file.as_fd(), 64, 32),

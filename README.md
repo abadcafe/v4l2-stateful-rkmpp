@@ -14,8 +14,13 @@
 flowchart TD
     Chromium[Chromium] -->|V4L2 OUTPUT：压缩码流| Kernel[v4l2_rkmpp_bridge 内核模块]
     Kernel <-->|私有 ioctl：会话、缓冲池、批量事件| Service[v4l2-stateful-rkmpp Rust 服务]
-    Service --> MPP[Rockchip MPP]
+    Service --> Frontend[统一输入前端：完整 AU / 帧 / TU]
+    Frontend --> Headers[GStreamer 编码头与边界校验]
+    Frontend --> Tasks[独立编码帧任务与输入读取租约]
+    Tasks --> MPP[Rockchip MPP：统一同步执行]
+    MPP --> Presentation[统一图像身份与显示调度]
     MPP -->|硬件解码| VPU[RK3588 VPU]
+    Presentation -.-> Capture
     VPU -->|8-bit NV12| Capture[CAPTURE DMA-BUF]
     VPU -->|10-bit NV15| Vulkan[Vulkan 解包与抖动量化]
     Vulkan -->|8-bit NV12| Capture
@@ -23,11 +28,11 @@ flowchart TD
     GPU --> Display[桌面合成与显示]
 ```
 
-8-bit 解码直接写入 CAPTURE 缓冲区；10-bit 转换直接写入最终 CAPTURE 缓冲区，桥接过程没有 CPU 整帧复制。
+8-bit 解码通常直接写入 CAPTURE 缓冲区；若参考帧来自已替换的缓冲池或客户端仍持有的缓冲区，或解码与输出重排同时持有大量图像而启用了临时解码表面，则由 Vulkan 复制到独占保留的 CAPTURE 缓冲区。临时表面按需分配，解码池总数限制为 32，不改变 V4L2 的最小缓冲数。10-bit 转换直接写入最终 CAPTURE 缓冲区，桥接过程没有 CPU 整帧复制。
 
 ## 编译/安装/使用方式
 
-源码编译需要 Rust、C 工具链、匹配的 vendor 内核 headers、pahole、glslang、rockchip-mpp 和 vulkan-icd-loader。在项目根目录执行：
+源码编译需要 Rust、C 工具链、匹配的 vendor 内核 headers、pahole、glslang、libclang、GStreamer codecparsers 开发头文件及库、pkg-config、rockchip-mpp 和 vulkan-icd-loader。服务不依赖 libavcodec。客户端负责分帧：H.264/HEVC 提交完整 AU 或独立元数据，VP8/VP9 提交帧，AV1 提交 temporal unit；模块不声明连续字节流能力。服务校验编码头和边界，将 AV1 TU／VP9 superframe 内的编码帧拆为独立任务，五种编码统一调用 MPP 同步接口。H.264/HEVC 按规范计算 POC 和参考关系，统一显示调度器执行对应的重排策略。普通 STOP/START 保留参考帧；AV1 在每个任务完成时通过 MPP 的参考保持排空路径交付延迟显示图像，其他编码不发送 MPP EOS。隔行图像保留场序，不调用隐式去隔行处理。在项目根目录执行：
 
 ```sh
 make -C kernel
@@ -61,6 +66,14 @@ chromium \
 Chromium 的 GTK、显示后端、ANGLE 和合成后端均使用其默认选择。只保留硬解功能开关及禁用小分辨率优先软解的开关；集测仍要求实际使用硬解，不以软解通过验收。
 
 播放视频后，在 `chrome://media-internals` 确认 `kVideoDecoderName` 为 `V4L2VideoDecoder`。
+
+FFmpeg 的 V4L2 M2M 解码入口如下，但本机版本仍有下述兼容性限制：
+
+```sh
+ffmpeg -c:v h264_v4l2m2m -i input.mp4 -an -fps_mode passthrough -f null -
+```
+
+HEVC、VP8、VP9 分别使用 `hevc_v4l2m2m`、`vp8_v4l2m2m`、`vp9_v4l2m2m`，解码器参数放在 `-i` 前。本机 FFmpeg 没有 AV1 V4L2 M2M 解码器。FFmpeg 可能将存储对齐行作为输出高度，导出图像时需按可见尺寸裁剪；本机 FFmpeg 仅比较宽高来决定是否重建 CAPTURE，忽略 `sizeimage` 增大，可能复用过小的缓冲区并提前结束解码；单帧等短流在排空期间遇到首次分辨率变化时，还可能触发其内部断言。目前不能保证 FFmpeg 完整解码，桥接不会为兼容它而放宽缓冲区容量检查。
 
 ## 测试命令
 

@@ -102,6 +102,7 @@ class Process:
     ) -> None:
         self.process: subprocess.Popen[bytes] = process
         self.diagnostics: Path = log.parent / "d"
+        self.thread_failure: Path = log.parent / "thread-failure"
         self._listener: Socket = listener
         self._fifo: OwnedFd = fifo
         self._log: Path = log
@@ -144,6 +145,7 @@ class Process:
                 LD_PRELOAD=str(library.resolve()),
                 RKMPP_TEST_KERNEL_SOCKET=str(endpoint.resolve()),
                 RKMPP_TEST_KERNEL_CONTROL=str(control.resolve()),
+                RKMPP_TEST_THREAD_FAILURE=str((directory / "thread-failure").resolve()),
             )
             process = subprocess.Popen(
                 [

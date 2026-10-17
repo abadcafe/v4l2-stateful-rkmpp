@@ -72,8 +72,8 @@ def query(endpoint: Path) -> Result[Snapshot]:
                 if not packet:
                     break
                 response.extend(packet)
-                if b"\n" in packet:
-                    break
+                # The snapshot excludes this query's transient socket. Wait for
+                # EOF so callers can compare it with the live descriptor table.
     except TimeoutError:
         return Rejected(errno.ETIMEDOUT, f"Diagnostics endpoint {endpoint} timed out")
     except OSError as error:

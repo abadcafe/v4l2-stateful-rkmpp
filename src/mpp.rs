@@ -14,9 +14,17 @@ mod group_tests;
 mod input;
 #[cfg(test)]
 mod input_tests;
+mod reservation;
+#[cfg(test)]
+mod reservation_tests;
+pub use reservation::Reservation;
 mod packet;
 #[cfg(test)]
 mod packet_tests;
-pub use decoder::Decoder;
+pub use decoder::{Decoder, Submission};
 pub use frame::{Frame, FrameInfo};
 pub use packet::{InputAccess, Packet};
+
+mod status;
+#[cfg(test)]
+mod status_tests;

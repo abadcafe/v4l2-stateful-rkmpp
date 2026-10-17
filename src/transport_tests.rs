@@ -15,7 +15,7 @@ use crate::notify::Notify;
 use crate::pool::Direction;
 use crate::protocol::{Batch, VERSION};
 use crate::shutdown::Signals;
-use crate::transport::{Broker, Session};
+use crate::transport::{Admission, Broker, Session};
 
 #[test]
 fn test_open_missing_broker_returns_os_error() {
@@ -34,11 +34,18 @@ fn test_accept_non_broker_file_reports_ioctl_error_and_shutdown_stops_accept()
   let broker = Broker::open(Path::new("/dev/null")).unwrap();
   let signals = Signals::install().unwrap();
   assert_eq!(
-    broker.accept(&signals).err().unwrap().raw_os_error(),
+    broker
+      .accept(&signals, &Notify::new().unwrap())
+      .err()
+      .unwrap()
+      .raw_os_error(),
     Some(libc::ENOTTY)
   );
   signals.shutdown().request();
-  assert!(broker.accept(&signals).unwrap().is_none());
+  assert!(matches!(
+    broker.accept(&signals, &Notify::new().unwrap()).unwrap(),
+    Admission::Idle
+  ));
 }
 
 #[test]
@@ -95,4 +102,34 @@ fn test_wait_observes_closed_control_and_drop_closes_owned_channel() {
   let session = Session::from(std::os::fd::OwnedFd::from(stream));
   drop(session);
   assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn test_accept_worker_exit_wakes_idle_broker_without_an_ioctl() {
+  use std::os::fd::{FromRawFd, OwnedFd};
+  let mut fds = [-1; 2];
+  assert_eq!(
+    unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) },
+    0
+  );
+  let _reader = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+  let _writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+  let broker =
+    Broker::open(Path::new(&format!("/proc/self/fd/{}", fds[0])))
+      .unwrap();
+  let signals = Signals::install().unwrap();
+  let wake = Notify::new().unwrap();
+  let exit = wake.clone();
+  let thread = std::thread::spawn(move || {
+    std::thread::sleep(Duration::from_millis(20));
+    exit.signal().unwrap();
+  });
+  let started = std::time::Instant::now();
+  assert!(matches!(
+    broker.accept(&signals, &wake).unwrap(),
+    Admission::Idle
+  ));
+  assert!(started.elapsed() < Duration::from_secs(1));
+  assert!(!wake.wait(Duration::ZERO).unwrap());
+  thread.join().unwrap();
 }

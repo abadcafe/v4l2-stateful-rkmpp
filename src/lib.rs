@@ -2,6 +2,9 @@
 //! contracts. operations: public module interfaces; entities: none;
 //! tests: co-located module tests.
 pub mod backend;
+pub mod bitstream;
+#[cfg(test)]
+mod bitstream_tests;
 pub mod converter;
 pub mod diagnostics;
 pub mod dma;
@@ -41,3 +44,22 @@ mod service_tests;
 mod shutdown_tests;
 #[cfg(test)]
 mod transport_tests;
+
+mod packet_syntax;
+#[cfg(test)]
+mod packet_syntax_tests;
+
+pub mod timestamp;
+#[cfg(test)]
+mod timestamp_tests;
+
+mod frontend;
+#[cfg(test)]
+mod frontend_tests;
+pub mod picture;
+
+mod submission;
+
+mod task;
+#[cfg(test)]
+mod task_tests;

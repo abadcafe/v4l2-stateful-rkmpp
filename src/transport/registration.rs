@@ -6,7 +6,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::dma::Buffer;
 use crate::pool::{Direction, Pool as RegisteredPool};
-use crate::protocol::{MAX_BUFFERS, Pool, VERSION};
+use crate::protocol::VERSION;
+use crate::protocol::registration::{MAX_BUFFERS, Pool};
 
 pub(super) fn adopt(
   pool: Pool,

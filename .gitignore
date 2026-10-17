@@ -4,10 +4,10 @@ __pycache__/
 /.venv/
 /.pytest_cache/
 /.ruff_cache/
-/kernel/*.o
-/kernel/*.ko
-/kernel/*.mod
-/kernel/*.mod.c
-/kernel/.*.cmd
+/kernel/**/*.o
+/kernel/**/*.ko
+/kernel/**/*.mod
+/kernel/**/*.mod.c
+/kernel/**/.*.cmd
 /kernel/Module.symvers
 /kernel/modules.order

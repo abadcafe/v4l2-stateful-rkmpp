@@ -31,11 +31,21 @@ def test_decode_concurrent_workers_preserve_all_registered_buffers(
 
     def run(codec: Codec) -> tuple[str, ...]:
         _ = ready.wait(timeout=5)
-        decoded = accepted(play(mock_service, codec, artifacts / inputs[codec]))
+        decoded = accepted(
+            play(
+                mock_service,
+                codec,
+                artifacts / inputs[codec],
+            )
+        )
         assert decoded.eos and len(decoded.frames) == 36
+        assert all(frame.flags == 0 for frame in decoded.frames), [
+            frame.flags for frame in decoded.frames
+        ]
         return tuple(frame.digest for frame in decoded.frames)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(run, codec) for codec in codecs]
-        for codec, future in zip(codecs, futures, strict=True):
-            assert future.result(timeout=30) == expected[codec]
+        for _ in range(64):
+            futures = [executor.submit(run, codec) for codec in codecs]
+            for codec, future in zip(codecs, futures, strict=True):
+                assert future.result(timeout=30) == expected[codec]

@@ -7,53 +7,31 @@
 //! test_validate_accepts_empty_and_maximum_batch_counts
 //! test_validate_rejects_invalid_version_reserved_or_counts
 //! test_event_and_reply_discriminants_match_wire_contract
+use crate::protocol::registration::{Descriptor, MAX_BUFFERS, Pool};
 use crate::protocol::{
-  Batch, Descriptor, Event, MAX_BATCH, MAX_BUFFERS, Message, Pool,
-  Reply, VERSION,
+  Batch, Event, MAX_BATCH, Message, Reply, VERSION,
 };
 #[test]
 fn test_message_wire_layout_matches_published_kernel_uapi() {
-  assert_eq!(std::mem::size_of::<Message>(), 104);
+  assert_eq!(std::mem::size_of::<Message>(), 120);
   assert_eq!(std::mem::align_of::<Message>(), 8);
   assert_eq!(std::mem::offset_of!(Message, timestamp), 24);
   assert_eq!(std::mem::offset_of!(Message, pool_id), 88);
-  assert_eq!(std::mem::offset_of!(Message, reserved), 92);
+  assert_eq!(std::mem::offset_of!(Message, reserved), 116);
   let message = Message::default();
   assert_eq!(
     (message.version, message.kind, message.epoch, message.reserved),
-    (0, 0, 0, [0; 3])
+    (0, 0, 0, [0; 1])
   );
   assert_eq!(Message::RESET_CAPTURE_ONLY, 1 << 16);
 }
 #[test]
 fn test_batch_wire_layout_matches_published_kernel_uapi() {
-  assert_eq!(std::mem::size_of::<Batch>(), 3408);
+  assert_eq!(std::mem::size_of::<Batch>(), 3920);
   assert_eq!(std::mem::offset_of!(Batch, replies), 16);
-  assert_eq!(std::mem::offset_of!(Batch, events), 1680);
-  assert_eq!(std::mem::offset_of!(Batch, results), 3344);
+  assert_eq!(std::mem::offset_of!(Batch, events), 1936);
+  assert_eq!(std::mem::offset_of!(Batch, results), 3856);
   assert_eq!(MAX_BATCH, 16);
-}
-#[test]
-fn test_pool_default_has_no_owned_file_descriptors() {
-  assert_eq!(std::mem::size_of::<Pool>(), 288);
-  assert_eq!(std::mem::size_of::<Descriptor>(), 8);
-  assert_eq!(std::mem::offset_of!(Pool, buffers), 32);
-  assert_eq!(MAX_BUFFERS, 32);
-  let pool = Pool::default();
-  assert_eq!(
-    (
-      pool.version,
-      pool.kind,
-      pool.epoch,
-      pool.pool_id,
-      pool.count,
-      pool.reserved
-    ),
-    (0, 0, 0, 0, 0, [0; 2])
-  );
-  assert!(
-    pool.buffers.iter().all(|entry| entry.fd == -1 && entry.size == 0)
-  );
 }
 #[test]
 fn test_validate_accepts_empty_and_maximum_batch_counts() {
@@ -166,6 +144,7 @@ fn test_all_public_wire_fields_and_constants_match_compiled_c_header() {
     ("RB_BATCH_MAX", MAX_BATCH),
     ("RB_MAX_BUFFERS", MAX_BUFFERS),
     ("RB_RESET_CAPTURE_ONLY", Message::RESET_CAPTURE_ONLY as usize),
+    ("RB_RESET_ABORT_DRAIN", Message::RESET_ABORT_DRAIN as usize),
     ("RB_PACKET", Event::Packet as usize),
     ("RB_CAPTURE", Event::Capture as usize),
     ("RB_RECYCLE", Event::Recycle as usize),

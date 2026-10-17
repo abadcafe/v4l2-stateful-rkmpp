@@ -7,6 +7,7 @@ use std::io;
 
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
+use crate::protocol::command::Command;
 use crate::protocol::{
   Batch, Event, MAX_BATCH, Message, Reply, VERSION,
 };
@@ -28,7 +29,7 @@ pub(super) trait Channel {
 pub(super) trait Engine {
   fn notification(&self) -> Notify;
   fn register(&mut self, pool: Pool) -> io::Result<()>;
-  fn event(&mut self, message: Message) -> io::Result<()>;
+  fn event(&mut self, command: Command) -> io::Result<()>;
   fn step(&mut self) -> io::Result<bool>;
   fn take_reply(&mut self) -> Option<Message>;
 }
@@ -94,16 +95,17 @@ pub(super) fn run(
       }
       events += u64::from(batch.event_count);
       for message in &batch.events[..batch.event_count as usize] {
-        if message.version != VERSION {
-          return Err("unsupported protocol version".into());
-        }
         current = *message;
-        if message.kind == Event::Close as u32 {
+        let command = Command::try_from(*message)
+          .map_err(|error| error.to_string())?;
+        if command.kind() == Event::Close {
           return Ok(());
         }
-        let direction = match message.kind {
-          1 => Some((0, Direction::Output)),
-          2 | 3 => Some((1, Direction::Capture)),
+        let direction = match command.kind() {
+          Event::Packet => Some((0, Direction::Output)),
+          Event::Capture | Event::Recycle => {
+            Some((1, Direction::Capture))
+          }
           _ => None,
         };
         if let Some((slot, kind)) = direction
@@ -133,10 +135,10 @@ pub(super) fn run(
           registrations += 1;
           pools[slot] = message.pool_id;
         }
-        backend.event(*message).map_err(|e| {
+        backend.event(command).map_err(|e| {
           format!("backend event {}: {e}", message.kind)
         })?;
-        if message.kind == Event::Reset as u32 {
+        if command.kind() == Event::Reset {
           if message.flags & Message::RESET_CAPTURE_ONLY != 0 {
             pools[1] = 0;
           } else {
@@ -179,11 +181,15 @@ pub(super) fn run(
   })();
   drop(backend);
   if result.is_err() {
-    current.version = VERSION;
-    current.kind = Reply::Failed as u32;
     let mut batch =
       Batch { version: VERSION, reply_count: 1, ..Default::default() };
-    batch.replies[0] = current;
+    batch.replies[0] = Message {
+      version: VERSION,
+      kind: Reply::Failed as u32,
+      epoch: current.epoch,
+      generation: current.generation,
+      ..Default::default()
+    };
     let _ = control.exchange(&mut batch);
   }
   let stats = Statistics {

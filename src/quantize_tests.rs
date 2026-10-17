@@ -7,7 +7,7 @@
 use std::os::fd::AsFd;
 
 use crate::dma::Buffer;
-use crate::image::Plane;
+use crate::image::{Depth, Plane};
 use crate::quantize::Quantizer;
 
 fn sample(x: u32, y: u32, plane: u32) -> u32 {
@@ -41,7 +41,8 @@ fn check(q: &mut Quantizer, w: u32, h: u32, repeats: usize) {
   let source_plane = Plane::new(source.as_fd(), ss, rows);
   let destination_plane = Plane::new(destination.as_fd(), ds, rows);
   for _ in 0..repeats {
-    q.convert(w, h, source_plane, destination_plane).unwrap();
+    q.convert(Depth::Ten, w, h, source_plane, destination_plane)
+      .unwrap();
   }
   {
     let pixels = destination.read().unwrap();
@@ -87,9 +88,13 @@ fn check(q: &mut Quantizer, w: u32, h: u32, repeats: usize) {
       );
     }
   }
-  assert!(q.convert(0, h, source_plane, destination_plane).is_err());
+  assert!(
+    q.convert(Depth::Ten, 0, h, source_plane, destination_plane)
+      .is_err()
+  );
   assert!(
     q.convert(
+      Depth::Ten,
       w,
       h,
       Plane::new(source.as_fd(), 4, rows),
@@ -98,10 +103,16 @@ fn check(q: &mut Quantizer, w: u32, h: u32, repeats: usize) {
     .is_err()
   );
   assert!(
-    q.convert(w, h, source_plane, Plane::new(source.as_fd(), ds, rows))
-      .is_err()
+    q.convert(
+      Depth::Ten,
+      w,
+      h,
+      source_plane,
+      Plane::new(source.as_fd(), ds, rows)
+    )
+    .is_err()
   );
-  q.convert(w, h, source_plane, destination_plane).unwrap();
+  q.convert(Depth::Ten, w, h, source_plane, destination_plane).unwrap();
 }
 
 #[test]
@@ -124,4 +135,84 @@ fn test_convert_distinct_buffer_lifetimes_preserve_all_pixels() {
 #[test]
 fn test_convert_4k_frame_preserves_pixels_and_padding() {
   check(&mut Quantizer::new().unwrap(), 3840, 2160, 2);
+}
+
+#[test]
+fn test_convert_eight_bit_preserves_pixels_across_different_strides() {
+  let source = Buffer::allocate(128 * 64 * 3 / 2).unwrap();
+  let target = Buffer::allocate(64 * 80 * 3 / 2).unwrap();
+  {
+    let mut bytes = source.write().unwrap();
+    for (i, byte) in bytes.iter_mut().enumerate() {
+      *byte = (i % 251) as u8;
+    }
+  }
+  target.write().unwrap().fill(0xa5);
+  Quantizer::new()
+    .unwrap()
+    .convert(
+      Depth::Eight,
+      64,
+      64,
+      Plane::new(source.as_fd(), 128, 64),
+      Plane::new(target.as_fd(), 64, 80),
+    )
+    .unwrap();
+  let original = source.read().unwrap();
+  let copied = target.read().unwrap();
+  for plane in 0..2 {
+    for row in 0..if plane == 0 { 64 } else { 32 } {
+      let src = (plane * 64 + row) * 128;
+      let dst = (plane * 80 + row) * 64;
+      assert_eq!(&copied[dst..dst + 64], &original[src..src + 64]);
+    }
+  }
+  assert!(copied[64 * 64..64 * 80].iter().all(|byte| *byte == 0xa5));
+}
+
+#[test]
+fn test_convert_concurrent_contexts_publish_pixels_to_cpu_readers() {
+  std::thread::scope(|scope| {
+    let workers: Vec<_> = (0..2)
+      .map(|_| {
+        scope.spawn(|| {
+          for _ in 0..16 {
+            check(&mut Quantizer::new().unwrap(), 256, 128, 1);
+          }
+        })
+      })
+      .collect();
+    for worker in workers {
+      worker.join().unwrap();
+    }
+  });
+}
+
+#[test]
+fn test_convert_first_gpu_write_is_visible_in_never_cpu_mapped_oversized_output()
+ {
+  let source = Buffer::allocate(512 * 128 * 3 / 2).unwrap();
+  {
+    let mut bytes = source.write().unwrap();
+    for row in bytes.chunks_mut(512) {
+      row.fill(0);
+      for group in row[..320].chunks_exact_mut(5) {
+        group.copy_from_slice(&[0, 2, 8, 32, 128]);
+      }
+    }
+  }
+  for _ in 0..16 {
+    let mut q = Quantizer::new().unwrap();
+    let destination = Buffer::allocate(512 * 256 * 3).unwrap();
+    q.convert(
+      Depth::Ten,
+      256,
+      128,
+      Plane::new(source.as_fd(), 512, 128),
+      Plane::new(destination.as_fd(), 256, 128),
+    )
+    .unwrap();
+    let pixels = destination.read().unwrap();
+    assert!(pixels[..256 * 128 * 3 / 2].iter().all(|&v| v == 128));
+  }
 }

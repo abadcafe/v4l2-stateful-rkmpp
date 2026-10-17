@@ -99,7 +99,7 @@ def test_map_and_export_share_storage_and_queue_offsets_never_alias(
     assert accepted(output.request(2)) == 2
     assert accepted(capture.request(1)) == 18
     first, second = accepted(output.query(0)), accepted(capture.query(0))
-    assert first.offsets[0] < 1 << 30 <= second.offsets[0]
+    assert first.offsets[0] != second.offsets[0]
     with accepted(output.map(0)) as a, accepted(capture.map(0)) as b:
         a[:16], b[:16] = b"A" * 16, b"B" * 16
         with accepted(output.export(0)) as a_fd, accepted(capture.export(0)) as b_fd:
@@ -129,3 +129,24 @@ def test_query_plane_bytes_and_timeval_roundtrip_queued_output(video: Video) -> 
     )
     assert Plane.from_buffer(planes).bytesused == 256
     assert (payload.timestamp.seconds, payload.timestamp.microseconds) == (9, 123456)
+
+
+def test_all_buffer_cookies_map_distinct_storage(video: Video) -> None:
+    queues = (Queue(video.fd, QueueType.OUTPUT), Queue(video.fd, QueueType.CAPTURE))
+    cookies: set[int] = set()
+    for number, queue in enumerate(queues):
+        assert accepted(queue.request(32)) == 32
+        for index in range(32):
+            info = accepted(queue.query(index))
+            assert info.offsets[0] not in cookies
+            cookies.add(info.offsets[0])
+            with accepted(queue.map(index)) as memory:
+                memory[:1] = bytes([number * 32 + index])
+    for number, queue in enumerate(queues):
+        for index in range(32):
+            with accepted(queue.map(index)) as memory:
+                assert memory[:1] == bytes([number * 32 + index])
+            with accepted(queue.export(index)) as exported:
+                assert accepted(read_bytes(exported.fd, 1)) == bytes(
+                    [number * 32 + index]
+                )
