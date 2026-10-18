@@ -106,7 +106,25 @@ impl Validator {
           {
             return Err(invalid());
           }
-          markings.admit(&nal, &slice)?;
+          let marking = markings.admit(&nal, &slice)?;
+          if unit.header.is_none() {
+            unit.prefix = nal.sc_offset as usize;
+            // PPS belongs to this parser and was checked above. Copy
+            // only owned scalar syntax, never its address.
+            let pps = unsafe { &*slice.pps };
+            unit.header =
+              Some(super::header::Header::H264(super::header::H264 {
+                pps: u32::try_from(pps.id).map_err(|_| invalid())?,
+                frame: u32::from(slice.frame_num),
+                field: (slice.field_pic_flag != 0)
+                  .then_some(slice.bottom_field_flag != 0),
+                lsb: u32::from(slice.pic_order_cnt_lsb),
+                bottom_delta: slice.delta_pic_order_cnt_bottom,
+                delta: slice.delta_pic_order_cnt,
+                marking: marking.clone(),
+              }));
+          }
+
           identity = Some(current);
         }
         7 | 8

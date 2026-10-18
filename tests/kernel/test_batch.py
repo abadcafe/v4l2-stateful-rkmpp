@@ -142,3 +142,16 @@ def test_exchange_per_reply_errors_preserve_valid_reply_order(
     replies[1].epoch = packets[1].epoch
     retry = accepted(session.service.exchange([replies[1]]))
     assert retry.results[0] == 0 and accepted(output.dequeue()).index == 1
+
+
+def test_exchange_empty_batch_preserves_unused_payload_storage(
+    raw_session: Peer,
+) -> None:
+    payload = Batch.from_buffer_copy(b"\xa5" * ctypes.sizeof(Batch))
+    payload.version = VERSION
+    payload.reply_count = 0
+    payload.event_count = 0
+    payload.reserved = 0
+    _ = accepted(ioctl(raw_session.service.fd, EXCHANGE, ctypes.addressof(payload)))
+    assert payload.event_count == 0
+    assert bytes(payload)[16:] == b"\xa5" * (ctypes.sizeof(Batch) - 16)

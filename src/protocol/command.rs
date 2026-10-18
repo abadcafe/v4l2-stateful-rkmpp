@@ -1,8 +1,8 @@
 //! module: protocol::command; responsibility: admit wire events before
 //! resources or session state can change. operations:
 //! `TryFrom<Message>`, kind, message; entities: Command; tests:
-//! command_tests, worker_tests, service/test_protocol. Queue-state
-//! constraints remain with the backend.
+//! command_tests, service/scheduler_tests, service/test_protocol.
+//! Queue-state constraints remain with the backend.
 use std::io;
 
 use super::{Event, Message, VERSION};

@@ -3,26 +3,18 @@
 //! operations: test entrypoints; entities: none; tests:
 //! acquire/index/drop.
 use super::group::Group;
-use super::reservation::Reservation;
 use crate::dma::Buffer;
 
 #[test]
-fn test_acquire_excludes_leased_buffer_until_drop() {
+fn test_index_retains_exclusive_lease_until_drop() {
   let mut group = Group::new(false).unwrap();
   group.commit(&[(7, Buffer::allocate(4096).unwrap())], 8).unwrap();
-  let lease =
-    Reservation::acquire(group.handle(), 4096).unwrap().unwrap();
+  let lease = group.reserve_capture(4096).unwrap().unwrap();
   assert_eq!(lease.index().unwrap(), 7);
-  assert!(
-    Reservation::acquire(group.handle(), 4096).unwrap().is_none()
-  );
+  assert!(group.reserve_capture(4096).unwrap().is_none());
   drop(lease);
   assert_eq!(
-    Reservation::acquire(group.handle(), 4096)
-      .unwrap()
-      .unwrap()
-      .index()
-      .unwrap(),
+    group.reserve_capture(4096).unwrap().unwrap().index().unwrap(),
     7
   );
 }

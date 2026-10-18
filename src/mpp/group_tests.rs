@@ -49,8 +49,7 @@ fn test_commit_and_retire_retain_transferred_buffers() {
 }
 
 #[test]
-fn test_pressure_allocates_bounded_private_surfaces_without_reserving_them_for_capture()
- {
+fn test_capture_pressure_waits_until_a_registered_surface_returns() {
   let mut group = Group::new(false).unwrap();
   let buffers: Vec<_> =
     (0..18).map(|i| (i, Buffer::allocate(4096).unwrap())).collect();
@@ -59,30 +58,18 @@ fn test_pressure_allocates_bounded_private_surfaces_without_reserving_them_for_c
   for _ in 0..18 {
     held.push(group.reserve_capture(4096).unwrap().unwrap());
   }
-  assert!(!group.available());
-  assert!(group.ensure_available().unwrap());
-  assert!(group.reserve_capture(4096).unwrap().is_none());
-  for _ in 18..32 {
-    assert!(group.ensure_available().unwrap());
-    let private =
-      super::reservation::Reservation::acquire(group.handle(), 4096)
-        .unwrap()
-        .unwrap();
-    assert!(private.index().unwrap() >= 32);
-    held.push(private);
+  for _ in 0..64 {
+    assert!(!group.available());
+    assert!(group.reserve_capture(4096).unwrap().is_none());
   }
-  assert!(!group.ensure_available().unwrap());
-  drop(held.remove(0));
-  assert!(
-    group.reserve_capture(4096).unwrap().unwrap().index().unwrap() < 18
+  let released = held.remove(0);
+  let index = released.index().unwrap();
+  drop(released);
+  assert!(group.available());
+  assert_eq!(
+    group.reserve_capture(4096).unwrap().unwrap().index().unwrap(),
+    index
   );
-}
-
-#[test]
-fn test_pressure_does_not_allocate_without_registered_capture_geometry()
-{
-  let mut group = Group::new(false).unwrap();
-  assert!(!group.ensure_available().unwrap());
 }
 
 #[test]
@@ -91,9 +78,9 @@ fn test_partial_capture_registration_reserves_budget_for_unqueued_slots()
   let mut group = Group::new(false).unwrap();
   group.commit(&[(0, Buffer::allocate(4096).unwrap())], 32).unwrap();
   let held = group.reserve_capture(4096).unwrap().unwrap();
-  assert!(!group.ensure_available().unwrap());
+  assert!(!group.available());
   group.commit(&[(31, Buffer::allocate(4096).unwrap())], 32).unwrap();
-  assert!(group.ensure_available().unwrap());
+  assert!(group.available());
   assert!(
     group.commit(&[(32, Buffer::allocate(4096).unwrap())], 32).is_err()
   );

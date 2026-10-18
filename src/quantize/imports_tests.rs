@@ -10,7 +10,8 @@ use std::os::fd::AsFd;
 
 use super::context::Context;
 use super::imports::Cache;
-use crate::dma::{Buffer, system};
+use crate::dma::Buffer;
+use crate::image::Plane;
 
 #[test]
 fn test_new_rejects_budget_that_cannot_retain_both_conversion_images() {
@@ -31,28 +32,28 @@ fn test_pair_reuses_dma_identity_across_duplicated_file_descriptors() {
       .unwrap();
   let source = Buffer::allocate(4096).unwrap();
   let destination = Buffer::allocate(4096).unwrap();
-  let source_stat = system::metadata(source.as_fd()).unwrap();
-  let target_stat = system::metadata(destination.as_fd()).unwrap();
   let first = cache
     .pair(
-      source.as_fd(),
-      &source_stat,
-      destination.as_fd(),
-      &target_stat,
+      Plane::new(source.as_fd(), 32, 32),
+      Plane::new(destination.as_fd(), 32, 32),
     )
     .unwrap();
   let duplicate = source.as_fd().try_clone_to_owned().unwrap();
   let second = cache
     .pair(
-      duplicate.as_fd(),
-      &source_stat,
-      destination.as_fd(),
-      &target_stat,
+      Plane::new(duplicate.as_fd(), 32, 32),
+      Plane::new(destination.as_fd(), 32, 32),
     )
     .unwrap();
   for index in 0..2 {
-    assert_eq!(first[index].buffer, second[index].buffer);
-    assert_eq!(second[index].range, 4096);
+    assert_eq!(
+      first.descriptors(&context.device()).unwrap()[index].buffer,
+      second.descriptors(&context.device()).unwrap()[index].buffer
+    );
+    assert_eq!(
+      second.descriptors(&context.device()).unwrap()[index].range,
+      4096
+    );
   }
 }
 
@@ -64,38 +65,40 @@ fn test_pair_eviction_preserves_both_live_conversion_descriptors() {
       .unwrap();
   let buffers: Vec<_> =
     (0..3).map(|_| Buffer::allocate(4096).unwrap()).collect();
-  let metadata: Vec<_> = buffers
-    .iter()
-    .map(|b| system::metadata(b.as_fd()).unwrap())
-    .collect();
   let first = cache
     .pair(
-      buffers[0].as_fd(),
-      &metadata[0],
-      buffers[1].as_fd(),
-      &metadata[1],
+      Plane::new(buffers[0].as_fd(), 32, 32),
+      Plane::new(buffers[1].as_fd(), 32, 32),
     )
     .unwrap();
   let replaced = cache
     .pair(
-      buffers[0].as_fd(),
-      &metadata[0],
-      buffers[2].as_fd(),
-      &metadata[2],
+      Plane::new(buffers[0].as_fd(), 32, 32),
+      Plane::new(buffers[2].as_fd(), 32, 32),
     )
     .unwrap();
-  assert_eq!(first[0].buffer, replaced[0].buffer);
-  assert_ne!(replaced[0].buffer, replaced[1].buffer);
+  assert_eq!(
+    first.descriptors(&context.device()).unwrap()[0].buffer,
+    replaced.descriptors(&context.device()).unwrap()[0].buffer
+  );
+  assert_ne!(
+    replaced.descriptors(&context.device()).unwrap()[0].buffer,
+    replaced.descriptors(&context.device()).unwrap()[1].buffer
+  );
   let again = cache
     .pair(
-      buffers[0].as_fd(),
-      &metadata[0],
-      buffers[2].as_fd(),
-      &metadata[2],
+      Plane::new(buffers[0].as_fd(), 32, 32),
+      Plane::new(buffers[2].as_fd(), 32, 32),
     )
     .unwrap();
-  assert_eq!(again[0].buffer, replaced[0].buffer);
-  assert_eq!(again[1].buffer, replaced[1].buffer);
+  assert_eq!(
+    again.descriptors(&context.device()).unwrap()[0].buffer,
+    replaced.descriptors(&context.device()).unwrap()[0].buffer
+  );
+  assert_eq!(
+    again.descriptors(&context.device()).unwrap()[1].buffer,
+    replaced.descriptors(&context.device()).unwrap()[1].buffer
+  );
 }
 
 #[test]
@@ -106,19 +109,48 @@ fn test_pair_rejects_non_dma_and_empty_imports_without_poisoning_cache()
     Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
       .unwrap();
   let file = std::fs::File::open("/dev/null").unwrap();
-  let stat = system::metadata(file.as_fd()).unwrap();
   assert!(
-    cache.pair(file.as_fd(), &stat, file.as_fd(), &stat).is_err()
+    cache
+      .pair(
+        Plane::new(file.as_fd(), 32, 32),
+        Plane::new(file.as_fd(), 32, 32)
+      )
+      .is_err()
   );
   let a = Buffer::allocate(4096).unwrap();
   let b = Buffer::allocate(4096).unwrap();
   let recovered = cache
-    .pair(
-      a.as_fd(),
-      &system::metadata(a.as_fd()).unwrap(),
-      b.as_fd(),
-      &system::metadata(b.as_fd()).unwrap(),
-    )
+    .pair(Plane::new(a.as_fd(), 32, 32), Plane::new(b.as_fd(), 32, 32))
     .unwrap();
-  assert_ne!(recovered[0].buffer, recovered[1].buffer);
+  assert_ne!(
+    recovered.descriptors(&context.device()).unwrap()[0].buffer,
+    recovered.descriptors(&context.device()).unwrap()[1].buffer
+  );
+}
+
+#[test]
+fn test_pair_rejects_aliased_images_and_non_dma_source() {
+  let context = Context::new().unwrap();
+  let mut cache =
+    Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
+      .unwrap();
+  let buffer = Buffer::allocate(4096).unwrap();
+  let duplicate = buffer.as_fd().try_clone_to_owned().unwrap();
+  assert!(
+    cache
+      .pair(
+        Plane::new(buffer.as_fd(), 32, 32),
+        Plane::new(duplicate.as_fd(), 32, 32)
+      )
+      .is_err()
+  );
+  let invalid = std::fs::File::open("/dev/null").unwrap();
+  assert!(
+    cache
+      .pair(
+        Plane::new(invalid.as_fd(), 32, 32),
+        Plane::new(buffer.as_fd(), 32, 32)
+      )
+      .is_err()
+  );
 }

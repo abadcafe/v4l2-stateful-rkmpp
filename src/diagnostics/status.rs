@@ -32,11 +32,16 @@ enum State {
   Stopping,
 }
 #[derive(Serialize)]
-struct Snapshot<'a> {
+struct Measurement<'a> {
   protocol: u32,
   identity: &'a Identity,
   state: State,
   cpu_seconds: f64,
+}
+#[derive(Serialize)]
+struct Snapshot<'a> {
+  #[serde(flatten)]
+  measurement: Measurement<'a>,
   fds: usize,
   threads: usize,
   sessions: Vec<i32>,
@@ -89,10 +94,11 @@ impl Status {
     })
   }
 
-  pub(super) fn snapshot(
-    &self,
-    client: BorrowedFd<'_>,
-  ) -> io::Result<Vec<u8>> {
+  pub(super) fn measure(&self) -> io::Result<Vec<u8>> {
+    serde_json::to_vec(&self.measurement()?).map_err(io::Error::other)
+  }
+
+  fn measurement(&self) -> io::Result<Measurement<'_>> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: getrusage writes this process's user/system times into
     // usage.
@@ -106,11 +112,7 @@ impl Status {
       + usage.ru_stime.tv_sec as f64
       + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as f64
         / 1_000_000.0;
-    let (fds, sessions) = inventory(client)?;
-    let threads = fs::read_dir("/proc/self/task")?
-      .collect::<io::Result<Vec<_>>>()?
-      .len();
-    let snapshot = Snapshot {
+    Ok(Measurement {
       protocol: 1,
       identity: &self.identity,
       state: if self.shutdown.stopping() {
@@ -119,10 +121,19 @@ impl Status {
         State::Ready
       },
       cpu_seconds,
-      fds,
-      threads,
-      sessions,
-    };
+    })
+  }
+
+  pub(super) fn snapshot(
+    &self,
+    client: BorrowedFd<'_>,
+  ) -> io::Result<Vec<u8>> {
+    let measurement = self.measurement()?;
+    let (fds, sessions) = inventory(client)?;
+    let threads = fs::read_dir("/proc/self/task")?
+      .collect::<io::Result<Vec<_>>>()?
+      .len();
+    let snapshot = Snapshot { measurement, fds, threads, sessions };
     serde_json::to_vec(&snapshot).map_err(io::Error::other)
   }
 }

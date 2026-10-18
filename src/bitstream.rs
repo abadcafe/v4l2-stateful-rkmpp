@@ -35,13 +35,13 @@ pub mod report;
 pub use report::AccessUnit;
 use report::Report;
 
-use crate::submission::Payload;
+use crate::submission::Prefix;
 pub struct Parser {
   syntax: Box<dyn Syntax>,
   validator: crate::packet_syntax::Validator,
   codec: u32,
   restore_configuration: bool,
-  metadata: Vec<u8>,
+  metadata: Prefix,
 }
 impl Parser {
   pub fn new(codec: u32) -> io::Result<Self> {
@@ -60,7 +60,7 @@ impl Parser {
       validator: crate::packet_syntax::Validator::new(codec)?,
       codec,
       restore_configuration: false,
-      metadata: Vec::new(),
+      metadata: Prefix::default(),
     })
   }
 
@@ -83,31 +83,23 @@ impl Parser {
       .into_iter()
       .next()
       .ok_or_else(|| io::Error::other("missing Annex B admission"))?;
-    let format = self.syntax.format();
     let boundary = unit.boundary;
     let picture_bytes = &bytes[unit.range];
     let mut units = Vec::new();
-    let semantic = if self.metadata.is_empty() {
-      std::borrow::Cow::Borrowed(picture_bytes)
-    } else {
-      let mut data = self.metadata.clone();
-      data.extend_from_slice(picture_bytes);
-      std::borrow::Cow::Owned(data)
-    };
-    if let Some(picture) = self.syntax.inspect(&semantic)? {
-      let payload =
-        if self.restore_configuration || !self.metadata.is_empty() {
-          let mut data = if self.restore_configuration {
-            self.syntax.configuration()
-          } else {
-            Vec::new()
-          };
-          data.extend_from_slice(&semantic);
-          Payload::Owned(data)
-        } else {
-          Payload::Input(0..picture_bytes.len())
-        };
-      self.metadata.clear();
+    if let Some(picture) = self.syntax.inspect(
+      &picture_bytes[..unit.prefix.min(picture_bytes.len())],
+      unit.header.as_ref(),
+    )? {
+      let configuration = if self.restore_configuration {
+        self.syntax.configuration()
+      } else {
+        Vec::new()
+      };
+      let payload = self.metadata.compose(
+        &configuration,
+        picture_bytes,
+        0..picture_bytes.len(),
+      )?;
       self.restore_configuration = false;
       let geometry = picture.geometry;
       units.push(AccessUnit {
@@ -145,27 +137,12 @@ impl Parser {
         ),
       });
     } else {
-      if codec::nals(picture_bytes).any(|nal| {
-        nal
-          .first()
-          .is_some_and(|byte| (format.picture)((format.kind)(*byte)))
-      }) {
+      if unit.header.is_some() {
         self.metadata.clear();
+        self.restore_configuration = true;
       } else {
-        if self
-          .metadata
-          .len()
-          .checked_add(picture_bytes.len())
-          .is_none_or(|n| n > crate::submission::MAX_PACKET_SIZE)
-        {
-          return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "metadata prefix exceeds input limit",
-          ));
-        }
-        self.metadata.extend_from_slice(picture_bytes);
+        self.metadata.append(picture_bytes)?;
       }
-      self.restore_configuration = true;
     }
     if let Some(boundary) = boundary {
       self.syntax.boundary();
@@ -184,7 +161,7 @@ impl Parser {
     let mut next = Self::new(self.codec)?;
     if !configuration.is_empty() {
       next.validator.validate(&configuration)?;
-      next.syntax.inspect(&configuration)?;
+      next.syntax.inspect(&configuration, None)?;
     }
     next.restore_configuration = true;
     *self = next;

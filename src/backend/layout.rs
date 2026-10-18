@@ -1,34 +1,36 @@
 //! module: backend::layout; responsibility: retain parsed geometry
 //! and picture obligations across source changes. operations: push,
 //! peek, discard_prior, complete, take, finish, drained; entities:
-//! Layouts, Extent, Picture; tests: layout_tests.
+//! Layouts, Requirements, Picture; tests: layout_tests.
 use std::collections::BTreeMap;
 use std::io;
 
 use crate::picture::Descriptor;
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct Extent {
+pub(super) struct Requirements {
   pub width: u32,
   pub height: u32,
   pub coded_width: u32,
   pub coded_height: u32,
+  pub minimum: u32,
   pub left: u32,
   pub top: u32,
 }
-impl Extent {
+impl Requirements {
   pub(super) fn from_frame(info: crate::mpp::FrameInfo) -> Self {
     Self {
       width: info.width,
       height: info.height,
       coded_width: info.width,
       coded_height: info.height,
+      minimum: 18,
       left: 0,
       top: 0,
     }
   }
 }
 pub(super) struct Picture {
-  pub extent: Option<Extent>,
+  pub requirements: Option<Requirements>,
   pub timestamp: u64,
   pub source: crate::timestamp::Source,
   pub plan: crate::picture::Plan,
@@ -42,7 +44,7 @@ pub(super) struct Layouts {
 }
 impl Layouts {
   pub(super) fn push(&mut self, unit: &Descriptor) -> io::Result<u64> {
-    let extent = if let Some(g) = unit.geometry {
+    let requirements = if let Some(g) = unit.geometry {
       if g.width == 0
         || g.height == 0
         || g.coded_width > 8192
@@ -58,11 +60,16 @@ impl Layouts {
           "invalid parsed geometry",
         ));
       }
-      Some(Extent {
+      Some(Requirements {
         width: g.width,
         height: g.height,
         coded_width: g.coded_width,
         coded_height: g.coded_height,
+        // MPP's decoder references and normative pending display
+        // pictures may be different sets. Each is bounded by
+        // the stream DPB capacity. Negotiate their union up
+        // front instead of spilling outside CAPTURE.
+        minimum: (2 * unit.plan.limits().capacity()).max(18) as u32,
         left: g.left,
         top: g.top,
       })
@@ -81,7 +88,7 @@ impl Layouts {
     self.pending.insert(
       self.serial,
       Picture {
-        extent,
+        requirements,
         timestamp: unit.timestamp,
         source: unit.source,
         plan: unit.plan.clone(),
@@ -110,19 +117,21 @@ impl Layouts {
     id: u64,
     width: u32,
     height: u32,
-  ) -> io::Result<Extent> {
+  ) -> io::Result<Requirements> {
     self
       .pending
       .get(&id)
       .filter(|p| {
-        p.extent.is_none_or(|e| e.width == width && e.height == height)
+        p.requirements
+          .is_none_or(|e| e.width == width && e.height == height)
       })
       .map(|p| {
-        p.extent.unwrap_or(Extent {
+        p.requirements.unwrap_or(Requirements {
           width,
           height,
           coded_width: width,
           coded_height: height,
+          minimum: 18,
           left: 0,
           top: 0,
         })

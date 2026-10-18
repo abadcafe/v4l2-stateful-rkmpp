@@ -3,13 +3,14 @@
 //! none; tests: driver_tests and process acceptance.
 use std::io;
 
-use super::worker::{self, Channel, Engine};
-use crate::backend::Backend;
+use super::scheduler::{self, Channel, Engine};
+use crate::hardware::{Client, Engine as HardwareEngine};
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
 use crate::protocol::command::Command;
 use crate::protocol::{Batch, Message};
-use crate::shutdown::{Shutdown, Signals};
+use crate::readiness::Readable;
+use crate::shutdown::Shutdown;
 use crate::transport::Session;
 impl Channel for Session {
   fn exchange(&mut self, batch: &mut Batch) -> io::Result<()> {
@@ -25,40 +26,50 @@ impl Channel for Session {
     Session::register(self, direction, epoch, id)
   }
 
-  fn wait(
+  async fn wait(
     &mut self,
     notify: &Notify,
+    notification: &Readable,
     shutdown: &Shutdown,
   ) -> io::Result<bool> {
-    Session::wait(self, notify, shutdown)
+    Session::wait(self, notify, notification, shutdown).await
   }
 }
-impl Engine for Backend {
+impl Engine for HardwareEngine {
+  async fn close(self) -> io::Result<()> {
+    HardwareEngine::close(self).await
+  }
+
   fn notification(&self) -> Notify {
-    Backend::notification(self)
+    HardwareEngine::notification(self)
   }
 
-  fn register(&mut self, pool: Pool) -> io::Result<()> {
-    Backend::register(self, pool)
+  fn submit(
+    &mut self,
+    command: Command,
+    pool: Option<Pool>,
+  ) -> io::Result<()> {
+    HardwareEngine::submit(self, command, pool)
   }
 
-  fn event(&mut self, command: Command) -> io::Result<()> {
-    Backend::event(self, command)
+  async fn advance(&mut self) -> io::Result<bool> {
+    HardwareEngine::advance(self).await
   }
 
-  fn step(&mut self) -> io::Result<bool> {
-    Backend::step(self)
+  async fn wait(&self) -> io::Result<()> {
+    HardwareEngine::wait(self).await
   }
 
   fn take_reply(&mut self) -> Option<Message> {
-    Backend::take_reply(self)
+    HardwareEngine::take_reply(self)
   }
 }
-pub(super) fn run(
+pub(super) async fn run(
   mut session: Session,
   shutdown: Shutdown,
+  client: Client,
 ) -> Result<(), String> {
-  Signals::block_worker().map_err(|e| e.to_string())?;
-  let backend = Backend::new().map_err(|e| e.to_string())?;
-  worker::run(&mut session, backend, &shutdown).map(|_| ())
+  let backend =
+    client.open(session.lease()).await.map_err(|e| e.to_string())?;
+  scheduler::run(&mut session, backend, &shutdown).await.map(|_| ())
 }

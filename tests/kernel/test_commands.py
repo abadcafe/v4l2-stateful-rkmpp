@@ -156,6 +156,7 @@ def test_unsubscribe_source_change_stops_public_event_notifications(
         coded_height=64,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=1,
         width=128,
         height=64,

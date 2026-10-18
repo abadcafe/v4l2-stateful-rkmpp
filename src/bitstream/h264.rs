@@ -5,11 +5,12 @@ use std::io;
 
 use order::Order;
 
-use super::codec::{NalFormat, Picture, Syntax, nals};
+use super::codec::{Picture, Syntax, nals};
 use super::recovery::{Point, Recovery};
 pub(super) struct H264 {
   order: Order,
   recovery: Recovery,
+  pending: Option<Point>,
   seeking: bool,
 }
 impl Default for H264 {
@@ -17,44 +18,42 @@ impl Default for H264 {
     Self {
       order: Order::default(),
       recovery: Recovery::default(),
+      pending: None,
       seeking: true,
     }
   }
 }
 impl Syntax for H264 {
-  fn format(&self) -> NalFormat {
-    NalFormat {
-      kind: |b| b & 31,
-      picture: |kind| (1..=5).contains(&kind),
-    }
-  }
-
   fn configuration(&self) -> Vec<u8> {
     self.order.configuration()
   }
 
   fn boundary(&mut self) {
     self.seeking = true;
+    self.pending = None;
   }
 
-  fn inspect(&mut self, bytes: &[u8]) -> io::Result<Option<Picture>> {
-    let mut marking = None;
-    let mut point = None;
+  fn inspect(
+    &mut self,
+    bytes: &[u8],
+    header: Option<&crate::packet_syntax::header::Header>,
+  ) -> io::Result<Option<Picture>> {
+    let mut point = self.pending.take();
     for nal in nals(bytes) {
       let Some((&header, data)) = nal.split_first() else { continue };
       let kind = header & 31;
       if kind == 6 {
         point = Point::parse(data)?.or(point);
       }
-      if (marking.is_none() || matches!(kind, 7 | 8))
-        && let Some(m) = self.order.observe(nal)?
-      {
-        marking = Some(m);
-      }
+      self.order.configure(nal)?;
     }
-    let Some(m) = marking else {
+    let Some(crate::packet_syntax::header::Header::H264(header)) =
+      header
+    else {
+      self.pending = point;
       return Ok(None);
     };
+    let m = self.order.observe(header)?;
     let mut discard = m.discard;
     if m.idr {
       self.recovery = Recovery::default();

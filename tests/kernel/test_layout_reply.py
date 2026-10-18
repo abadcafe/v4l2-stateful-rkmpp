@@ -16,7 +16,7 @@ from tests.support.bridge_abi import VERSION, Message, Reply
 from tests.support.format_abi import Format
 from tests.support.kernel_peer import Peer
 from tests.support.outcome import accepted
-from tests.support.queue import QueueType
+from tests.support.queue import Queue, QueueType
 from tests.support.syscalls import command, ioctl
 from tests.support.video_formats import get_format, selection
 
@@ -54,6 +54,7 @@ def test_layout_reply_rejects_invalid_geometry_without_source_change(
         coded_height=height,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=packets[0].epoch,
         width=width,
         height=height,
@@ -78,6 +79,7 @@ def test_layout_reply_publishes_visible_extent_storage_and_colorimetry(
         coded_height=128,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=packets[0].epoch,
         width=256,
         height=128,
@@ -113,6 +115,7 @@ def test_layout_accepts_odd_visible_extent_and_updates_output(
         coded_height=65,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=packets[0].epoch,
         width=65,
         height=65,
@@ -155,6 +158,7 @@ def test_selection_distinguishes_visible_coded_and_padded_rectangles(
         coded_height=65,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=packets[0].epoch,
         width=65,
         height=65,
@@ -183,6 +187,7 @@ def test_layout_allows_visible_crop_smaller_than_coded_minimum(
     reply = Message(
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=1,
         width=32,
         height=32,
@@ -205,6 +210,7 @@ def test_layout_reports_actual_field_structure(
     layout = Message(
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=1,
         width=64,
         height=64,
@@ -222,3 +228,78 @@ def test_layout_reports_actual_field_structure(
         ioctl(raw_session.video.fd, command(3, "V", 4, ctypes.sizeof(payload)), payload)
     )
     assert int.from_bytes(bytes(payload.fmt.data)[12:16], "little") == field
+
+
+@pytest.mark.parametrize("minimum", [18, 24, 32])
+def test_layout_updates_capture_minimum_and_allocation(
+    packet_session: tuple[Peer, tuple[Message, ...]],
+    minimum: int,
+) -> None:
+    from tests.support.control_abi import Control
+
+    session, packets = packet_session
+    reply = Message(
+        version=VERSION,
+        kind=Reply.LAYOUT,
+        epoch=packets[0].epoch,
+        count=minimum,
+        coded_width=64,
+        coded_height=64,
+        width=64,
+        height=64,
+        stride=64,
+        rows=64,
+        size=6144,
+        format=1,
+    )
+    assert accepted(session.service.exchange([reply])).results[0] == 0
+    value = Control(id=0x980927)
+    assert (
+        accepted(
+            ioctl(session.video.fd, command(3, "V", 27, ctypes.sizeof(value)), value)
+        )
+        == 0
+    )
+    assert value.value == minimum
+    assert accepted(Queue(session.video.fd, QueueType.CAPTURE).request(1)) == minimum
+
+
+def test_layout_larger_buffer_count_prevents_reusing_smaller_pool(
+    packet_session: tuple[Peer, tuple[Message, ...]],
+) -> None:
+    from tests.support.bridge_abi import Event
+    from tests.support.outcome import Rejected
+
+    session, packets = packet_session
+    capture = Queue(session.video.fd, QueueType.CAPTURE)
+    assert accepted(capture.request(18)) == 18
+    for index in range(18):
+        accepted(capture.queue(index))
+    accepted(capture.stream_on())
+    while accepted(session.service.exchange()).event_count:
+        pass
+    reply = Message(
+        version=VERSION,
+        kind=Reply.LAYOUT,
+        epoch=packets[0].epoch,
+        count=32,
+        coded_width=64,
+        coded_height=64,
+        width=64,
+        height=64,
+        stride=64,
+        rows=64,
+        size=6144,
+        format=1,
+    )
+    assert accepted(session.service.exchange([reply])).results[0] == 0
+    last = accepted(capture.dequeue())
+    assert last.flags & 0x100000 and last.bytesused == (0,)
+    result = session.video.start()
+    assert isinstance(result, Rejected) and result.code == errno.EINVAL
+    events = accepted(session.service.exchange())
+    assert all(
+        Message.from_buffer_copy(events.events, index * ctypes.sizeof(Message)).kind
+        != Event.CAPTURE
+        for index in range(events.event_count)
+    )

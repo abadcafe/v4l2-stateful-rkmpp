@@ -4,21 +4,11 @@ use std::io;
 
 use crate::bitstream::bits::Bits;
 use crate::bitstream::geometry::Geometry;
-#[derive(Clone, Copy)]
-pub(super) enum PictureOrder {
-  Lsb(usize),
-  Delta { always_zero: bool },
-  FrameNumber,
-}
 #[derive(Clone)]
 pub(super) struct Sequence {
   pub geometry: Geometry,
   pub frame_bits: usize,
-  pub order: PictureOrder,
   pub poc: super::poc::Parameters,
-  pub frame_only: bool,
-  pub separate: bool,
-  pub chroma: u32,
   pub maximum: u32,
   pub gaps_allowed: bool,
 }
@@ -73,15 +63,13 @@ pub(super) fn parse(data: &[u8]) -> io::Result<Sequence> {
     }
   }
   let frame_bits = b.ue()? as usize + 4;
-  let mut poc = super::poc::Parameters::FrameNumber;
-  let order = match b.ue()? {
+  let poc = match b.ue()? {
     0 => {
       let bits = b.ue()? as usize + 4;
-      poc = super::poc::Parameters::Lsb(bits);
-      PictureOrder::Lsb(bits)
+      super::poc::Parameters::Lsb(bits)
     }
     1 => {
-      let always_zero = b.get(1)? != 0;
+      b.skip(1)?;
       let nonreference = b.se()?;
       let bottom = b.se()?;
       let count = b.ue()?;
@@ -90,11 +78,9 @@ pub(super) fn parse(data: &[u8]) -> io::Result<Sequence> {
       }
       let offsets =
         (0..count).map(|_| b.se()).collect::<io::Result<Vec<_>>>()?;
-      poc =
-        super::poc::Parameters::Delta { nonreference, bottom, offsets };
-      PictureOrder::Delta { always_zero }
+      super::poc::Parameters::Delta { nonreference, bottom, offsets }
     }
-    2 => PictureOrder::FrameNumber,
+    2 => super::poc::Parameters::FrameNumber,
     _ => return Err(io::Error::other("invalid SPS POC")),
   };
   let maximum = b.ue()?;
@@ -102,7 +88,7 @@ pub(super) fn parse(data: &[u8]) -> io::Result<Sequence> {
   if maximum > 16
     || frame_bits > 16
     || chroma > 3
-    || matches!(order, PictureOrder::Lsb(n) if n > 16)
+    || matches!(poc, super::poc::Parameters::Lsb(n) if n > 16)
   {
     return Err(io::Error::other(
       "invalid H264 SPS reference parameters",
@@ -194,11 +180,7 @@ pub(super) fn parse(data: &[u8]) -> io::Result<Sequence> {
   }
   Ok(Sequence {
     frame_bits,
-    order,
     poc,
-    frame_only: frame != 0,
-    separate,
-    chroma,
     maximum,
     gaps_allowed,
     geometry: Geometry {

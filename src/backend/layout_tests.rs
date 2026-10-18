@@ -51,7 +51,7 @@ fn test_take_preserves_reordered_identity_with_identical_timestamps() {
   }
   for i in [2, 0, 1] {
     let p = layouts.take(ids[i]).unwrap();
-    assert_eq!(p.extent.unwrap().left, (i * 16) as u32);
+    assert_eq!(p.requirements.unwrap().left, (i * 16) as u32);
     assert_eq!(p.timestamp, 7);
     assert_eq!(p.source, Source::Start);
   }

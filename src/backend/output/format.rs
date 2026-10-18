@@ -1,11 +1,12 @@
 //! module: output::format; responsibility: validate immutable
 //! decoded-to-CAPTURE geometry. operations:
-//! new/message/extent/ten/changed; entities: Format, FieldArrangement;
-//! tests: format_tests, service crop/color/pixel tests.
+//! new/message/requirements/ten/changed; entities: Format,
+//! FieldArrangement; tests: format_tests, service crop/color/pixel
+//! tests.
 use std::io;
 
 use crate::backend::color::Color;
-use crate::backend::layout::Extent;
+use crate::backend::layout::Requirements;
 use crate::mpp::FrameInfo;
 use crate::protocol::{Message, Reply};
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -36,31 +37,35 @@ impl TryFrom<u32> for FieldArrangement {
 pub(super) struct Format {
   info: FrameInfo,
   arrangement: FieldArrangement,
-  extent: Extent,
+  requirements: Requirements,
   message: Message,
 }
 impl Format {
   pub(super) fn new(
     info: FrameInfo,
-    extent: Extent,
+    requirements: Requirements,
   ) -> io::Result<Self> {
     let arrangement = FieldArrangement::try_from(info.field)?;
+    if !(18..=32).contains(&requirements.minimum) {
+      return Err(io::Error::other("invalid CAPTURE minimum"));
+    }
     if info.format != 0 && info.format != 1 {
       return Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "MPP output is not linear NV12/NV15",
       ));
     }
-    let Extent {
+    let Requirements {
       coded_width,
       coded_height,
       left: crop_left,
       top: crop_top,
       ..
-    } = extent;
+    } = requirements;
     if info.width == 0
       || info.height == 0
-      || (info.width, info.height) != (extent.width, extent.height)
+      || (info.width, info.height)
+        != (requirements.width, requirements.height)
       || !(64..=8192).contains(&coded_width)
       || !(64..=8192).contains(&coded_height)
       || u64::from(crop_left) + u64::from(info.width)
@@ -118,6 +123,7 @@ impl Format {
     }
     let message = Message {
       kind: Reply::Layout as u32,
+      count: if ten { 18 } else { requirements.minimum },
       width: info.width,
       height: info.height,
       coded_width,
@@ -137,15 +143,15 @@ impl Format {
       quantization: color.range(),
       ..Default::default()
     };
-    Ok(Self { info, arrangement, extent, message })
+    Ok(Self { info, arrangement, requirements, message })
   }
 
   pub(super) fn message(&self) -> Message {
     self.message
   }
 
-  pub(super) fn extent(&self) -> Extent {
-    self.extent
+  pub(super) fn requirements(&self) -> Requirements {
+    self.requirements
   }
 
   pub(super) fn ten(&self) -> bool {
@@ -155,9 +161,9 @@ impl Format {
   pub(super) fn changed(
     &self,
     info: FrameInfo,
-    extent: Extent,
+    requirements: Requirements,
   ) -> bool {
-    self.extent != extent
+    self.requirements != requirements
       || FieldArrangement::try_from(info.field).ok()
         != Some(self.arrangement)
       || !same_output(self.info, info)

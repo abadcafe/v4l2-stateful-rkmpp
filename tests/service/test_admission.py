@@ -1,7 +1,7 @@
 """module: test_admission; responsibility: specify daemon admission fault isolation.
 
 operations: process acceptance cases; entities: none;
-tests: rejected offers preserve live workers, pressure backs off, fatal errors exit.
+tests: rejected offers preserve live sessions, pressure backs off, fatal errors exit.
 """
 
 import errno
@@ -24,7 +24,7 @@ def idle(request: Request) -> Reply:
 @pytest.mark.parametrize(
     "code", [errno.EPIPE, errno.ENOMEM, errno.EMFILE, errno.ENFILE]
 )
-def test_rejected_offer_preserves_existing_worker_and_accepts_next(
+def test_rejected_offer_preserves_existing_session_and_accepts_next(
     mock_service: Process, code: int
 ) -> None:
     observed = threading.Event()
@@ -60,7 +60,7 @@ def test_repeated_pressure_is_rate_limited_and_shutdown_remains_responsive(
     assert time.monotonic() - began < 1
 
 
-def test_worker_creation_failure_closes_only_new_session(mock_service: Process) -> None:
+def test_sessions_do_not_create_native_threads(mock_service: Process) -> None:
     observed = threading.Event()
 
     def handle(request: Request) -> Reply:
@@ -70,14 +70,15 @@ def test_worker_creation_failure_closes_only_new_session(mock_service: Process) 
 
     first = accepted(mock_service.session(handle))
     assert observed.wait(5)
+    # Hardware executor already exists. Reject all subsequent native thread
+    # creation: async admission and scheduling must still operate normally.
     mock_service.thread_failure.touch()
-    rejected = accepted(mock_service.session(idle))
-    accepted(rejected.wait(5))
-    mock_service.thread_failure.unlink()
-    assert rejected.calls() == ()
+    observed.clear()
+    second = accepted(mock_service.session(handle))
+    assert observed.wait(5)
     assert mock_service.process.poll() is None
     observed.clear()
     accepted(first.wake())
     assert observed.wait(5)
-    _ = accepted(mock_service.session(idle))
+    accepted(second.wake())
     assert mock_service.process.poll() is None

@@ -35,7 +35,7 @@ from tests.tools.telemetry import Sampler
 
 
 class Recording(BaseModel):
-    schema_version: int = 1
+    schema_version: Literal[3] = 3
     started_at: str
     workload: Workload
     round: int
@@ -52,7 +52,7 @@ class Recording(BaseModel):
     graphics: Info | None = None
     flags: tuple[str, ...] = DECODE_FLAGS
     shared_desktop_pid: int | None = None
-    counter_scope: str = "Chromium: owned process tree; service: entire process; desktop/GPU/MPP: shared system workload"
+    counter_scope: str = "Chromium: owned process tree; service: entire process; desktop/GPU: shared system workload; MPP: last completed driver windows with unknown freshness, not realtime or per-session occupancy"
     outcome: Literal["running", "ended", "duration-limit", "failed", "cancelled"] = (
         "running"
     )

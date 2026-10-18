@@ -15,9 +15,6 @@ pub(crate) struct Validator {
   sequence: Vec<u8>,
   completed: Option<bool>,
 }
-// SAFETY: the parser is owned by exactly one worker, without shared
-// access.
-unsafe impl Send for Validator {}
 impl Validator {
   pub(crate) fn new() -> io::Result<Self> {
     let parser = NonNull::new(unsafe { ffi::gst_av1_parser_new() })
@@ -97,6 +94,8 @@ impl Validator {
       if let Some(display) = self.completed.take() {
         let end = total - bytes.len() + consumed as usize;
         ranges.push(super::unit::Unit {
+          prefix: 0,
+          header: None,
           boundary: None,
           range: start..end,
           display,
@@ -125,93 +124,105 @@ impl Validator {
     // SAFETY: parser is exclusive, output values are initialized C
     // structs, and the OBU data is live for every call. Only owned
     // header values persist.
-    unsafe {
-      match obu.obu_type {
-        1 => {
-          if self.pending.is_some() {
-            return Err(invalid());
-          }
-          let mut sequence = std::mem::zeroed();
-          check(ffi::gst_av1_parser_parse_sequence_header_obu(
+    match obu.obu_type {
+      1 => {
+        if self.pending.is_some() {
+          return Err(invalid());
+        }
+        let mut sequence = unsafe { std::mem::zeroed() };
+        check(unsafe {
+          ffi::gst_av1_parser_parse_sequence_header_obu(
             parser,
             obu,
             &mut sequence,
-          ))
+          )
+        })
+      }
+      2 => {
+        if self.pending.is_some() {
+          return Err(invalid());
         }
-        2 => {
-          if self.pending.is_some() {
-            return Err(invalid());
-          }
-          check(ffi::gst_av1_parser_parse_temporal_delimiter_obu(
-            parser, obu,
-          ))
-        }
-        3 | 7 => {
-          let mut header: ffi::GstAV1FrameHeaderOBU =
-            std::mem::zeroed();
-          check(ffi::gst_av1_parser_parse_frame_header_obu(
+        check(unsafe {
+          ffi::gst_av1_parser_parse_temporal_delimiter_obu(parser, obu)
+        })
+      }
+      3 | 7 => {
+        let mut header: ffi::GstAV1FrameHeaderOBU =
+          unsafe { std::mem::zeroed() };
+        check(unsafe {
+          ffi::gst_av1_parser_parse_frame_header_obu(
             parser,
             obu,
             &mut header,
-          ))?;
-          if header.show_existing_frame != 0 {
-            check(ffi::gst_av1_parser_reference_frame_update(
+          )
+        })?;
+        if header.show_existing_frame != 0 {
+          check(unsafe {
+            ffi::gst_av1_parser_reference_frame_update(
               parser,
               &mut header,
-            ))?;
-            self.completed = Some(true);
-            Ok(())
-          } else {
-            if obu.obu_type == 3 {
-              self.pending = Some(Pending { header, next_tile: 0 });
-            }
-            Ok(())
-          }
-        }
-        4 => {
-          let mut tiles: ffi::GstAV1TileGroupOBU = std::mem::zeroed();
-          check(ffi::gst_av1_parser_parse_tile_group_obu(
-            parser, obu, &mut tiles,
-          ))?;
-          self.tiles(&tiles, obu.obu_size)
-        }
-        5 => {
-          let mut metadata = std::mem::zeroed();
-          check(ffi::gst_av1_parser_parse_metadata_obu(
-            parser,
-            obu,
-            &mut metadata,
-          ))
-        }
-        6 => {
-          if self.pending.is_some() {
-            return Err(invalid());
-          }
-          let mut frame: ffi::GstAV1FrameOBU = std::mem::zeroed();
-          check(ffi::gst_av1_parser_parse_frame_obu(
-            parser, obu, &mut frame,
-          ))?;
-          if frame.tile_group.tile_start_and_end_present_flag != 0 {
-            return Err(invalid());
-          }
-          self.pending =
-            Some(Pending { header: frame.frame_header, next_tile: 0 });
-          self.tiles(&frame.tile_group, obu.obu_size)?;
-          if self.pending.is_some() {
-            return Err(invalid());
+            )
+          })?;
+          self.completed = Some(true);
+          Ok(())
+        } else {
+          if obu.obu_type == 3 {
+            self.pending = Some(Pending { header, next_tile: 0 });
           }
           Ok(())
         }
-        8 => {
-          let mut tiles = std::mem::zeroed();
-          check(ffi::gst_av1_parser_parse_tile_list_obu(
-            parser, obu, &mut tiles,
-          ))
-        }
-        // AV1 requires decoders to ignore reserved OBUs and padding.
-        0 | 9..=15 => Ok(()),
-        _ => Err(invalid()),
       }
+      4 => {
+        let mut tiles: ffi::GstAV1TileGroupOBU =
+          unsafe { std::mem::zeroed() };
+        check(unsafe {
+          ffi::gst_av1_parser_parse_tile_group_obu(
+            parser, obu, &mut tiles,
+          )
+        })?;
+        self.tiles(&tiles, obu.obu_size)
+      }
+      5 => {
+        let mut metadata = unsafe { std::mem::zeroed() };
+        check(unsafe {
+          ffi::gst_av1_parser_parse_metadata_obu(
+            parser,
+            obu,
+            &mut metadata,
+          )
+        })
+      }
+      6 => {
+        if self.pending.is_some() {
+          return Err(invalid());
+        }
+        let mut frame: ffi::GstAV1FrameOBU =
+          unsafe { std::mem::zeroed() };
+        check(unsafe {
+          ffi::gst_av1_parser_parse_frame_obu(parser, obu, &mut frame)
+        })?;
+        if frame.tile_group.tile_start_and_end_present_flag != 0 {
+          return Err(invalid());
+        }
+        self.pending =
+          Some(Pending { header: frame.frame_header, next_tile: 0 });
+        self.tiles(&frame.tile_group, obu.obu_size)?;
+        if self.pending.is_some() {
+          return Err(invalid());
+        }
+        Ok(())
+      }
+      8 => {
+        let mut tiles = unsafe { std::mem::zeroed() };
+        check(unsafe {
+          ffi::gst_av1_parser_parse_tile_list_obu(
+            parser, obu, &mut tiles,
+          )
+        })
+      }
+      // AV1 requires decoders to ignore reserved OBUs and padding.
+      0 | 9..=15 => Ok(()),
+      _ => Err(invalid()),
     }
   }
 

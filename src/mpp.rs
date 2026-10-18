@@ -2,6 +2,9 @@
 //! leaking C handles. operations: decoder and packet lifetimes;
 //! entities: Decoder, Packet, Frame. tests: mpp_tests and public V4L2
 //! codec/pixel tests.
+mod api;
+#[cfg(test)]
+mod api_tests;
 mod decoder;
 #[cfg(test)]
 mod decoder_tests;
@@ -23,7 +26,7 @@ mod packet;
 mod packet_tests;
 pub use decoder::{Decoder, Submission};
 pub use frame::{Frame, FrameInfo};
-pub use packet::{InputAccess, Packet};
+pub use packet::{Input, InputAccess, Packet};
 
 mod status;
 #[cfg(test)]

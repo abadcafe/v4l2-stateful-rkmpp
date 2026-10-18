@@ -3,7 +3,7 @@
 //! queries; entities: Negotiation, Phase, Streaming; tests:
 //! negotiation_tests.
 use std::io;
-#[derive(Default)]
+#[derive(Clone, Default)]
 enum Phase {
   #[default]
   Unconfigured,
@@ -13,13 +13,13 @@ enum Phase {
   },
   Active,
 }
-#[derive(Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 enum Streaming {
   #[default]
   Started,
   Stopped,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Negotiation {
   phase: Phase,
   streaming: Streaming,

@@ -47,6 +47,7 @@ fn test_invalid_input_completion_cannot_overtake_initial_picture() {
         epoch: 1,
         pool_id: 1,
         index,
+        count: index + 1,
         bytesused: length as u32,
         codec: u32::from_le_bytes(*b"H264"),
         ..Default::default()
@@ -91,6 +92,7 @@ fn test_register_accepts_early_capture_but_rejects_duplicate_pool() {
         Message {
           version: VERSION,
           kind: kind as u32,
+          count: 1,
           epoch: 1,
           ..Default::default()
         }
@@ -175,6 +177,7 @@ fn test_register_defers_undersized_capture_until_layout_reset() {
     &mut backend,
     Message {
       kind: Event::Packet as u32,
+      count: 1,
       pool_id: 1,
       codec: u32::from_le_bytes(*b"VP90"),
       bytesused: size as u32,
@@ -221,7 +224,12 @@ fn test_register_defers_undersized_capture_until_layout_reset() {
   .unwrap();
   dispatch(
     &mut backend,
-    Message { kind: Event::Recycle as u32, pool_id: 1, ..base },
+    Message {
+      kind: Event::Recycle as u32,
+      pool_id: 1,
+      count: 1,
+      ..base
+    },
   )
   .unwrap();
   for _ in 0..32 {
@@ -270,7 +278,12 @@ fn test_register_defers_undersized_capture_until_layout_reset() {
   for index in 0..20 {
     dispatch(
       &mut backend,
-      Message { kind: Event::Recycle as u32, index, ..capture },
+      Message {
+        kind: Event::Recycle as u32,
+        index,
+        count: index + 1,
+        ..capture
+      },
     )
     .unwrap();
   }
@@ -308,6 +321,7 @@ fn test_event_packet_rejects_pool_slot_length_and_duplicate_leases() {
   let base = Message {
     version: VERSION,
     kind: Event::Packet as u32,
+    count: 1,
     pool_id: 7,
     codec: u32::from_le_bytes(*b"VP90"),
     bytesused: size as u32,
@@ -315,6 +329,7 @@ fn test_event_packet_rejects_pool_slot_length_and_duplicate_leases() {
     ..Default::default()
   };
   for event in [
+    Message { count: 0, ..base },
     Message { pool_id: 8, ..base },
     Message { index: 1, ..base },
     Message { bytesused: 0, ..base },
@@ -385,6 +400,7 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
   let mut frames = 0;
   let mut layouts = 0;
   let mut capture_id = 0;
+  let mut capture_serial = 0;
   let mut generation = 1;
   let mut eos = false;
   let deadline = Instant::now() + Duration::from_secs(10);
@@ -403,6 +419,7 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
         &mut backend,
         Message {
           kind: Event::Packet as u32,
+          count: next as u32 + 1,
           pool_id: 1,
           codec: u32::from_le_bytes(*b"VP90"),
           bytesused: packets[next].len() as u32,
@@ -428,10 +445,12 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
         input_free = true;
       } else if reply.kind == Reply::Frame as u32 {
         frames += 1;
+        capture_serial += 1;
         dispatch(
           &mut backend,
           Message {
             kind: Event::Recycle as u32,
+            count: capture_serial,
             pool_id: capture_id,
             index: reply.index,
             ..base(generation)
@@ -445,10 +464,12 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
           assert_eq!((reply.width, reply.height), (512, 256));
           // Deliberately recycle the old pool before acknowledging its
           // replacement.
+          capture_serial += 1;
           dispatch(
             &mut backend,
             Message {
               kind: Event::Recycle as u32,
+              count: capture_serial,
               pool_id: capture_id,
               ..base(generation)
             },
@@ -485,7 +506,7 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
             Pool::new(
               Direction::Capture,
               capture_id,
-              (0..8)
+              (0..reply.count)
                 .map(|_| Buffer::allocate(reply.size as usize).unwrap())
                 .collect(),
             )
@@ -497,16 +518,18 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
           Message {
             kind: Event::Capture as u32,
             pool_id: capture_id,
-            count: 8,
+            count: reply.count,
             ..base(generation)
           },
         )
         .unwrap();
-        for index in 0..8 {
+        for index in 0..reply.count {
+          capture_serial += 1;
           dispatch(
             &mut backend,
             Message {
               kind: Event::Recycle as u32,
+              count: capture_serial,
               pool_id: capture_id,
               index,
               ..base(generation)
@@ -550,6 +573,7 @@ fn test_event_drain_accepts_maximum_registered_inputs() {
         kind: Event::Packet as u32,
         pool_id: 1,
         index,
+        count: index + 1,
         codec,
         bytesused: picture.len() as u32,
         ..Default::default()
@@ -566,4 +590,40 @@ fn test_event_drain_accepts_maximum_registered_inputs() {
     },
   )
   .unwrap();
+}
+
+#[test]
+fn test_event_input_completion_echoes_the_queue_token_even_on_damage() {
+  let input = Buffer::allocate(4096).unwrap();
+  input.write().unwrap()[0] = 0xff;
+  let mut backend = Backend::new().unwrap();
+  backend
+    .register(Pool::new(Direction::Output, 1, vec![input]).unwrap())
+    .unwrap();
+  dispatch(
+    &mut backend,
+    Message {
+      version: VERSION,
+      kind: Event::Packet as u32,
+      epoch: 1,
+      pool_id: 1,
+      codec: u32::from_le_bytes(*b"H264"),
+      bytesused: 1,
+      count: 17,
+      ..Default::default()
+    },
+  )
+  .unwrap();
+  for _ in 0..16 {
+    backend.step().unwrap();
+    if let Some(reply) = backend.take_reply() {
+      assert_eq!(
+        (reply.kind, reply.index, reply.count),
+        (Reply::InputDone as u32, 0, 17)
+      );
+      assert_ne!(reply.flags & Message::FRAME_ERROR, 0);
+      return;
+    }
+  }
+  panic!("damaged input must be completed");
 }

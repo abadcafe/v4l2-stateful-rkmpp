@@ -33,8 +33,7 @@ def test_capture_sequence_counts_frames_not_fields(
     session = capture_session
     actual: list[int] = []
     for index, field in enumerate(fields):
-        reply = frame(session.event)
-        reply.index = index
+        reply = frame(session.queued[index])
         reply.field = field
         assert accepted(session.raw.service.exchange([reply])).results[0] == 0
         actual.append(accepted(session.queue.dequeue()).sequence)
@@ -48,7 +47,7 @@ def test_timestamp_source_survives_packet_and_frame(
     session = capture_session
     output = Queue(session.raw.video.fd, QueueType.OUTPUT)
     # Retire the fixture's first packet and submit an explicitly marked one.
-    done = Message.from_buffer_copy(session.event)
+    done = Message.from_buffer_copy(session.packets[0])
     done.kind = Reply.INPUT_DONE
     done.pool_id = 1
     assert accepted(session.raw.service.exchange([done])).results[0] == 0
@@ -64,7 +63,7 @@ def test_timestamp_source_survives_packet_and_frame(
     )
     packet = Message.from_buffer_copy(accepted(session.raw.service.exchange()).events)
     assert packet.flags & 0x70000 == source
-    reply = frame(session.event)
+    reply = frame(session.queued[0])
     reply.flags = source
     assert accepted(session.raw.service.exchange([reply])).results[0] == 0
     assert accepted(session.queue.dequeue()).flags & 0x70000 == source

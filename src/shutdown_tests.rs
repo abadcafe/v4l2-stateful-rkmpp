@@ -6,8 +6,6 @@
 //! test_consume_sigterm_requests_shutdown
 //! test_consume_sigint_requests_shutdown
 //! test_drop_restores_original_thread_signal_mask
-//! test_block_worker_blocks_termination_on_owned_thread
-use std::os::fd::{AsFd, AsRawFd};
 use std::time::Duration;
 
 use crate::shutdown::Signals;
@@ -22,26 +20,18 @@ fn test_install_empty_signal_queue_is_nonblocking() {
   );
 }
 
-#[test]
-fn test_request_clones_observe_stop_and_readable_notification() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_request_clones_observe_stop_without_lost_wakeups() {
   let signals = Signals::install().unwrap();
   let stop = signals.shutdown();
   let other = stop.clone();
-  let thread = std::thread::spawn(move || other.request());
-  thread.join().unwrap();
+  let waiting = tokio::spawn(async move {
+    other.cancelled().await;
+  });
+  stop.request();
+  waiting.await.unwrap();
   assert!(stop.stopping());
-  let mut fd = libc::pollfd {
-    fd: stop.as_fd().as_raw_fd(),
-    events: libc::POLLIN,
-    revents: 0,
-  };
-  assert_eq!(
-    unsafe {
-      libc::poll(&mut fd, 1, Duration::from_secs(1).as_millis() as i32)
-    },
-    1
-  );
-  assert_ne!(fd.revents & libc::POLLIN, 0);
+  stop.cancelled().await;
   stop.request();
   assert!(stop.stopping());
 }
@@ -100,51 +90,28 @@ fn test_drop_restores_original_thread_signal_mask() {
   }
 }
 
-#[test]
-fn test_block_worker_blocks_termination_on_owned_thread() {
-  std::thread::spawn(|| {
-    Signals::block_worker().unwrap();
-    let mut mask = unsafe { std::mem::zeroed() };
-    assert_eq!(
-      unsafe {
-        libc::pthread_sigmask(
-          libc::SIG_SETMASK,
-          std::ptr::null(),
-          &mut mask,
-        )
-      },
-      0
-    );
-    for signal in [libc::SIGINT, libc::SIGTERM] {
-      assert_eq!(unsafe { libc::sigismember(&mask, signal) }, 1);
-    }
-  })
-  .join()
-  .unwrap();
-}
-
-#[test]
-fn test_wait_timeout_and_cross_thread_shutdown() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_wait_timeout_and_cross_thread_shutdown() {
   let signals = Signals::install().unwrap();
   let started = std::time::Instant::now();
-  signals.wait(Duration::from_millis(20)).unwrap();
+  signals.wait(Duration::from_millis(20)).await.unwrap();
   assert!(started.elapsed() >= Duration::from_millis(20));
   let stop = signals.shutdown();
   let thread = std::thread::spawn(move || stop.request());
   let began = std::time::Instant::now();
-  signals.wait(Duration::from_secs(5)).unwrap();
+  signals.wait(Duration::from_secs(5)).await.unwrap();
   thread.join().unwrap();
   assert!(began.elapsed() < Duration::from_secs(1));
   assert!(signals.shutdown().stopping());
 }
 
-#[test]
-fn test_wait_pending_termination_interrupts_backoff() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_wait_pending_termination_interrupts_backoff() {
   let signals = Signals::install().unwrap();
   assert_eq!(
     unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) },
     0
   );
-  signals.wait(Duration::from_secs(5)).unwrap();
+  signals.wait(Duration::from_secs(5)).await.unwrap();
   assert!(signals.shutdown().stopping());
 }

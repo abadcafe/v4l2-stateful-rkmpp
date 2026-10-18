@@ -1,6 +1,6 @@
 //! module: dma::system; responsibility: perform Linux DMA allocation
 //! and synchronization. operations: allocate, metadata, CPU sync,
-//! read/write fence wait; entities: none. tests: system_tests,
+//! read/write fence export; entities: none. tests: system_tests,
 //! dma_tests, quantize_tests.
 use std::fs::OpenOptions;
 use std::io;
@@ -35,13 +35,24 @@ pub(super) fn allocate(size: usize) -> io::Result<OwnedFd> {
   let fd = unsafe { OwnedFd::from_raw_fd(allocation.fd as i32) };
   Ok(fd)
 }
-pub(crate) fn metadata(fd: BorrowedFd<'_>) -> io::Result<libc::stat> {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Metadata {
+  pub st_dev: u64,
+  pub st_ino: u64,
+  pub st_size: i64,
+}
+pub(crate) fn metadata(fd: BorrowedFd<'_>) -> io::Result<Metadata> {
   let mut stat = std::mem::MaybeUninit::uninit();
   // SAFETY: fstat writes the full stat object on success.
   if unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) } < 0 {
     return Err(io::Error::last_os_error());
   }
-  Ok(unsafe { stat.assume_init() })
+  let stat = unsafe { stat.assume_init() };
+  Ok(Metadata {
+    st_dev: stat.st_dev,
+    st_ino: stat.st_ino,
+    st_size: stat.st_size,
+  })
 }
 pub(super) fn sync(
   fd: BorrowedFd<'_>,
@@ -52,25 +63,22 @@ pub(super) fn sync(
     if write { 3 } else { 1 } | if start { 0 } else { 4 };
   const COMMAND: libc::c_ulong =
     (1 << 30) | (8 << 16) | ((b'b' as libc::c_ulong) << 8);
-  loop {
-    // SAFETY: flags is dma_buf_sync's complete ABI payload.
-    if unsafe { libc::ioctl(fd.as_raw_fd(), COMMAND, &flags) } == 0 {
-      return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    if error.kind() != io::ErrorKind::Interrupted {
-      return Err(error);
-    }
+  // SAFETY: flags is dma_buf_sync's complete ABI payload. The CPU
+  // ownership layer handles retryable errors before changing state.
+  if unsafe { libc::ioctl(fd.as_raw_fd(), COMMAND, &flags) } == 0 {
+    Ok(())
+  } else {
+    Err(io::Error::last_os_error())
   }
 }
 
-pub(crate) fn wait_read(fd: BorrowedFd<'_>) -> io::Result<()> {
-  wait_fence(fd, 1)
+pub(crate) fn export_read(fd: BorrowedFd<'_>) -> io::Result<OwnedFd> {
+  export_fence(fd, 1)
 }
-pub(crate) fn wait_write(fd: BorrowedFd<'_>) -> io::Result<()> {
-  wait_fence(fd, 2)
+pub(crate) fn export_write(fd: BorrowedFd<'_>) -> io::Result<OwnedFd> {
+  export_fence(fd, 2)
 }
-fn wait_fence(fd: BorrowedFd<'_>, flags: u32) -> io::Result<()> {
+fn export_fence(fd: BorrowedFd<'_>, flags: u32) -> io::Result<OwnedFd> {
   #[repr(C)]
   struct Export {
     flags: u32,
@@ -87,29 +95,5 @@ fn wait_fence(fd: BorrowedFd<'_>, flags: u32) -> io::Result<()> {
   if export.fd < 0 {
     return Err(io::Error::other("invalid exported fence fd"));
   }
-  let sync_file = unsafe { OwnedFd::from_raw_fd(export.fd) };
-  let mut poll = libc::pollfd {
-    fd: sync_file.as_raw_fd(),
-    events: libc::POLLIN,
-    revents: 0,
-  };
-  loop {
-    // SAFETY: poll addresses one live pollfd.
-    let result = unsafe { libc::poll(&mut poll, 1, 2000) };
-    if result > 0 && poll.revents & libc::POLLIN != 0 {
-      return Ok(());
-    }
-    if result == 0 {
-      return Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "DMA-BUF fence timed out",
-      ));
-    }
-    let error = io::Error::last_os_error();
-    if result > 0 || error.kind() != io::ErrorKind::Interrupted {
-      return Err(io::Error::other(format!(
-        "DMA-BUF fence wait failed: {error}"
-      )));
-    }
-  }
+  Ok(unsafe { OwnedFd::from_raw_fd(export.fd) })
 }

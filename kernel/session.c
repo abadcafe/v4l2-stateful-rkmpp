@@ -17,6 +17,7 @@
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/poll.h>
+#include <linux/pagemap.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <media/v4l2-ctrls.h>
@@ -53,6 +54,7 @@ struct rb_session {
   bool output_sent[RB_MAX_BUFFERS], available[RB_MAX_BUFFERS];
   bool before_stop[RB_MAX_BUFFERS];
   u32 input_serial, output_serial[RB_MAX_BUFFERS];
+  u32 capture_serial, capture_token[RB_MAX_BUFFERS];
   u32 unpaired_field;
 };
 /* An endpoint belongs to one decoder incarnation, not the lifetime of the
@@ -60,6 +62,7 @@ struct rb_session {
 struct rb_endpoint {
   struct rb_session *session;
   u64 incarnation;
+  struct rb_batch batch; /* Serialized by session.lock; no per-exchange allocation. */
 };
 static bool drain_busy(const struct rb_session *s) {
   return s->flow == RB_FLOW_DRAINING || s->flow == RB_FLOW_DRAINED;
@@ -96,7 +99,8 @@ static void push(struct rb_session *s, struct rb_message m) {
   m.epoch = s->epoch;
   m.generation = s->generation;
   s->events[s->head++ % RB_EVENTS] = m;
-  wake_up_all(&s->wait);
+  if (s->head - s->tail == 1)
+    wake_up_all(&s->wait);
 }
 static void return_all(struct vb2_queue *q, enum vb2_buffer_state state) {
   unsigned i;
@@ -130,7 +134,7 @@ static int setup(struct vb2_queue *q, unsigned *nb, unsigned *np,
   sizes[0] = size;
   *nb = min_t(unsigned, *nb, RB_MAX_BUFFERS);
   if (!V4L2_TYPE_IS_OUTPUT(q->type))
-    *nb = max_t(unsigned, *nb, 18);
+    *nb = max_t(unsigned, *nb, rb_format_layout(s->format)->count);
   return 0;
 }
 static int prepare(struct vb2_buffer *b) {
@@ -203,6 +207,11 @@ static void queued(struct vb2_buffer *b) {
     if (s->out_started)
       submit_packet(s, b);
   } else {
+    if (s->capture_serial == U32_MAX) {
+      fail(s);
+      return;
+    }
+    s->capture_token[b->index] = ++s->capture_serial;
     s->available[b->index] = true;
     if (s->cap_started && s->out_started) {
       if (s->eos) {
@@ -210,7 +219,8 @@ static void queued(struct vb2_buffer *b) {
         if (!s->available[b->index])
           return;
       }
-      push(s, (struct rb_message){.type = RB_RECYCLE, .index = b->index});
+      push(s, (struct rb_message){.type = RB_RECYCLE, .index = b->index,
+                                  .count = s->capture_token[b->index]});
     }
   }
 }
@@ -239,7 +249,8 @@ static void activate_capture(struct rb_session *s) {
                               .flags = RB_CAPTURE_REUSE});
   for (unsigned i = 0; i < s->capture.num_buffers; i++)
     if (s->available[i])
-      push(s, (struct rb_message){.type = RB_RECYCLE, .index = i});
+      push(s, (struct rb_message){.type = RB_RECYCLE, .index = i,
+                                  .count = s->capture_token[i]});
 }
 static int start(struct vb2_queue *q, unsigned count) {
   struct rb_session *s = vb2_get_drv_priv(q);
@@ -269,7 +280,8 @@ static int start(struct vb2_queue *q, unsigned count) {
     push(s, (struct rb_message){.type = RB_CAPTURE, .count = q->num_buffers});
     for (i = 0; i < q->num_buffers; i++)
       if (s->available[i])
-        push(s, (struct rb_message){.type = RB_RECYCLE, .index = i});
+        push(s, (struct rb_message){.type = RB_RECYCLE, .index = i,
+                                  .count = s->capture_token[i]});
     if (drain_complete(s)) {
       s->flow = RB_FLOW_RUNNING;
       memset(s->before_stop, 0, sizeof(s->before_stop));
@@ -380,7 +392,9 @@ static int set_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
     s->codec = fmt->fmt.pix_mp.pixelformat;
     s->input_size = fmt->fmt.pix_mp.plane_fmt[0].sizeimage;
     rb_format_set(s->format, &fmt->fmt.pix_mp);
+    v4l2_ctrl_s_ctrl(v4l2_ctrl_find(&s->ctrls, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE), 18);
     rb_capture_update(s->capture_contract, rb_format_layout(s->format)->size,
+                      rb_format_layout(s->format)->count,
                       false);
   }
   return 0;
@@ -584,7 +598,7 @@ static int video_open(struct file *f) {
   v4l2_fh_init(&s->fh, video_devdata(f));
   f->private_data = &s->fh;
   v4l2_ctrl_handler_init(&s->ctrls, 1);
-  v4l2_ctrl_new_std(&s->ctrls, NULL, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, 18, 18,
+  v4l2_ctrl_new_std(&s->ctrls, NULL, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, 18, RB_MAX_BUFFERS,
                     1, 18);
   v4l2_ctrl_new_std_menu(&s->ctrls, NULL, V4L2_CID_MPEG_VIDEO_H264_PROFILE,
                          V4L2_MPEG_VIDEO_H264_PROFILE_HIGH,
@@ -665,7 +679,7 @@ static int reinitialize(struct rb_session *s) {
   s->generation = 0;
   s->codec = V4L2_PIX_FMT_H264;
   s->input_size = 1024 * 1024;
-  s->sequence = s->output_sequence = s->input_serial = 0;
+  s->sequence = s->output_sequence = s->input_serial = s->capture_serial = 0;
   s->unpaired_field = 0;
   s->eos = s->stopping = s->stopped = false;
   s->out_started = s->cap_started = false;
@@ -674,6 +688,7 @@ static int reinitialize(struct rb_session *s) {
   memset(s->available, 0, sizeof(s->available));
   memset(s->before_stop, 0, sizeof(s->before_stop));
   memset(s->output_serial, 0, sizeof(s->output_serial));
+  memset(s->capture_token, 0, sizeof(s->capture_token));
   rb_format_free(s->format);
   rb_capture_free(s->capture_contract);
   s->format = format;
@@ -807,7 +822,9 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
   case RB_LAYOUT:
     if (rb_format_update(s->format, m))
       return -EINVAL;
+    v4l2_ctrl_s_ctrl(v4l2_ctrl_find(&s->ctrls, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE), m->count);
     rb_capture_update(s->capture_contract, rb_format_layout(s->format)->size,
+                      rb_format_layout(s->format)->count,
                       vb2_is_busy(&s->capture));
     if (rb_capture_pending(s->capture_contract)) {
       s->eos = true;
@@ -824,6 +841,8 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
       return -ESTALE;
     if (m->index >= s->output.num_buffers || !s->output_sent[m->index])
       return -EINVAL;
+    if (!m->count || m->count != s->output_serial[m->index])
+      return -ESTALE;
     b = s->output.bufs[m->index];
     if (b->state != VB2_BUF_STATE_ACTIVE)
       return -EINVAL;
@@ -835,7 +854,8 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
     if (rb_capture_pending(s->capture_contract) ||
         m->pool_id != s->capture_pool || m->generation != s->generation ||
         m->index >= s->capture.num_buffers || !s->available[m->index] ||
-        !s->cap_started)
+        !s->cap_started || !m->count ||
+        m->count != s->capture_token[m->index])
       return -ESTALE;
     b = s->capture.bufs[m->index];
     if (m->field > 5 ||
@@ -935,21 +955,24 @@ rollback:
 static long exchange(struct rb_session *s, void __user *arg,
                      struct rb_batch *batch) {
   unsigned i;
+  struct rb_batch __user *out = arg;
   if (batch->version != RB_VERSION || batch->reply_count > RB_BATCH_MAX ||
       batch->reserved)
     return -EINVAL;
   /* Probe copyout before any mutation; a later concurrent unmap fails closed.
    */
-  if (copy_to_user(arg, batch, sizeof(*batch)))
+  if (fault_in_safe_writeable(arg, sizeof(*batch)))
     return -EFAULT;
-  memset(batch->results, 0, sizeof(batch->results));
   for (i = 0; i < batch->reply_count; i++)
     batch->results[i] = reply(s, &batch->replies[i]);
   batch->event_count = min_t(unsigned, s->head - s->tail, RB_BATCH_MAX);
-  memset(batch->events, 0, sizeof(batch->events));
   for (i = 0; i < batch->event_count; i++)
     batch->events[i] = s->events[(s->tail + i) % RB_EVENTS];
-  if (copy_to_user(arg, batch, sizeof(*batch))) {
+  if (copy_to_user(out, batch, offsetof(struct rb_batch, replies)) ||
+      copy_to_user(out->events, batch->events,
+                   batch->event_count * sizeof(batch->events[0])) ||
+      copy_to_user(out->results, batch->results,
+                   batch->reply_count * sizeof(batch->results[0]))) {
     if (batch->reply_count)
       fail(s);
     return -EFAULT;
@@ -962,25 +985,28 @@ static long exchange(struct rb_session *s, void __user *arg,
 static long service_ioctl(struct file *f, unsigned cmd, unsigned long arg) {
   struct rb_endpoint *endpoint = f->private_data;
   struct rb_session *s = endpoint->session;
-  struct rb_batch *batch = NULL;
   long r;
-  if (cmd == RB_EXCHANGE) {
-    batch = memdup_user((void __user *)arg, sizeof(*batch));
-    if (IS_ERR(batch))
-      return PTR_ERR(batch);
-  } else if (cmd != RB_REGISTER_POOL)
+  if (cmd != RB_EXCHANGE && cmd != RB_REGISTER_POOL)
     return -ENOTTY;
-  if (mutex_lock_interruptible(&s->lock)) {
-    kfree(batch);
+  if (mutex_lock_interruptible(&s->lock))
     return -ERESTARTSYS;
-  }
   if (endpoint->incarnation != s->incarnation)
     r = -EPIPE;
-  else
-    r = batch ? exchange(s, (void __user *)arg, batch)
-              : register_pool(s, (void __user *)arg);
+  else if (cmd == RB_EXCHANGE) {
+    struct rb_batch *batch = &endpoint->batch;
+    struct rb_batch __user *in = (void __user *)arg;
+    if (copy_from_user(batch, in, offsetof(struct rb_batch, replies)))
+      r = -EFAULT;
+    else if (batch->reply_count > RB_BATCH_MAX)
+      r = -EINVAL;
+    else if (copy_from_user(batch->replies, in->replies,
+                           batch->reply_count * sizeof(batch->replies[0])))
+      r = -EFAULT;
+    else
+      r = exchange(s, (void __user *)arg, &endpoint->batch);
+  } else
+    r = register_pool(s, (void __user *)arg);
   mutex_unlock(&s->lock);
-  kfree(batch);
   return r;
 }
 static __poll_t service_poll(struct file *f, poll_table *wait) {

@@ -5,6 +5,9 @@ use std::io;
 use std::ptr::NonNull;
 
 use super::ffi;
+mod header;
+#[cfg(test)]
+mod header_tests;
 mod picture;
 #[cfg(test)]
 mod picture_tests;
@@ -88,9 +91,28 @@ impl Validator {
                     .is_ok_and(|current| current.agrees(previous))
               }
             };
+          let owned =
+            if valid && picture.is_none() {
+              // SAFETY: successful parsing resolves PPS/SPS into this
+              // exclusively borrowed parser's live storage. Snapshot
+              // them before freeing the slice or mutating the parser.
+              let parameters =
+                unsafe { slice.pps.as_ref() }.and_then(|pps| {
+                  unsafe { pps.sps.as_ref() }.map(|sps| (pps.id, sps))
+                });
+              Some(parameters.ok_or_else(invalid).and_then(
+                |(id, sps)| header::own(&nal, &slice, id, sps),
+              ))
+            } else {
+              None
+            };
           unsafe { ffi::gst_h265_slice_hdr_free(&mut slice) };
           if !valid {
             return Err(invalid());
+          }
+          if let Some(owned) = owned {
+            unit.prefix = nal.sc_offset as usize;
+            unit.header = Some(super::header::Header::Hevc(owned?));
           }
           if picture.is_none() {
             picture = Some(current?);

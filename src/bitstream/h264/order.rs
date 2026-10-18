@@ -1,6 +1,7 @@
 //! module: bitstream::h264::order; responsibility: detect H264
-//! picture-order reset boundaries. operations: observe; entities:
-//! Order, Sequence, Picture; tests: h264_order_tests, bitstream_tests.
+//! picture-order reset boundaries. operations: configure, observe,
+//! configuration; entities: Order, Marking; tests: h264_order_tests,
+//! bitstream_tests.
 use std::collections::BTreeMap;
 use std::io;
 
@@ -8,18 +9,12 @@ use super::reference::{
   Marking as ReferenceMarking, Memory, Operation,
   Picture as ReferencePicture,
 };
-use super::sequence::{PictureOrder, Sequence};
+use super::sequence::Sequence;
 use crate::bitstream::bits::Bits;
 use crate::bitstream::parameters::Parameters;
-#[derive(Clone, Copy)]
-struct Picture {
-  sequence: u32,
-  bottom_poc: bool,
-  refs: [u32; 2],
-  weighted: bool,
-  bipred: u32,
-  redundant: bool,
-}
+use crate::packet_syntax::header::{
+  H264, Marking as HeaderMarking, Operation as HeaderOperation,
+};
 #[derive(Debug, Default)]
 pub(super) struct Marking {
   pub geometry: crate::bitstream::geometry::Geometry,
@@ -38,290 +33,142 @@ pub(super) struct Marking {
 #[derive(Default)]
 pub(super) struct Order {
   sequence: BTreeMap<u32, Sequence>,
-  picture: BTreeMap<u32, Picture>,
+  picture: BTreeMap<u32, u32>,
   memory: Memory,
   poc: super::poc::Counter,
   sets: Parameters,
-}
-fn picture(b: &mut Bits) -> io::Result<(u32, Picture)> {
-  let id = b.ue()?;
-  let sequence = b.ue()?;
-  b.skip(1)?;
-  let bottom_poc = b.get(1)? != 0;
-  let groups = b.ue()?;
-  if id > 255 || sequence > 31 || groups > 7 {
-    return Err(io::Error::other("invalid picture parameters"));
-  }
-  if groups != 0 {
-    match b.ue()? {
-      0 => {
-        for _ in 0..=groups {
-          b.ue()?;
-        }
-      }
-      2 => {
-        for _ in 0..groups {
-          b.ue()?;
-          b.ue()?;
-        }
-      }
-      3..=5 => {
-        b.skip(1)?;
-        b.ue()?;
-      }
-      6 => {
-        let size = b.ue()?;
-        if size > 1 << 20 {
-          return Err(io::Error::other("oversized slice group map"));
-        }
-        let bits = (32 - groups.leading_zeros()) as usize;
-        b.skip((size as usize + 1) * bits)?;
-      }
-      1 => {}
-      _ => return Err(io::Error::other("invalid slice groups")),
-    }
-  }
-  let refs = [b.ue_incremented()?, b.ue_incremented()?];
-  let weighted = b.get(1)? != 0;
-  let bipred = b.get(2)?;
-  b.se()?;
-  b.se()?;
-  b.se()?;
-  b.skip(2)?;
-  let redundant = b.get(1)? != 0;
-  if refs.iter().any(|&n| n > 32) {
-    return Err(io::Error::other("invalid reference count"));
-  }
-  Ok((
-    id,
-    Picture { sequence, bottom_poc, refs, weighted, bipred, redundant },
-  ))
-}
-fn list(b: &mut Bits) -> io::Result<()> {
-  if b.get(1)? == 0 {
-    return Ok(());
-  }
-  for _ in 0..64 {
-    match b.ue()? {
-      0..=2 => {
-        b.ue()?;
-      }
-      3 => return Ok(()),
-      _ => break,
-    }
-  }
-  Err(io::Error::other("invalid reference list modification"))
-}
-fn weights(b: &mut Bits, chroma: bool, refs: &[u32]) -> io::Result<()> {
-  b.ue()?;
-  if chroma {
-    b.ue()?;
-  }
-  for &count in refs {
-    if count > 32 {
-      return Err(io::Error::other("invalid weighted reference count"));
-    }
-    for _ in 0..count {
-      if b.get(1)? != 0 {
-        b.se()?;
-        b.se()?;
-      }
-      if chroma && b.get(1)? != 0 {
-        for _ in 0..2 {
-          b.se()?;
-          b.se()?;
-        }
-      }
-    }
-  }
-  Ok(())
 }
 impl Order {
   pub(super) fn configuration(&self) -> Vec<u8> {
     self.sets.configuration()
   }
 
-  pub(super) fn observe(
-    &mut self,
-    nal: &[u8],
-  ) -> io::Result<Option<Marking>> {
+  pub(super) fn configure(&mut self, nal: &[u8]) -> io::Result<()> {
     let Some((&header, data)) = nal.split_first() else {
-      return Ok(None);
+      return Ok(());
     };
     let kind = header & 31;
-    let mut b = Bits::new(data);
     if kind == 7 {
       let s = super::sequence::parse(data)?;
       self.sets.insert(kind, s.geometry.id, nal);
       self.sequence.insert(s.geometry.id, s);
-      return Ok(None);
-    }
-    if kind == 8 {
-      let (id, p) = picture(&mut b)?;
+    } else if kind == 8 {
+      let mut bits = Bits::new(data);
+      let id = bits.ue()?;
+      let sequence = bits.ue()?;
+      if id > 255 || sequence > 31 {
+        return Err(io::Error::other(
+          "invalid H264 parameter identity",
+        ));
+      }
+      self.picture.insert(id, sequence);
       self.sets.insert(kind, id, nal);
-      self.picture.insert(id, p);
-      return Ok(None);
     }
-    if !matches!(kind, 1 | 2 | 5) {
-      return Ok(None);
-    }
-    b.ue()?;
-    let slice = b.ue()? % 5;
-    let id = b.ue()?;
-    let p = self
+    Ok(())
+  }
+
+  pub(super) fn observe(
+    &mut self,
+    header: &H264,
+  ) -> io::Result<Marking> {
+    let sequence = self
       .picture
-      .get(&id)
+      .get(&header.pps)
       .ok_or_else(|| io::Error::other("unknown PPS"))?;
     let s = self
       .sequence
-      .get(&p.sequence)
+      .get(sequence)
       .ok_or_else(|| io::Error::other("unknown SPS"))?;
-    if s.separate {
-      b.skip(2)?;
-    }
-    let frame = b.get(s.frame_bits)?;
-    let field = !s.frame_only && b.get(1)? != 0;
-    let bottom = if field { Some(b.get(1)? != 0) } else { None };
-    if kind == 5 {
-      b.ue()?;
-    }
-    let mut marking = Marking {
+    let reference_marking = match &header.marking {
+      HeaderMarking::Disposable => ReferenceMarking::Disposable,
+      HeaderMarking::Idr { long, .. } => {
+        ReferenceMarking::Idr { long: *long }
+      }
+      HeaderMarking::Sliding => ReferenceMarking::Sliding,
+      HeaderMarking::Adaptive(operations) => {
+        ReferenceMarking::Adaptive(
+          operations
+            .iter()
+            .map(|op| {
+              Ok(match *op {
+                HeaderOperation::ForgetShort(n) => {
+                  Operation::ForgetShort(n.checked_add(1).ok_or_else(
+                    || {
+                      io::Error::other("reference difference overflow")
+                    },
+                  )?)
+                }
+                HeaderOperation::ForgetLong(n) => {
+                  Operation::ForgetLong(n)
+                }
+                HeaderOperation::LongFromShort {
+                  difference,
+                  index,
+                } => Operation::LongFromShort(
+                  difference.checked_add(1).ok_or_else(|| {
+                    io::Error::other("reference difference overflow")
+                  })?,
+                  index,
+                ),
+                HeaderOperation::LongLimit(n) => {
+                  Operation::LongLimit(n)
+                }
+                HeaderOperation::Reset => Operation::Reset,
+                HeaderOperation::CurrentLong(n) => {
+                  Operation::CurrentLong(n)
+                }
+              })
+            })
+            .collect::<io::Result<Vec<_>>>()?,
+        )
+      }
+    };
+    let reset = matches!(&header.marking, HeaderMarking::Adaptive(operations) if operations.contains(&HeaderOperation::Reset));
+    let marking = Marking {
       geometry: s.geometry,
-      frame,
+      reset,
+      frame: header.frame,
       modulus: 1 << s.frame_bits,
-      field: bottom,
-      reference: header & 96 != 0,
-      idr: kind == 5,
+      field: header.field,
+      reference: !matches!(header.marking, HeaderMarking::Disposable),
+      idr: matches!(header.marking, HeaderMarking::Idr { .. }),
+      discard: matches!(
+        header.marking,
+        HeaderMarking::Idr { discard: true, .. }
+      ),
       ..Default::default()
     };
-    let mut poc = super::poc::Picture {
-      frame,
+    let poc = super::poc::Picture {
+      frame: header.frame,
       frame_bits: s.frame_bits,
-      lsb: 0,
-      delta: [0, 0],
-      bottom_delta: 0,
-      field: match bottom {
+      lsb: header.lsb,
+      delta: header.delta,
+      bottom_delta: header.bottom_delta,
+      field: match header.field {
         None => super::poc::Field::Frame,
         Some(false) => super::poc::Field::Top,
         Some(true) => super::poc::Field::Bottom,
       },
       reference: marking.reference,
       idr: marking.idr,
-      reset: false,
+      reset,
     };
-    match s.order {
-      PictureOrder::Lsb(bits) => {
-        poc.lsb = b.get(bits)?;
-        if p.bottom_poc && !field {
-          poc.bottom_delta = b.se()?;
-        }
-      }
-      PictureOrder::Delta { always_zero: false } => {
-        poc.delta[0] = b.se()?;
-        if p.bottom_poc && !field {
-          poc.delta[1] = b.se()?;
-        }
-      }
-      _ => {}
-    }
-    if p.redundant {
-      b.ue()?;
-    }
-    if slice == 1 {
-      b.skip(1)?;
-    }
-    let mut refs = p.refs;
-    if matches!(slice, 0 | 1 | 3) && b.get(1)? != 0 {
-      refs[0] = b.ue_incremented()?;
-      if slice == 1 {
-        refs[1] = b.ue_incremented()?;
-      }
-    }
-    if !matches!(slice, 2 | 4) {
-      list(&mut b)?;
-      if slice == 1 {
-        list(&mut b)?;
-      }
-    }
-    if (p.weighted && matches!(slice, 0 | 3))
-      || (p.bipred == 1 && slice == 1)
-    {
-      weights(
-        &mut b,
-        s.chroma != 0,
-        &refs[..if slice == 1 { 2 } else { 1 }],
-      )?;
-    }
-    let mut reference = ReferencePicture {
-      frame,
+    let reference = ReferencePicture {
+      frame: header.frame,
       modulus: marking.modulus,
-      field: bottom,
+      field: header.field,
       maximum: s.maximum,
       gaps_allowed: s.gaps_allowed,
-      marking: ReferenceMarking::Disposable,
+      marking: reference_marking,
     };
-    if !marking.reference {
-      return Ok(Some(record(
-        &mut self.memory,
-        &mut self.poc,
-        &s.poc,
-        poc,
-        marking,
-        reference,
-      )?));
-    }
-    if marking.idr {
-      marking.discard = b.get(1)? != 0;
-      reference.marking =
-        ReferenceMarking::Idr { long: b.get(1)? != 0 };
-      return Ok(Some(record(
-        &mut self.memory,
-        &mut self.poc,
-        &s.poc,
-        poc,
-        marking,
-        reference,
-      )?));
-    }
-    if b.get(1)? == 0 {
-      reference.marking = ReferenceMarking::Sliding;
-      return Ok(Some(record(
-        &mut self.memory,
-        &mut self.poc,
-        &s.poc,
-        poc,
-        marking,
-        reference,
-      )?));
-    }
-    let mut operations = Vec::new();
-    for _ in 0..64 {
-      let operation = match b.ue()? {
-        0 => {
-          reference.marking = ReferenceMarking::Adaptive(operations);
-          return Ok(Some(record(
-            &mut self.memory,
-            &mut self.poc,
-            &s.poc,
-            poc,
-            marking,
-            reference,
-          )?));
-        }
-        1 => Operation::ForgetShort(b.ue_incremented()?),
-        2 => Operation::ForgetLong(b.ue()?),
-        3 => Operation::LongFromShort(b.ue_incremented()?, b.ue()?),
-        4 => Operation::LongLimit(b.ue()?),
-        5 => {
-          marking.reset = true;
-          Operation::Reset
-        }
-        6 => Operation::CurrentLong(b.ue()?),
-        _ => break,
-      };
-      operations.push(operation);
-    }
-    Err(io::Error::other("invalid reference marking"))
+    record(
+      &mut self.memory,
+      &mut self.poc,
+      &s.poc,
+      poc,
+      marking,
+      reference,
+    )
   }
 }
 

@@ -17,6 +17,7 @@ def test_layout_p010_exports_contiguous_luma_and_chroma(raw_session: Peer) -> No
         coded_height=64,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=1,
         width=128,
         height=64,

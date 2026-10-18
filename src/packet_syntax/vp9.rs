@@ -9,9 +9,6 @@ pub(crate) struct Validator {
   parser: NonNull<ffi::GstVp9Parser>,
   needs_keyframe: bool,
 }
-// SAFETY: the parser is exclusively owned, never shared between
-// workers.
-unsafe impl Send for Validator {}
 impl Validator {
   pub(crate) fn new() -> io::Result<Self> {
     let parser = NonNull::new(unsafe { ffi::gst_vp9_parser_new() })
@@ -93,6 +90,8 @@ impl Validator {
       }
       self.needs_keyframe = false;
       ranges.push(super::unit::Unit {
+        prefix: 0,
+        header: None,
         boundary: None,
         range: offset..end,
         display: header.show_frame != 0

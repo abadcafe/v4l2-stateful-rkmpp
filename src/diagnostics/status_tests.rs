@@ -56,3 +56,26 @@ fn test_snapshot_tracks_shutdown_and_borrowed_control_identity() {
   assert_eq!(snapshot["identity"]["control"]["inode"], metadata.ino());
   assert_eq!(snapshot["identity"]["control"]["device"], metadata.dev());
 }
+
+#[test]
+fn test_measure_reports_live_identity_and_cpu_without_resource_inventory()
+ {
+  let control = File::open("/dev/null").unwrap();
+  let signals = Signals::install().unwrap();
+  let status =
+    Status::current(control.as_fd(), &signals.shutdown()).unwrap();
+  let first: serde_json::Value =
+    serde_json::from_slice(&status.measure().unwrap()).unwrap();
+  assert!(first.get("fds").is_none());
+  assert!(first.get("threads").is_none());
+  assert!(first.get("sessions").is_none());
+  assert_eq!(first["identity"]["pid"], std::process::id());
+  signals.shutdown().request();
+  let next: serde_json::Value =
+    serde_json::from_slice(&status.measure().unwrap()).unwrap();
+  assert_eq!(next["state"], "stopping");
+  assert!(
+    next["cpu_seconds"].as_f64().unwrap()
+      >= first["cpu_seconds"].as_f64().unwrap()
+  );
+}

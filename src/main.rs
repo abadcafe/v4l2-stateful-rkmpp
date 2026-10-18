@@ -22,10 +22,19 @@ fn main() -> ExitCode {
       Ok(())
     }
     [a, control, status] if a == "serve" => {
-      v4l2_stateful_rkmpp::service::serve(
-        Path::new(control),
-        Path::new(status),
-      )
+      match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+      {
+        Ok(runtime) => {
+          runtime.block_on(v4l2_stateful_rkmpp::service::serve(
+            Path::new(control),
+            Path::new(status),
+          ))
+        }
+        Err(error) => Err(format!("create runtime: {error}")),
+      }
     }
     _ => Err("unknown command; use --help".into()),
   };

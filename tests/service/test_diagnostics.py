@@ -12,7 +12,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from tests.support.build_identity import service_id
-from tests.support.diagnostics import query
+from tests.support.diagnostics import measure, query
 from tests.support.mock_process import Process
 from tests.support.outcome import Rejected, accepted
 from tests.support.syscalls import OwnedFd
@@ -122,3 +122,15 @@ def test_diagnostics_counts_inherited_resources_independently_of_parent_activity
         assert process.process.returncode == 0
         assert peer.recv(1) == b""
         assert not proc.exists() and not process.diagnostics.exists()
+
+
+def test_diagnostics_measurement_matches_identity_without_resource_inventory(
+    mock_service: Process,
+) -> None:
+    snapshot = accepted(query(mock_service.diagnostics))
+    first = accepted(measure(mock_service.diagnostics))
+    second = accepted(measure(mock_service.diagnostics))
+    assert first.identity == snapshot.identity == second.identity
+    assert first.state == second.state == "ready"
+    assert second.cpu_seconds >= first.cpu_seconds >= snapshot.cpu_seconds
+    assert set(first.model_dump()) == {"protocol", "identity", "state", "cpu_seconds"}

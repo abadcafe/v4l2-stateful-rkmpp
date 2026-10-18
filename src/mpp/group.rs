@@ -1,6 +1,7 @@
 //! module: mpp::group; responsibility: own a decoder output allocation
-//! group. operations: new, commit, handle, retire, in_use; entities:
-//! Group; tests: group_tests, tests/service/test_resources.
+//! group. operations: new, commit, handle, retire, in_use,
+//! reserve_capture; entities: Group; tests: group_tests,
+//! tests/service/test_resources.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_void};
 use std::io;
@@ -27,6 +28,13 @@ unsafe extern "C" {
     tag: *const c_char,
     caller: *const c_char,
   ) -> i32;
+  fn mpp_buffer_get_with_tag(
+    group: *mut c_void,
+    buffer: *mut *mut c_void,
+    size: usize,
+    tag: *const c_char,
+    caller: *const c_char,
+  ) -> i32;
   fn mpp_buffer_group_put(group: *mut c_void) -> i32;
   fn mpp_buffer_group_clear(group: *mut c_void) -> i32;
   fn mpp_buffer_group_unused(group: *mut c_void) -> i32;
@@ -50,7 +58,6 @@ pub(super) struct Group {
   buffers: Vec<Buffer>,
   capture: BTreeSet<usize>,
   handles: BTreeMap<usize, NonNull<c_void>>,
-  private: usize,
   capture_capacity: usize,
 }
 impl Group {
@@ -76,7 +83,6 @@ impl Group {
       buffers: Vec::new(),
       capture: BTreeSet::new(),
       handles: BTreeMap::new(),
-      private: 0,
       capture_capacity: 0,
       external: !ten_bit,
     };
@@ -151,43 +157,36 @@ impl Group {
     Ok(())
   }
 
-  /// MPP and normative output scheduling can retain different pictures.
-  /// Bound their combined storage to 16 decoder + 15 pending + 1
-  /// working surfaces. Allocate only under pressure; ordinary decode
-  /// stays zero-copy.
-  pub(super) fn ensure_available(&mut self) -> io::Result<bool> {
-    if self.available() {
-      return Ok(true);
-    }
-    if !self.external || self.capture_capacity + self.private >= 32 {
-      return Ok(false);
-    }
-    let Some(size) = self.buffers.first().map(Buffer::size) else {
-      return Ok(false);
-    };
-    self.import(32 + self.private, Buffer::allocate(size)?)?;
-    self.private += 1;
-    Ok(true)
-  }
-
-  /// Temporarily retain private surfaces while selecting a real CAPTURE
-  /// destination, so a GPU copy never overwrites a decoder reference.
+  /// Reserve only registered client storage. Exhaustion is
+  /// backpressure; allocation policy belongs to CAPTURE negotiation,
+  /// not this pool.
   pub(super) fn reserve_capture(
     &self,
     size: usize,
   ) -> io::Result<Option<Reservation>> {
-    let mut private = Vec::new();
-    while self.available() {
-      let Some(lease) = Reservation::acquire(self.handle(), size)?
-      else {
-        break;
-      };
-      if self.capture.contains(&lease.index()?) {
-        return Ok(Some(lease));
-      }
-      private.push(lease);
+    if !self.available() {
+      return Ok(None);
     }
-    Ok(None)
+    let mut buffer = std::ptr::null_mut();
+    // SAFETY: this owner keeps the group alive throughout acquisition;
+    // success transfers one SDK reference to the returned lease.
+    let result = unsafe {
+      mpp_buffer_get_with_tag(
+        self.handle.as_ptr(),
+        &mut buffer,
+        size,
+        c"v4l2-stateful-rkmpp".as_ptr(),
+        c"capture_reserve".as_ptr(),
+      )
+    };
+    if !super::status::reservation(result)? {
+      return Ok(None);
+    }
+    let buffer = NonNull::new(buffer).ok_or_else(|| {
+      io::Error::other("MPP returned a null reserved buffer")
+    })?;
+    // SAFETY: successful acquisition above owns exactly one reference.
+    Ok(Some(unsafe { Reservation::imported(buffer) }))
   }
 
   pub(super) fn pin_capture(&self) -> io::Result<Vec<Reservation>> {

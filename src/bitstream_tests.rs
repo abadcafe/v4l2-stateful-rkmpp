@@ -82,10 +82,12 @@ fn test_admit_metadata_retains_configuration_and_seek_requires_resume_point()
     );
     let resumed = parser.admit(&data[start..first]).unwrap();
     assert_eq!(resumed.units.len(), 1);
-    let Payload::Owned(bytes) = &resumed.units[0].payload else {
+    let Payload::Prefixed { prefix, range } = &resumed.units[0].payload
+    else {
       panic!("restart must restore configuration");
     };
-    assert!(bytes.len() > first - start);
+    assert!(!prefix.is_empty());
+    assert_eq!(range, &(0..first - start));
   }
 }
 #[test]
@@ -122,10 +124,15 @@ fn test_admit_metadata_only_sei_is_retained_for_next_coded_picture() {
     sei.push(0x80);
     assert!(parser.admit(&sei).unwrap().units.is_empty());
     let report = parser.admit(&data[first..second]).unwrap();
-    let Payload::Owned(bytes) = &report.units[0].payload else {
+    let Payload::Prefixed { prefix, range } = &report.units[0].payload
+    else {
       panic!("metadata must be retained with its next picture");
     };
-    assert!(bytes.windows(sei.len()).any(|window| window == sei));
+    assert_eq!(
+      prefix.windows(sei.len()).filter(|window| *window == sei).count(),
+      1
+    );
+    assert_eq!(range, &(0..second - first));
   }
 }
 
@@ -157,6 +164,72 @@ fn test_admit_combined_sequence_and_stream_end_preserves_picture_and_terminal()
       let bytes: Vec<_> =
         tail.into_iter().flat_map(|i| markers[i].clone()).collect();
       assert!(parser.admit(&bytes).is_err());
+    }
+  }
+}
+
+#[test]
+fn test_admit_separate_metadata_is_not_duplicated_in_decoder_packet() {
+  for (codec, data, first, _) in samples() {
+    let split = data[..first]
+      .windows(3)
+      .enumerate()
+      .find_map(|(i, w)| {
+        if w != [0, 0, 1] {
+          return None;
+        }
+        let picture = if codec == *b"H264" {
+          data[i + 3] & 31 == 5
+        } else {
+          (data[i + 3] >> 1) & 63 <= 31
+        };
+        picture.then_some(i)
+      })
+      .unwrap();
+    let mut parser = Parser::new(u32::from_le_bytes(codec)).unwrap();
+    assert!(parser.admit(&data[..split]).unwrap().units.is_empty());
+    let report = parser.admit(&data[split..first]).unwrap();
+    let Payload::Prefixed { prefix, range } = &report.units[0].payload
+    else {
+      panic!("separate metadata needs one assembled packet");
+    };
+    assert_eq!(prefix, &data[..split]);
+    assert_eq!(range, &(0..first - split));
+  }
+}
+
+#[test]
+fn test_seek_repeated_restart_keeps_configuration_byte_identical() {
+  for (codec, data, first, _) in samples() {
+    let split = data[..first]
+      .windows(3)
+      .enumerate()
+      .find_map(|(i, w)| {
+        let picture = w == [0, 0, 1]
+          && if codec == *b"H264" {
+            data[i + 3] & 31 == 5
+          } else {
+            (data[i + 3] >> 1) & 63 <= 31
+          };
+        picture.then_some(i)
+      })
+      .unwrap();
+    let mut parser = Parser::new(u32::from_le_bytes(codec)).unwrap();
+    parser.admit(&data[..first]).unwrap();
+    let mut previous = None;
+    for _ in 0..64 {
+      parser.seek().unwrap();
+      let report = parser.admit(&data[split..first]).unwrap();
+      let Payload::Prefixed { prefix, range } =
+        &report.units[0].payload
+      else {
+        panic!("restart must restore configuration");
+      };
+      assert_eq!(range, &(0..first - split));
+      if let Some(previous) = &previous {
+        assert_eq!(prefix, previous, "configuration grew after seek");
+      }
+      previous = Some(prefix.clone());
     }
   }
 }

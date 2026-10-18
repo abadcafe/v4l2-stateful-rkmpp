@@ -104,14 +104,14 @@ void rb_format_set(struct rb_format *f,
                                   .coded_height = p->height,
                                   .stride = ALIGN(p->width, 64),
                                   .rows = ALIGN(p->height, 16),
-                                  .format = RB_FMT_NV12};
+                                  .format = RB_FMT_NV12, .count = 18};
   f->layout.size = f->layout.stride * f->layout.rows * 3 / 2;
 }
 int rb_format_update(struct rb_format *f, const struct rb_message *m) {
   u64 right = (u64)m->crop_left + m->width;
   u64 bottom = (u64)m->crop_top + m->height;
   unsigned bytes = m->format == RB_FMT_P010 ? 2 : 1;
-  if (m->field > 5 || !m->width || right > 8192 || !m->height ||
+  if (m->count < 18 || m->count > RB_MAX_BUFFERS || m->field > 5 || !m->width || right > 8192 || !m->height ||
       bottom > 8192 || m->coded_width < 64 || m->coded_width < right ||
       m->coded_width > 8192 || m->coded_height < 64 ||
       m->coded_height < bottom || m->coded_height > 8192 ||

@@ -85,3 +85,38 @@ def test_damaged_packet_reports_only_its_input_and_preserves_recovery_pixels(
         tuple(frame.digest for frame in result.frames)
         == expected * (2 if established else 1) * repetitions
     )
+
+
+@pytest.mark.parametrize(
+    "bad", [b"\x7a\x00", b"\xff"], ids=["metadata-overflow", "bad-obu"]
+)
+def test_av1_metadata_rejection_recovers_on_first_valid_keyframe(
+    mock_service: Process, artifacts: Path, bad: bytes
+) -> None:
+    from tests.support.stream import Packet
+
+    source = artifacts / "av1-yuv420p.ivf"
+    packets = accepted(load(Codec.AV1, source))
+    # Two complete 8 MiB padding OBUs fill the retained metadata budget.
+    # Reject only the following submission, then decode the FIRST subsequent
+    # keyframe and its dependent pictures. No decoder reset or second keyframe
+    # may be required to discard the rejected metadata transaction.
+    padding = b"\x7a\xfb\xff\xff\x03" + bytes(8 * 1024 * 1024 - 5)
+    prefix = tuple(
+        Packet(data=data, timestamp=index)
+        for index, data in enumerate((padding, padding, bad))
+    )
+    submissions = prefix + packets
+    result = accepted(
+        play(mock_service, Codec.AV1, source, input_count=1, submissions=submissions)
+    )
+    assert result.eos and not result.errors
+    assert tuple(bool(done.flags & 2) for done in result.input_completions) == (
+        False,
+        False,
+        True,
+        *(False for _ in packets),
+    )
+    assert tuple(frame.digest for frame in result.frames) == accepted(
+        frame_hashes(source, 8, 256, 128)
+    )

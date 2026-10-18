@@ -96,14 +96,19 @@ fn test_admit_separate_av1_sequence_and_seek_restore_decoder_configuration()
   );
   let admission =
     frontend.admit(&packet[15..], 1, Source::End).unwrap();
-  let Payload::Owned(bytes) = &admission.tasks[0].payload else {
+  let Payload::Prefixed { prefix, range } = &admission.tasks[0].payload
+  else {
     panic!("standalone sequence must reach MPP with its picture");
   };
-  assert!(bytes.ends_with(&packet[15..]));
+  assert!(!prefix.is_empty());
+  assert_eq!(range, &(0..packet.len() - 15));
   frontend.seek().unwrap();
   let admission =
     frontend.admit(&packet[15..], 2, Source::End).unwrap();
-  assert!(matches!(admission.tasks[0].payload, Payload::Owned(_)));
+  assert!(matches!(
+    admission.tasks[0].payload,
+    Payload::Prefixed { .. }
+  ));
 }
 
 #[test]
@@ -139,6 +144,34 @@ fn test_admit_oversized_metadata_picture_is_rejected_and_can_recover() {
     .err()
     .expect("oversized combined packet");
   assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+  assert_eq!(
+    frontend.admit(packet, 2, Source::End).unwrap().tasks.len(),
+    1
+  );
+}
+
+#[test]
+fn test_admit_metadata_overflow_does_not_poison_next_keyframe() {
+  let ivf = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
+  let size =
+    u32::from_le_bytes(ivf[32..36].try_into().unwrap()) as usize;
+  let packet = &ivf[44..44 + size];
+  // 8 MiB legal padding OBU, admitted twice to fill the metadata
+  // budget.
+  let mut padding = vec![0x7a, 0xfb, 0xff, 0xff, 0x03];
+  padding.resize(8 * 1024 * 1024, 0);
+  let mut frontend =
+    Frontend::new(u32::from_le_bytes(*b"AV01")).unwrap();
+  for _ in 0..2 {
+    assert!(
+      frontend
+        .admit(&padding, 0, Source::End)
+        .unwrap()
+        .tasks
+        .is_empty()
+    );
+  }
+  assert!(frontend.admit(&[0x7a, 0], 1, Source::End).is_err());
   assert_eq!(
     frontend.admit(packet, 2, Source::End).unwrap().tasks.len(),
     1

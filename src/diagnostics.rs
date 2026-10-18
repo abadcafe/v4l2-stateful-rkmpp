@@ -2,16 +2,16 @@
 //! endpoint. operations: Endpoint open/drop; entities: Endpoint; tests:
 //! diagnostics_tests, tests/service/test_diagnostics. The broker
 //! outlives this endpoint by borrowing.
-use std::fs;
-use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::{fs, io};
 
-use crate::notify::Notify;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::task::JoinHandle;
+
 use crate::shutdown::Shutdown;
 
 mod identity;
@@ -24,51 +24,62 @@ mod status_tests;
 pub struct Endpoint<'a> {
   path: PathBuf,
   inode: (u64, u64),
-  stop: Notify,
-  worker: Option<JoinHandle<()>>,
+  task: Option<JoinHandle<()>>,
   _broker: BorrowedFd<'a>,
 }
 
 impl<'a> Endpoint<'a> {
-  pub fn open(
+  pub async fn open(
     path: &Path,
     broker: BorrowedFd<'a>,
     shutdown: &Shutdown,
   ) -> io::Result<Self> {
     let status = status::Status::current(broker, shutdown)?;
-    let stop = Notify::new()?;
-    reclaim(path)?;
+    reclaim(path).await?;
     let listener = UnixListener::bind(path)?;
     let metadata = fs::symlink_metadata(path)?;
     let mut owner = Self {
       path: path.to_owned(),
       inode: (metadata.dev(), metadata.ino()),
-      stop,
-      worker: None,
+      task: None,
       _broker: broker,
     };
     fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
-    listener.set_nonblocking(true)?;
-    let wake = owner.stop.clone();
-    owner.worker =
-      Some(thread::Builder::new().name("rkmpp-status".into()).spawn(
-        move || {
-          if let Err(error) = run(listener, wake, status) {
-            eprintln!("rkmpp diagnostics: {error}");
-          }
-        },
-      )?);
+    owner.task = Some(tokio::spawn(async move {
+      if let Err(error) = run(listener, status).await {
+        eprintln!("rkmpp diagnostics: {error}");
+      }
+    }));
     Ok(owner)
+  }
+}
+
+impl Endpoint<'_> {
+  pub async fn terminated(
+    &mut self,
+  ) -> Result<(), tokio::task::JoinError> {
+    let result = self.task.as_mut().unwrap().await;
+    self.task = None;
+    result
+  }
+
+  pub async fn close(mut self) -> Result<(), tokio::task::JoinError> {
+    if let Some(task) = self.task.take() {
+      task.abort();
+      match task.await {
+        Err(error) if error.is_cancelled() => Ok(()),
+        result => result,
+      }
+    } else {
+      Ok(())
+    }
   }
 }
 
 impl Drop for Endpoint<'_> {
   fn drop(&mut self) {
-    let _ = self.stop.signal();
-    if let Some(worker) = self.worker.take()
-      && let Err(panic) = worker.join()
-    {
-      std::panic::resume_unwind(panic);
+    if let Some(task) = self.task.take() {
+      task.abort();
     }
     if let Ok(metadata) = fs::symlink_metadata(&self.path)
       && (metadata.dev(), metadata.ino()) == self.inode
@@ -78,7 +89,7 @@ impl Drop for Endpoint<'_> {
   }
 }
 
-fn reclaim(path: &Path) -> io::Result<()> {
+async fn reclaim(path: &Path) -> io::Result<()> {
   let before = match fs::symlink_metadata(path) {
     Ok(value) => value,
     Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -92,7 +103,17 @@ fn reclaim(path: &Path) -> io::Result<()> {
       "diagnostics path is not a socket",
     ));
   }
-  match UnixStream::connect(path) {
+  match tokio::time::timeout(
+    Duration::from_millis(200),
+    UnixStream::connect(path),
+  )
+  .await
+  .map_err(|_| {
+    io::Error::new(
+      io::ErrorKind::AddrInUse,
+      "diagnostics socket connection timed out",
+    )
+  })? {
     Ok(_) => {
       return Err(io::Error::new(
         io::ErrorKind::AddrInUse,
@@ -112,92 +133,74 @@ fn reclaim(path: &Path) -> io::Result<()> {
   fs::remove_file(path)
 }
 
-fn run(
+async fn run(
   listener: UnixListener,
-  stop: Notify,
   status: status::Status,
 ) -> io::Result<()> {
   loop {
-    let mut fds = [
-      libc::pollfd {
-        fd: listener.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-      },
-      libc::pollfd {
-        fd: stop.as_fd().as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-      },
-    ];
-    if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
-      let error = io::Error::last_os_error();
-      if error.kind() == io::ErrorKind::Interrupted {
-        continue;
-      }
-      return Err(error);
+    let (mut client, _) = listener.accept().await?;
+    let response = match tokio::time::timeout(
+      Duration::from_millis(200),
+      respond(&mut client, &status),
+    )
+    .await
+    {
+      Ok(result) => result,
+      Err(_) => Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "diagnostics request deadline",
+      )),
     }
-    if fds[1].revents != 0 {
-      return Ok(());
-    }
-    let (mut client, _) = match listener.accept() {
-      Ok(value) => value,
-      Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-        continue;
-      }
-      Err(error) => return Err(error),
-    };
-    client.set_read_timeout(Some(Duration::from_millis(200)))?;
-    client.set_write_timeout(Some(Duration::from_millis(200)))?;
-    let response =
-      respond(&mut client, &status).unwrap_or_else(|error| {
-        serde_json::to_vec(
-          &serde_json::json!({"error": error.to_string()}),
-        )
-        .expect("serialize error text")
-      });
-    let _ = client.write_all(&response);
-    let _ = client.write_all(b"\n");
+    .unwrap_or_else(|error| {
+      serde_json::to_vec(
+        &serde_json::json!({"error": error.to_string()}),
+      )
+      .expect("serialize error text")
+    });
+    let _ = tokio::time::timeout(Duration::from_millis(200), async {
+      client.write_all(&response).await?;
+      client.write_all(b"\n").await
+    })
+    .await;
   }
 }
-
-fn respond(
+async fn respond(
   client: &mut UnixStream,
   status: &status::Status,
 ) -> io::Result<Vec<u8>> {
-  let mut request = Vec::with_capacity(64);
-  let deadline = Instant::now() + Duration::from_millis(200);
-  loop {
-    let remaining = deadline
-      .checked_duration_since(Instant::now())
-      .filter(|duration| !duration.is_zero())
-      .ok_or_else(|| {
-        io::Error::new(
-          io::ErrorKind::TimedOut,
-          "diagnostics request deadline",
-        )
-      })?;
-    client.set_read_timeout(Some(remaining))?;
-    let mut byte = [0u8; 1];
-    client.read_exact(&mut byte)?;
-    request.push(byte[0]);
-    if byte[0] == b'\n' {
-      break;
+  let mut request = [0u8; 64];
+  let mut length = 0;
+  let end = loop {
+    let count = client.read(&mut request[length..]).await?;
+    if count == 0 {
+      return Err(io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "incomplete diagnostics request",
+      ));
     }
-    if request.len() == 64 {
+    length += count;
+    if let Some(end) =
+      request[..length].iter().position(|&byte| byte == b'\n')
+    {
+      break end + 1;
+    }
+    if length == request.len() {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "diagnostics request exceeds bound",
       ));
     }
-  }
-  if request != b"snapshot\n" {
-    return Err(io::Error::new(
-      io::ErrorKind::InvalidInput,
-      "unknown diagnostics request",
-    ));
-  }
-  let response = status.snapshot(client.as_fd())?;
+  };
+  let response = match &request[..end] {
+    b"snapshot\n" => status.snapshot(client.as_fd())?,
+    b"measure\n" => status.measure()?,
+    _ => {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "unknown diagnostics request",
+      ));
+    }
+  };
   if response.len() >= 65536 {
     return Err(io::Error::other("diagnostics response exceeds bound"));
   }

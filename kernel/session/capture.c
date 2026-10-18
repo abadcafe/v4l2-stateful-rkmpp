@@ -5,19 +5,21 @@
 enum phase { PREPARED, ACTIVE, DRAINING, STOPPED };
 struct rb_capture {
   enum phase phase;
-  u32 required, active;
+  u32 required, active, minimum;
 };
 struct rb_capture *rb_capture_new(u32 size) {
   struct rb_capture *c = kzalloc(sizeof(*c), GFP_KERNEL);
   if (c) {
     c->required = c->active = size;
+    c->minimum = 18;
     c->phase = PREPARED;
   }
   return c;
 }
 void rb_capture_free(struct rb_capture *c) { kfree(c); }
-void rb_capture_update(struct rb_capture *c, u32 size, bool allocated) {
+void rb_capture_update(struct rb_capture *c, u32 size, u32 minimum, bool allocated) {
   c->required = size;
+  c->minimum = minimum;
   c->phase = allocated ? DRAINING : PREPARED;
   if (!allocated)
     c->active = size;
@@ -36,7 +38,7 @@ int rb_capture_prepare(const struct rb_capture *c, unsigned long capacity) {
 }
 bool rb_capture_fits(const struct rb_capture *c, unsigned count,
                      unsigned long capacity) {
-  return count >= 18 && capacity >= c->required;
+  return count >= c->minimum && capacity >= c->required;
 }
 int rb_capture_activate(struct rb_capture *c, unsigned count,
                         unsigned long capacity) {

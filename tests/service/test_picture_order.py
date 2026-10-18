@@ -29,8 +29,9 @@ from tests.support.stream import Codec
         # the same nine pixel mismatches in both asynchronous and no-thread
         # modes; disabling fast play does not fix them. FFmpeg software output
         # was checked against the original FATE conformance reference.
-        # Bridge output with 18 and 32 CAPTURE buffers is byte-identical, so
-        # the temporary surfaces/GPU copy introduce no additional difference.
+        # The earlier 18/32-buffer comparison was byte-identical. The current
+        # bridge negotiates the full reference/display budget up front; no
+        # temporary decode surfaces are allocated.
         # This localizes the failure to the MPP/vendor decode path, but does
         # not establish whether the library, kernel driver or hardware causes it.
         # User decision: leave MPP unchanged and continue the other architecture
@@ -126,5 +127,11 @@ def test_maximum_dpb_pressure_reclaims_working_surfaces_across_restarts(
         )
     )
     assert result.eos and len(result.frames) == 120
+    assert (
+        mock_service.log().count(
+            "direct=40 quantized=0 unregistered_copy=0 held_copy=0 foreign_copy=0"
+        )
+        == 3
+    )
     assert all(frame.timestamp == 987654000 for frame in result.frames)
     assert all(frame.flags & 0x70000 == 0x10000 for frame in result.frames)

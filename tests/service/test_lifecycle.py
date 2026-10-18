@@ -18,24 +18,34 @@ from tests.support.stream import Codec
     ("codec", "file", "depth"),
     [
         (Codec.H264, "h264-yuv420p.h264", 8),
+        (Codec.HEVC, "hevc-yuv420p.hevc", 8),
+        (Codec.VP8, "vp8-yuv420p.ivf", 8),
         (Codec.VP9, "vp9-yuv420p10le.ivf", 10),
         (Codec.AV1, "av1-yuv420p10le.ivf", 10),
     ],
 )
+@pytest.mark.parametrize("repetitions", [2, 8])
 def test_decode_same_session_reset_replaces_pools_and_replays_all_pixels(
     mock_service: Process,
     artifacts: Path,
     codec: Codec,
     file: str,
     depth: int,
+    repetitions: int,
 ) -> None:
     expected = accepted(frame_hashes(artifacts / file, depth, 256, 128))
-    result = accepted(play(mock_service, codec, artifacts / file, 2))
-    assert result.eos and len(result.frames) == 72
-    assert tuple(frame.digest for frame in result.frames) == expected * 2
-    assert tuple(frame.epoch for frame in result.frames) == (1,) * 36 + (2,) * 36
-    assert result.layouts == ((256, 128), (256, 128))
-    assert result.registrations == ((10, 1), (9, 1), (10, 2), (9, 2))
+    result = accepted(play(mock_service, codec, artifacts / file, repetitions))
+    assert result.eos and len(result.frames) == len(expected) * repetitions
+    assert tuple(frame.digest for frame in result.frames) == expected * repetitions
+    assert tuple(frame.epoch for frame in result.frames) == tuple(
+        epoch for epoch in range(1, repetitions + 1) for _ in expected
+    )
+    assert result.layouts == ((256, 128),) * repetitions
+    assert result.registrations == tuple(
+        (direction, epoch)
+        for epoch in range(1, repetitions + 1)
+        for direction in (10, 9)
+    )
 
 
 @pytest.mark.parametrize(

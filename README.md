@@ -14,7 +14,10 @@
 flowchart TD
     Chromium[Chromium] -->|V4L2 OUTPUT：压缩码流| Kernel[v4l2_rkmpp_bridge 内核模块]
     Kernel <-->|私有 ioctl：会话、缓冲池、批量事件| Service[v4l2-stateful-rkmpp Rust 服务]
-    Service --> Frontend[统一输入前端：完整 AU / 帧 / TU]
+    Service --> Async[Tokio current-thread runtime]
+    Async -->|有界批次| Hardware[Shared spawn_blocking executor]
+    Hardware -->|DMA / GPU sync-file 就绪| Async
+    Hardware --> Frontend[统一输入前端：完整 AU / 帧 / TU]
     Frontend --> Headers[GStreamer 编码头与边界校验]
     Frontend --> Tasks[独立编码帧任务与输入读取租约]
     Tasks --> MPP[Rockchip MPP：统一同步执行]
@@ -28,7 +31,9 @@ flowchart TD
     GPU --> Display[桌面合成与显示]
 ```
 
-8-bit 解码通常直接写入 CAPTURE 缓冲区；若参考帧来自已替换的缓冲池或客户端仍持有的缓冲区，或解码与输出重排同时持有大量图像而启用了临时解码表面，则由 Vulkan 复制到独占保留的 CAPTURE 缓冲区。临时表面按需分配，解码池总数限制为 32，不改变 V4L2 的最小缓冲数。10-bit 转换直接写入最终 CAPTURE 缓冲区，桥接过程没有 CPU 整帧复制。
+服务用一个 Tokio 调度线程处理接入、会话调度、诊断和退出；一个共享的 `spawn_blocking` 执行器持有全部 MPP／Vulkan 上下文，按批处理命令和有界解码推进。DMA 依赖和 Vulkan 完成通过 sync-file 交给 async 调度等待；帧和 CAPTURE 租约保留到转换完成。新增会话不创建原生线程。退出时停止接入，等待会话操作完成，再在执行线程上销毁硬件上下文。第三方库仍可能创建内部线程。
+
+8-bit 解码使用注册的 CAPTURE 缓冲区，池耗尽时等待缓冲区归还，不分配临时解码表面。最小 CAPTURE 数按流的参考/显示存储预算在 18–32 之间协商。来自旧缓冲池的图像、原缓冲区仍由客户端持有的重复显示由 Vulkan 处理。10-bit 转换直接写入最终 CAPTURE 缓冲区，桥接过程没有 CPU 整帧复制。
 
 ## 编译/安装/使用方式
 

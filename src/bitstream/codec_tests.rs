@@ -15,3 +15,18 @@ fn test_nals_rejects_unframed_bytes_without_panicking() {
     assert_eq!(nals(bytes).count(), 0);
   }
 }
+
+#[test]
+fn test_nals_excludes_annexb_framing_zeros_from_parameter_payload() {
+  for padding in [0, 1, 2, 64, 4096] {
+    let mut bytes = vec![0, 0, 0, 1, 0x67, 0x80];
+    bytes.extend(std::iter::repeat_n(0, padding));
+    bytes.extend([0, 0, 0, 1, 0x68, 0x80]);
+    bytes.extend(std::iter::repeat_n(0, padding));
+    assert_eq!(
+      nals(&bytes).collect::<Vec<_>>(),
+      vec![&[0x67, 0x80][..], &[0x68, 0x80]],
+      "Annex B framing must not become retained parameter bytes"
+    );
+  }
+}

@@ -1,40 +1,53 @@
-//! module: mpp::input_tests; responsibility: define the corresponding
-//! public module contract. operations: Rust test entrypoints; entities:
-//! none; tests:
-//! test_new_persistent_map_retains_allocation_and_reads_written_bytes
-//! test_begin_read_rejects_overlapping_cpu_access
+//! module: mpp::input_tests; responsibility: define checked persistent
+//! input reads through the public mapping interface. operations: test
+//! entrypoints; entities: none; tests: read ownership and boundaries.
+use std::rc::Rc;
+
 use super::input::InputMap;
 use crate::dma::Buffer;
 
 #[test]
-fn test_new_persistent_map_retains_allocation_and_reads_written_bytes()
-{
+fn test_read_retains_mapping_and_lease_after_input_owner_drops() {
   let buffer = Buffer::allocate(4096).unwrap();
-  buffer.write().unwrap()[0..4].copy_from_slice(b"test");
-  let input = InputMap::new(buffer.clone()).unwrap();
-  assert_eq!(input.size(), 4096);
-  let access = input.begin_read().unwrap();
-  assert_eq!(
-    unsafe {
-      std::slice::from_raw_parts(input.pointer().cast::<u8>(), 4)
-    },
-    b"test"
-  );
+  buffer.write().unwrap()[16..20].copy_from_slice(b"test");
+  let input = Rc::new(InputMap::new(buffer.clone()).unwrap());
+  let access = input.read(16, 4).unwrap();
+  drop(input);
+  assert_eq!(access.bytes(), b"test");
   assert_eq!(
     buffer.write().err().unwrap().kind(),
     std::io::ErrorKind::WouldBlock
   );
   access.finish().unwrap();
-  drop(buffer);
-  input.begin_read().unwrap().finish().unwrap();
+  buffer.write().unwrap().finish().unwrap();
 }
 
 #[test]
-fn test_begin_read_rejects_overlapping_cpu_access() {
+fn test_read_rejects_overlapping_cpu_access_and_releases_on_drop() {
   let buffer = Buffer::allocate(4096).unwrap();
-  let input = InputMap::new(buffer.clone()).unwrap();
+  let input = Rc::new(InputMap::new(buffer.clone()).unwrap());
   let write = buffer.write().unwrap();
-  assert!(input.begin_read().is_err());
+  assert!(input.read(0, 1).is_err());
   drop(write);
-  input.begin_read().unwrap().finish().unwrap();
+  let access = input.read(0, 1).unwrap();
+  assert!(input.read(1, 1).is_err());
+  drop(access);
+  input.read(0, 4096).unwrap().finish().unwrap();
+}
+
+#[test]
+fn test_read_rejects_empty_out_of_bounds_and_overflow_without_acquiring_lease()
+ {
+  let buffer = Buffer::allocate(4096).unwrap();
+  let input = Rc::new(InputMap::new(buffer.clone()).unwrap());
+  for (offset, length) in
+    [(0, 0), (4096, 1), (0, 4097), (usize::MAX, 1), (1, usize::MAX)]
+  {
+    assert_eq!(
+      input.read(offset, length).err().unwrap().kind(),
+      std::io::ErrorKind::InvalidInput
+    );
+    buffer.write().unwrap().finish().unwrap();
+  }
+  assert_eq!(input.read(4095, 1).unwrap().bytes().len(), 1);
 }

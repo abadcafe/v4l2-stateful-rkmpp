@@ -4,9 +4,8 @@
 //! test_new_unsupported_codec_fails_before_creating_decoder
 //! test_prepare_packet_bounds_and_empty_decoder_through_facade
 use crate::dma::Buffer;
-use crate::mpp::{Decoder, Packet};
+use crate::mpp::{Decoder, Input};
 use crate::notify::Notify;
-use crate::timestamp::Source;
 
 #[test]
 fn test_new_unsupported_codec_fails_before_creating_decoder() {
@@ -20,11 +19,10 @@ fn test_prepare_packet_bounds_and_empty_decoder_through_facade() {
       .unwrap();
   assert!(decoder.frame().unwrap().is_none());
   decoder.reset().unwrap();
-  let mut packet =
-    Packet::input(Buffer::allocate(4096).unwrap()).unwrap();
-  assert!(packet.prepare(0, 0, 0, Source::End).is_err());
-  assert!(packet.prepare(0, 4097, 0, Source::End).is_err());
-  let access = packet.prepare(0, 16, 7, Source::End).unwrap();
+  let packet = Input::new(Buffer::allocate(4096).unwrap()).unwrap();
+  assert!(packet.prepare(0, 0).is_err());
+  assert!(packet.prepare(0, 4097).is_err());
+  let access = packet.prepare(0, 16).unwrap();
   access.finish().unwrap();
   decoder.close().unwrap();
 }

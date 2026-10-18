@@ -3,6 +3,7 @@
 operations: pytest cases; entities: none; tests: concurrent commands wait for reset.
 """
 
+import ctypes
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -59,7 +60,10 @@ def test_capture_stop_accepts_already_inflight_completions_before_acknowledgemen
     for index in range(18):
         accepted(capture.queue(index))
     accepted(capture.stream_on())
-    cap = Message.from_buffer_copy(accepted(peer.service.exchange()).events)
+    cap = Message.from_buffer_copy(
+        accepted(peer.service.exchange()).events, ctypes.sizeof(Message)
+    )
+    assert cap.kind == Event.RECYCLE
     while accepted(peer.service.exchange()).event_count:
         pass
     with ThreadPoolExecutor(max_workers=1) as executor:

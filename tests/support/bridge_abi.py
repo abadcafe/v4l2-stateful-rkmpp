@@ -10,7 +10,7 @@ from typing import final
 
 from tests.support.syscalls import command
 
-VERSION = 7
+VERSION = 9
 MAX_BATCH = 16
 MAX_BUFFERS = 32
 

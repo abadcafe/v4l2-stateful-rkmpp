@@ -39,6 +39,7 @@ def test_capture_source_change_resets_only_capture_and_keeps_input_valid(
         coded_height=64,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=packets[0].epoch,
         width=64,
         height=64,
@@ -61,8 +62,10 @@ def test_capture_source_change_resets_only_capture_and_keeps_input_valid(
     if not start_before_layout:
         assert accepted(peer.service.exchange([replacement])).results[0] == 0
     accepted(capture.stream_on())
-    old = Message.from_buffer_copy(accepted(peer.service.exchange()).events)
-    assert old.kind == Event.CAPTURE
+    initial = accepted(peer.service.exchange())
+    assert Message.from_buffer_copy(initial.events).kind == Event.CAPTURE
+    old = Message.from_buffer_copy(initial.events, ctypes.sizeof(Message))
+    assert old.kind == Event.RECYCLE
     assert accepted(peer.service.exchange()).event_count == 3
     if start_before_layout:
         assert accepted(peer.service.exchange([replacement])).results[0] == 0
@@ -110,8 +113,10 @@ def test_capture_source_change_resets_only_capture_and_keeps_input_valid(
     for index in range(18):
         accepted(capture.queue(index))
     accepted(capture.stream_on())
-    current = Message.from_buffer_copy(accepted(peer.service.exchange()).events)
-    assert current.kind == Event.CAPTURE and current.pool_id > old.pool_id
+    current = Message.from_buffer_copy(
+        accepted(peer.service.exchange()).events, ctypes.sizeof(Message)
+    )
+    assert current.kind == Event.RECYCLE and current.pool_id > old.pool_id
     assert accepted(peer.service.exchange()).event_count == 3
     stale = peer.service.register(9, old.epoch, old.pool_id)
     assert isinstance(stale, Rejected) and stale.code == errno.ESTALE
@@ -151,6 +156,7 @@ def test_capture_source_change_reuses_sufficient_pool_without_streamoff(
         coded_height=64,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=packets[0].epoch,
         width=64,
         height=64,
@@ -180,7 +186,7 @@ def test_capture_source_change_reuses_sufficient_pool_without_streamoff(
     assert events[0].pool_id == old.pool_id
     assert events[0].generation == 1
     assert [event.index for event in events[1:]] == list(range(18))
-    frame = Message.from_buffer_copy(events[0])
+    frame = Message.from_buffer_copy(events[1])
     frame.kind, frame.bytesused = Reply.FRAME, 6144
     assert accepted(peer.service.exchange([frame])).results[0] == 0
     decoded = accepted(capture.dequeue())
@@ -208,6 +214,7 @@ def test_source_change_wakes_waiting_capture_client(
         coded_height=64,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=packets[0].epoch,
         width=64,
         height=64,

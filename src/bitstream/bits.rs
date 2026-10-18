@@ -2,48 +2,59 @@
 //! operations: new, get, skip, ue, se; entities: Bits; tests:
 //! bits_tests.
 use std::io;
-pub(super) struct Bits {
-  bytes: Vec<u8>,
-  bit: usize,
+#[derive(Clone)]
+pub(super) struct Bits<'a> {
+  bytes: &'a [u8],
+  zeros: Option<u8>,
+  cache: u64,
+  available: usize,
 }
-impl Bits {
-  pub(super) fn new(data: &[u8]) -> Self {
-    let mut bytes = Vec::with_capacity(data.len());
-    let mut zeros = 0;
-    for &value in data {
-      if zeros >= 2 && value == 3 {
-        zeros = 0;
-        continue;
+impl<'a> Bits<'a> {
+  pub(super) fn new(data: &'a [u8]) -> Self {
+    Self { bytes: data, zeros: Some(0), cache: 0, available: 0 }
+  }
+
+  pub(super) fn from_rbsp(data: &'a [u8]) -> Self {
+    Self { bytes: data, zeros: None, cache: 0, available: 0 }
+  }
+
+  fn byte(&mut self) -> Option<u8> {
+    loop {
+      let (&value, rest) = self.bytes.split_first()?;
+      self.bytes = rest;
+      if let Some(zeros) = &mut self.zeros {
+        if *zeros >= 2 && value == 3 {
+          *zeros = 0;
+          continue;
+        }
+        *zeros = if value == 0 { zeros.saturating_add(1) } else { 0 };
       }
-      bytes.push(value);
-      zeros = if value == 0 { zeros + 1 } else { 0 };
+      return Some(value);
     }
-    Self { bytes, bit: 0 }
   }
 
-  pub(super) fn from_rbsp(data: &[u8]) -> Self {
-    Self { bytes: data.to_vec(), bit: 0 }
-  }
-
-  /// A stop bit followed only by zero padding is not syntax data.
   pub(super) fn more_rbsp_data(&self) -> bool {
-    let end = self.bytes.len() * 8;
-    if self.bit == end {
-      return false;
+    let mut remaining = self.clone();
+    match remaining.get(1) {
+      Err(_) => false,
+      Ok(0) => true,
+      Ok(_) => {
+        while let Ok(bit) = remaining.get(1) {
+          if bit != 0 {
+            return true;
+          }
+        }
+        false
+      }
     }
-    let one =
-      |bit: usize| self.bytes[bit / 8] & (1 << (7 - bit % 8)) != 0;
-    !one(self.bit) || (self.bit + 1..end).any(one)
   }
 
-  /// Consume rbsp_trailing_bits plus any Annex B trailing_zero_8bits
-  /// retained by the NAL splitter. A missing stop bit is an error.
   pub(super) fn finish_rbsp(&mut self) -> io::Result<()> {
     if self.get(1)? != 1 {
       return Err(io::Error::other("missing RBSP stop bit"));
     }
-    while self.bit < self.bytes.len() * 8 {
-      if self.get(1)? != 0 {
+    while let Ok(bit) = self.get(1) {
+      if bit != 0 {
         return Err(io::Error::other("invalid RBSP padding"));
       }
     }
@@ -51,26 +62,30 @@ impl Bits {
   }
 
   pub(super) fn get(&mut self, count: usize) -> io::Result<u32> {
-    if count > 32 || self.bit + count > self.bytes.len() * 8 {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "truncated SPS",
-      ));
+    let invalid =
+      || io::Error::new(io::ErrorKind::InvalidData, "truncated RBSP");
+    if count > 32 {
+      return Err(invalid());
     }
-    let mut value = 0;
-    for _ in 0..count {
-      value = (value << 1)
-        | u32::from(
-          (self.bytes[self.bit / 8] >> (7 - self.bit % 8)) & 1,
-        );
-      self.bit += 1;
+    let mut next = self.clone();
+    while next.available < count {
+      next.cache =
+        (next.cache << 8) | u64::from(next.byte().ok_or_else(invalid)?);
+      next.available += 8;
     }
+    next.available -= count;
+    let value =
+      ((next.cache >> next.available) & ((1u64 << count) - 1)) as u32;
+    next.cache &= (1u64 << next.available) - 1;
+    *self = next;
     Ok(value)
   }
 
-  pub(super) fn skip(&mut self, count: usize) -> io::Result<()> {
-    for _ in 0..count {
-      self.get(1)?;
+  pub(super) fn skip(&mut self, mut count: usize) -> io::Result<()> {
+    while count != 0 {
+      let chunk = count.min(32);
+      self.get(chunk)?;
+      count -= chunk;
     }
     Ok(())
   }

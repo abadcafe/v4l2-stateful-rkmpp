@@ -6,11 +6,11 @@
 use std::io;
 
 use crate::dma::Buffer;
-use crate::mpp::{InputAccess, Packet};
-use crate::submission::Origin;
+use crate::mpp::{Input, InputAccess, Packet};
+use crate::submission::{Origin, Payload};
 use crate::timestamp::Source;
 struct Slot {
-  packet: Packet,
+  input: Input,
   access: Option<InputAccess>,
   origin: Option<Origin>,
   damaged: bool,
@@ -38,7 +38,7 @@ impl InputPool {
           ));
         }
         Ok(Slot {
-          packet: Packet::input(buffer)?,
+          input: Input::new(buffer)?,
           access: None,
           origin: None,
           damaged: false,
@@ -57,8 +57,6 @@ impl InputPool {
     index: usize,
     offset: usize,
     length: usize,
-    timestamp: u64,
-    source: Source,
   ) -> io::Result<Origin> {
     let slot = self.slots.get_mut(index).ok_or_else(|| {
       io::Error::new(io::ErrorKind::InvalidInput, "unknown input index")
@@ -73,8 +71,7 @@ impl InputPool {
       .serial
       .checked_add(1)
       .ok_or_else(|| io::Error::other("input identity exhausted"))?;
-    slot.access =
-      Some(slot.packet.prepare(offset, length, timestamp, source)?);
+    slot.access = Some(slot.input.prepare(offset, length)?);
     self.serial = serial;
     let origin =
       Origin::new((u64::from(self.id) << 32) | u64::from(serial));
@@ -97,7 +94,7 @@ impl InputPool {
   pub(super) fn task(
     &self,
     index: usize,
-    range: std::ops::Range<usize>,
+    payload: Payload,
     identity: u64,
     source: Source,
   ) -> io::Result<Packet> {
@@ -106,7 +103,7 @@ impl InputPool {
       .get(index)
       .and_then(|s| s.access.as_ref())
       .ok_or_else(|| io::Error::other("input has no read lease"))?
-      .packet(range, identity, source)
+      .packet(payload, identity, source)
   }
 
   pub(super) fn bytes(&self, index: usize) -> io::Result<&[u8]> {

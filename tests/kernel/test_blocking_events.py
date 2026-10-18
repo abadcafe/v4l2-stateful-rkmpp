@@ -52,6 +52,7 @@ def test_dqevent_wait_allows_service_to_publish_source_change(
                         Message(
                             version=VERSION,
                             kind=Reply.LAYOUT,
+                            count=18,
                             epoch=1,
                             width=64,
                             height=64,

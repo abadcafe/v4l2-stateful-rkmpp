@@ -4,10 +4,11 @@
 //! Presentation, Slot, SlotState, Lease; tests: capture_tests. Target
 //! borrows the pool exclusively until commit or drop.
 use std::io;
+use std::num::NonZeroU32;
 use std::os::fd::{AsFd, AsRawFd};
 
-use crate::dma::{Buffer, system};
-use crate::image::Image;
+use crate::dma::Buffer;
+use crate::image::Plane;
 use crate::mpp::{Decoder, Frame, Reservation};
 enum Lease {
   Decoded(Frame),
@@ -16,7 +17,7 @@ enum Lease {
 }
 enum SlotState {
   Idle,
-  Queued,
+  Queued(NonZeroU32),
   Held(Lease),
 }
 struct Slot {
@@ -29,30 +30,38 @@ pub(super) struct CapturePool {
   id: u32,
   slots: Vec<Slot>,
 }
+#[derive(Clone, Copy)]
+pub(super) enum CopyReason {
+  Unregistered,
+  Held,
+  Foreign,
+}
 pub(super) enum Presentation {
-  Direct(usize),
-  Convert(Frame),
+  Direct(usize, NonZeroU32),
+  Convert(Frame, CopyReason),
 }
 pub(super) struct Target<'a> {
   pool: &'a mut CapturePool,
   index: usize,
-  image: Image,
+  stride: u32,
+  rows: u32,
   reservation: Option<Reservation>,
+  token: NonZeroU32,
 }
 impl Target<'_> {
-  pub(super) fn index(&self) -> usize {
-    self.index
+  pub(super) fn plane(&self) -> Plane<'_> {
+    Plane::from_buffer(
+      &self.pool.slots[self.index].buffer,
+      self.stride,
+      self.rows,
+    )
   }
 
-  pub(super) fn image(&self) -> Image {
-    self.image.clone()
-  }
-
-  pub(super) fn commit(self) -> usize {
+  pub(super) fn commit(self) -> (usize, NonZeroU32) {
     self.pool.slots[self.index].state = SlotState::Held(
       self.reservation.map_or(Lease::Private, Lease::Reserved),
     );
-    self.index
+    (self.index, self.token)
   }
 }
 impl CapturePool {
@@ -77,6 +86,7 @@ impl CapturePool {
   pub(super) fn recycle(
     &mut self,
     index: usize,
+    token: NonZeroU32,
     retiring: bool,
   ) -> io::Result<()> {
     let slot = self
@@ -85,7 +95,7 @@ impl CapturePool {
       .ok_or_else(|| io::Error::other("unknown CAPTURE index"))?;
     let old = std::mem::replace(
       &mut slot.state,
-      if retiring { SlotState::Idle } else { SlotState::Queued },
+      if retiring { SlotState::Idle } else { SlotState::Queued(token) },
     );
     match old {
       SlotState::Held(Lease::Decoded(frame)) => drop(frame),
@@ -102,30 +112,39 @@ impl CapturePool {
     frame: Frame,
   ) -> io::Result<Presentation> {
     let Some(index) = frame.pool_index() else {
-      return Ok(Presentation::Convert(frame));
+      return Ok(Presentation::Convert(
+        frame,
+        CopyReason::Unregistered,
+      ));
     };
     let Some(slot) = self.slots.get_mut(index) else {
-      return Ok(Presentation::Convert(frame));
+      return Ok(Presentation::Convert(
+        frame,
+        CopyReason::Unregistered,
+      ));
     };
     let Some(plane) = frame.plane()? else {
-      return Ok(Presentation::Convert(frame));
+      return Ok(Presentation::Convert(
+        frame,
+        CopyReason::Unregistered,
+      ));
     };
-    if !matches!(slot.state, SlotState::Queued) {
-      return Ok(Presentation::Convert(frame));
-    }
     let same =
       if plane.fd().as_raw_fd() == slot.buffer.as_fd().as_raw_fd() {
         true
       } else {
-        let src = system::metadata(plane.fd())?;
-        let dst = system::metadata(slot.buffer.as_fd())?;
+        let src = plane.metadata()?;
+        let dst = slot.buffer.metadata();
         src.st_dev == dst.st_dev && src.st_ino == dst.st_ino
       };
     if !same {
-      return Ok(Presentation::Convert(frame));
+      return Ok(Presentation::Convert(frame, CopyReason::Foreign));
     }
+    let SlotState::Queued(token) = slot.state else {
+      return Ok(Presentation::Convert(frame, CopyReason::Held));
+    };
     slot.state = SlotState::Held(Lease::Decoded(frame));
-    Ok(Presentation::Direct(index))
+    Ok(Presentation::Direct(index, token))
   }
 
   pub(super) fn prepare_write(
@@ -149,7 +168,7 @@ impl CapturePool {
       let Some(index) = self
         .slots
         .iter()
-        .position(|s| matches!(s.state, SlotState::Queued))
+        .position(|s| matches!(s.state, SlotState::Queued(_)))
       else {
         return Ok(None);
       };
@@ -160,20 +179,31 @@ impl CapturePool {
         "MPP returned non-CAPTURE write reservation",
       ));
     };
-    if !matches!(slot.state, SlotState::Queued) {
+    let SlotState::Queued(token) = slot.state else {
       return Ok(None);
-    }
+    };
     if slot.buffer.size() < size {
       return Err(io::Error::other("CAPTURE write exceeds allocation"));
     }
-    let image = Image::new(slot.buffer.clone(), stride, rows);
-    Ok(Some(Target { pool: self, index, image, reservation }))
+    Ok(Some(Target {
+      pool: self,
+      index,
+      stride,
+      rows,
+      reservation,
+      token,
+    }))
+  }
+
+  pub(super) fn fits(&self, count: usize, size: usize) -> bool {
+    self.slots.len() >= count
+      && self.slots.iter().all(|s| s.buffer.size() >= size)
   }
 
   pub(super) fn reuse(
     &mut self,
     size: usize,
-    reservations: Vec<Reservation>,
+    reservations: Option<Vec<Reservation>>,
   ) -> io::Result<()> {
     if self.slots.iter().any(|s| s.buffer.size() < size) {
       return Err(io::Error::other(
@@ -183,7 +213,8 @@ impl CapturePool {
     // Pin every shared surface before old display references can be
     // dropped. QBUF alone releases these pins; an empty LAST must
     // not create a writable hole.
-    for reservation in reservations {
+    let retain_imports = reservations.is_some();
+    for reservation in reservations.into_iter().flatten() {
       let index = reservation.index()?;
       let slot = self.slots.get_mut(index).ok_or_else(|| {
         io::Error::other("invalid reused CAPTURE reservation")
@@ -191,17 +222,14 @@ impl CapturePool {
       slot.state = SlotState::Held(Lease::Reserved(reservation));
     }
     for slot in &mut self.slots {
-      if matches!(slot.state, SlotState::Queued) {
+      if !retain_imports {
+        slot.imported = false;
+      }
+      if matches!(slot.state, SlotState::Queued(_)) {
         slot.state = SlotState::Idle;
       }
     }
     Ok(())
-  }
-
-  pub(super) fn forget_imports(&mut self) {
-    for slot in &mut self.slots {
-      slot.imported = false;
-    }
   }
 
   pub(super) fn imports(&mut self) -> Vec<(usize, Buffer)> {
@@ -210,7 +238,8 @@ impl CapturePool {
       .iter_mut()
       .enumerate()
       .filter_map(|(index, slot)| {
-        if matches!(slot.state, SlotState::Queued) && !slot.imported {
+        if matches!(slot.state, SlotState::Queued(_)) && !slot.imported
+        {
           slot.imported = true;
           Some((index, slot.buffer.clone()))
         } else {

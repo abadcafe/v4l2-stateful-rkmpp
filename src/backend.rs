@@ -4,8 +4,9 @@
 //! V4L2 codec/pixel/source-change/recovery tests.
 use std::collections::VecDeque;
 use std::io;
+use std::num::NonZeroU32;
 
-use crate::frontend::{Frontend, Payload};
+use crate::frontend::Frontend;
 use crate::mpp::{Decoder, Packet};
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
@@ -22,7 +23,7 @@ mod color_tests;
 mod layout;
 #[cfg(test)]
 mod layout_tests;
-use layout::{Extent, Layouts};
+use layout::{Layouts, Requirements};
 mod capture;
 #[cfg(test)]
 mod capture_tests;
@@ -41,7 +42,7 @@ enum Queued {
     index: usize,
     timestamp: u64,
     source: crate::timestamp::Source,
-    count: u32,
+    token: NonZeroU32,
     origin: Origin,
   },
   Task {
@@ -49,7 +50,7 @@ enum Queued {
     serial: u64,
     plan: crate::picture::Plan,
   },
-  Release(usize),
+  Release(usize, NonZeroU32),
   Eos(Option<u32>),
 }
 mod flow;
@@ -72,6 +73,7 @@ pub struct Backend {
   inputs: InputPool,
   output: Output,
   packets: VecDeque<Queued>,
+  prepared_tasks: Vec<Queued>,
   active_task: Option<u64>,
   pending: Option<FrameInput>,
   presentation: Presentation<FrameInput>,
@@ -82,7 +84,7 @@ impl Backend {
   pub fn new() -> io::Result<Self> {
     let notify = Notify::new()?;
     Ok(Self {
-      output: Output::new(notify.clone()),
+      output: Output::new(),
       notify,
       decoder: None,
       frontend: None,
@@ -90,6 +92,7 @@ impl Backend {
       completions: VecDeque::new(),
       inputs: InputPool::default(),
       packets: VecDeque::with_capacity(64),
+      prepared_tasks: Vec::with_capacity(4),
       active_task: None,
       pending: None,
       presentation: Presentation::default(),
@@ -147,7 +150,7 @@ impl Backend {
   fn reset(&mut self) -> io::Result<()> {
     self.pending = None;
     self.presentation = Presentation::default();
-    self.output = Output::new(self.notify.clone());
+    self.output = Output::new();
     let result = if let Some(decoder) = self.decoder.take() {
       decoder.close()
     } else {
@@ -159,6 +162,7 @@ impl Backend {
     self.layouts = Layouts::default();
     self.completions.clear();
     self.packets.clear();
+    self.prepared_tasks.clear();
     self.active_task = None;
     self.inputs = InputPool::default();
     self.state.flow = Flow::default();
@@ -207,6 +211,9 @@ impl Backend {
     self.state.generation = message.generation;
     match command.kind() {
       Event::Packet => {
+        let token = queue_token(message.count)?;
+        let source =
+          crate::timestamp::Source::try_from(message.flags & 0x70000)?;
         if message.pool_id == 0 || message.pool_id != self.inputs.id() {
           return Err(io::Error::other("invalid packet pool"));
         }
@@ -224,17 +231,13 @@ impl Backend {
           message.index as usize,
           message.data_offset as usize,
           message.bytesused as usize,
-          message.timestamp,
-          crate::timestamp::Source::try_from(message.flags & 0x70000)?,
         )?;
         self.completions.push_back((message.index as usize, None));
         self.packets.push_back(Queued::Analyze {
           index: message.index as usize,
           timestamp: message.timestamp,
-          source: crate::timestamp::Source::try_from(
-            message.flags & 0x70000,
-          )?,
-          count: message.count,
+          source,
+          token,
           origin,
         });
         Ok(())
@@ -247,6 +250,7 @@ impl Backend {
       Event::Recycle => self.output.recycle(
         message.pool_id,
         message.index as usize,
+        queue_token(message.count)?,
         self.decoder.as_mut(),
       ),
       Event::Drain => {
@@ -313,7 +317,7 @@ impl Backend {
     if !matches!(self.packets.front(), Some(Queued::Analyze { .. })) {
       return Ok(false);
     }
-    let Queued::Analyze { index, timestamp, source, count, origin } =
+    let Queued::Analyze { index, timestamp, source, token, origin } =
       self.packets.pop_front().unwrap()
     else {
       unreachable!()
@@ -328,76 +332,46 @@ impl Backend {
       Err(error) if error.kind() == io::ErrorKind::InvalidData => {
         eprintln!("damaged input: {error}");
         self.inputs.damage(&[origin]);
-        self.packets.push_front(Queued::Release(index));
+        self.packets.push_front(Queued::Release(index, token));
         return Ok(true);
       }
       Err(error) => return Err(error),
     };
-    let mut work = Vec::new();
+    debug_assert!(self.prepared_tasks.is_empty());
     for task in admission.tasks {
       let serial = self.layouts.push(&task.descriptor)?;
-      let packet = match task.payload {
-        Payload::Input(range) => {
-          self.inputs.task(index, range, serial, source)?
-        }
-        Payload::Owned(bytes) => Packet::owned(bytes, serial, source)?,
-      };
-      work.push(Queued::Task {
+      let packet =
+        self.inputs.task(index, task.payload, serial, source)?;
+      self.prepared_tasks.push(Queued::Task {
         packet,
         serial,
         plan: task.descriptor.plan,
       });
     }
-    work.push(Queued::Release(index));
+    self.prepared_tasks.push(Queued::Release(index, token));
     if admission.end {
-      work.push(Queued::Eos(Some(count)));
+      self.prepared_tasks.push(Queued::Eos(Some(token.get())));
     }
-    for item in work.into_iter().rev() {
+    for item in self.prepared_tasks.drain(..).rev() {
       self.packets.push_front(item);
     }
     Ok(true)
   }
 
-  pub fn step(&mut self) -> io::Result<bool> {
-    if self.decoder.is_none() || self.output.status() == Status::Stopped
-    {
-      return Ok(false);
-    }
-    let mut progress = false;
-    if self.state.flow.running() {
-      progress |= self.parse_front()?;
-    }
-    while let Some(message) = self.output.take()? {
-      self.emit(message)?;
-      progress = true;
-    }
-    if self.state.flow.running()
-      && let Some(Queued::Release(index)) = self.packets.front()
-    {
-      let index = *index;
-      self.emit(Message {
-        kind: Reply::InputDone as u32,
-        index: index as u32,
-        ..Default::default()
-      })?;
-      self.packets.pop_front();
-      progress = true;
-    }
+  fn advance_input(&mut self) -> io::Result<bool> {
     if self.decoder.as_ref().unwrap().idle()
       && let Some(serial) = self.active_task.take()
     {
       self.layouts.finish(serial);
     }
+    let mut progress = false;
     if self.state.flow.running()
       && let Some(queued) = self.packets.front()
     {
-      if self.decoder.as_ref().unwrap().idle()
-        && let Queued::Task { plan, .. } = queued
-      {
-        progress |= self.presentation.prepare(plan);
-      }
       let accepted = match queued {
-        Queued::Release(_) | Queued::Analyze { .. } => return Ok(true),
+        Queued::Release(..) | Queued::Analyze { .. } => {
+          return Ok(true);
+        }
         Queued::Task { packet, .. } => {
           let state = self.decoder.as_mut().unwrap().packet(packet)?;
           progress |= state != crate::mpp::Submission::Blocked;
@@ -430,6 +404,42 @@ impl Backend {
         progress = true;
       }
     }
+    Ok(progress)
+  }
+
+  pub fn step(&mut self) -> io::Result<bool> {
+    if self.decoder.is_none() || self.output.status() == Status::Stopped
+    {
+      return Ok(false);
+    }
+    let mut progress = false;
+    while let Some(message) = self.output.take()? {
+      self.emit(message)?;
+      progress = true;
+    }
+    if self.state.flow.running() {
+      progress |= self.parse_front()?;
+    }
+
+    if self.state.flow.running()
+      && let Some(Queued::Release(index, token)) = self.packets.front()
+    {
+      let (index, token) = (*index, *token);
+      self.emit(Message {
+        kind: Reply::InputDone as u32,
+        index: index as u32,
+        count: token.get(),
+        ..Default::default()
+      })?;
+      self.packets.pop_front();
+      progress = true;
+    }
+    if self.state.flow.running()
+      && let Some(Queued::Task { plan, .. }) = self.packets.front()
+      && self.decoder.as_ref().unwrap().idle()
+    {
+      progress |= self.presentation.prepare(plan);
+    }
     if self.replies.len() > 58 {
       return Ok(progress);
     }
@@ -441,7 +451,7 @@ impl Backend {
             if self.layouts.discard_prior(info.timestamp)? {
               self.presentation.discard();
             }
-            let extent = self.layouts.peek(
+            let requirements = self.layouts.peek(
               info.timestamp,
               info.width,
               info.height,
@@ -449,7 +459,7 @@ impl Backend {
             self.presentation.barrier(FrameInput {
               frame,
               info,
-              extent,
+              requirements,
             });
           } else if let Some(picture) = self
             .layouts
@@ -468,9 +478,9 @@ impl Backend {
               FrameInput {
                 frame,
                 info,
-                extent: picture
-                  .extent
-                  .unwrap_or(Extent::from_frame(info)),
+                requirements: picture
+                  .requirements
+                  .unwrap_or(Requirements::from_frame(info)),
               },
               &picture.plan,
             );
@@ -478,12 +488,14 @@ impl Backend {
               self.presentation.drain();
             }
           } else {
-            let extent =
-              self.output.extent().unwrap_or(Extent::from_frame(info));
+            let requirements = self
+              .output
+              .requirements()
+              .unwrap_or(Requirements::from_frame(info));
             self.presentation.barrier(FrameInput {
               frame,
               info,
-              extent,
+              requirements,
             });
           }
         }
@@ -494,7 +506,14 @@ impl Backend {
       }
     }
     let Some(frame) = self.pending.take() else {
-      if self.state.flow.waiting()
+      // Publish all available pictures before admitting more decode
+      // work. A conversion owns its destination until completion;
+      // it is not permission to consume another client surface.
+      if !progress && self.output.idle() {
+        progress |= self.advance_input()?;
+      }
+      if !progress
+        && self.state.flow.waiting()
         && self.decoder.as_ref().unwrap().idle()
         && self.output.idle()
       {
@@ -522,6 +541,10 @@ impl Backend {
     Ok(progress || self.pending.is_none())
   }
 
+  pub fn completion(&self) -> Option<crate::descriptor::Lease> {
+    self.output.completion()
+  }
+
   pub fn take_reply(&mut self) -> Option<Message> {
     self.replies.pop_front()
   }
@@ -532,4 +555,13 @@ impl Drop for Backend {
       eprintln!("decoder teardown: {error}");
     }
   }
+}
+
+fn queue_token(value: u32) -> io::Result<NonZeroU32> {
+  NonZeroU32::new(value).ok_or_else(|| {
+    io::Error::new(
+      io::ErrorKind::InvalidData,
+      "zero queue submission identity",
+    )
+  })
 }

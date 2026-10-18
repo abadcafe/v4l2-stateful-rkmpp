@@ -103,3 +103,25 @@ fn test_rbsp_distinguishes_payload_bits_from_trailing_marker() {
     assert!(Bits::from_rbsp(&data).finish_rbsp().is_err());
   }
 }
+
+#[test]
+fn test_get_crosses_escape_and_byte_boundaries_without_consuming_on_error()
+ {
+  let mut bits = Bits::new(&[0xa0, 0, 0, 3, 2, 0x80]);
+  assert_eq!(bits.get(4).unwrap(), 10);
+  assert_eq!(bits.get(28).unwrap(), 2);
+  assert!(bits.get(9).is_err());
+  assert_eq!(bits.get(8).unwrap(), 0x80);
+  assert_eq!(bits.get(0).unwrap(), 0);
+}
+
+#[test]
+fn test_skip_large_escaped_payload_preserves_trailing_bits() {
+  let mut bytes = vec![0x55; 1024 * 1024];
+  bytes.extend_from_slice(&[0, 0, 3, 1, 0x80]);
+  let mut bits = Bits::new(&bytes);
+  bits.skip(1024 * 1024 * 8).unwrap();
+  assert_eq!(bits.get(24).unwrap(), 1);
+  assert!(!bits.more_rbsp_data());
+  bits.finish_rbsp().unwrap();
+}

@@ -1,10 +1,10 @@
 //! module: mpp::input; responsibility: retain persistent input mappings
-//! for SDK packets. operations: new, pointer, size, begin_read;
-//! entities: InputMap; tests: input_tests, packet_tests.
-use std::ffi::c_void;
+//! for SDK packets. operations: new, read, bytes, finish;
+//! entities: InputMap, ReadAccess; tests: input_tests, packet_tests.
 use std::io;
 use std::os::fd::{AsFd, AsRawFd};
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 use crate::dma::{Buffer, CpuAccess};
 pub(super) struct InputMap {
@@ -37,16 +37,27 @@ impl InputMap {
     Ok(Self { buffer, ptr })
   }
 
-  pub(super) fn pointer(&self) -> *mut c_void {
-    self.ptr.as_ptr().cast()
-  }
-
-  pub(super) fn size(&self) -> usize {
-    self.buffer.size()
-  }
-
-  pub(super) fn begin_read(&self) -> io::Result<CpuAccess> {
-    self.buffer.begin_read()
+  pub(super) fn read(
+    self: &Rc<Self>,
+    offset: usize,
+    length: usize,
+  ) -> io::Result<ReadAccess> {
+    if length == 0
+      || offset
+        .checked_add(length)
+        .is_none_or(|end| end > self.buffer.size())
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "packet length outside registered buffer",
+      ));
+    }
+    Ok(ReadAccess {
+      map: self.clone(),
+      lease: self.buffer.begin_read()?,
+      offset,
+      length,
+    })
   }
 }
 impl Drop for InputMap {
@@ -54,5 +65,31 @@ impl Drop for InputMap {
     unsafe {
       libc::munmap(self.ptr.as_ptr().cast(), self.buffer.size());
     }
+  }
+}
+
+// The range, mapping lifetime, and CPU exclusion are one ownership
+// unit. A consumer cannot construct a slice without holding all three.
+pub(super) struct ReadAccess {
+  map: Rc<InputMap>,
+  lease: CpuAccess,
+  offset: usize,
+  length: usize,
+}
+impl ReadAccess {
+  pub(super) fn bytes(&self) -> &[u8] {
+    // SAFETY: read checked this nonempty range against the allocation;
+    // map retains it and lease excludes competing CPU mappings for the
+    // entire borrow. The mapping is read-only.
+    unsafe {
+      std::slice::from_raw_parts(
+        self.map.ptr.as_ptr().add(self.offset),
+        self.length,
+      )
+    }
+  }
+
+  pub(super) fn finish(self) -> io::Result<()> {
+    self.lease.finish()
   }
 }

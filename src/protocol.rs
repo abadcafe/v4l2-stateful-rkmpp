@@ -3,7 +3,7 @@
 //! pool and event/reply enums. tests: protocol_tests; end-to-end
 //! tests/kernel.
 use std::io;
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 9;
 pub const MAX_BATCH: usize = 16;
 pub mod command;
 #[cfg(test)]

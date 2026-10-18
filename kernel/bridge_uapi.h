@@ -3,7 +3,7 @@
 #define V4L2_RKMPP_BRIDGE_UAPI_H
 #include <linux/ioctl.h>
 #include <linux/types.h>
-#define RB_VERSION 7
+#define RB_VERSION 9
 #define RB_BATCH_MAX 16
 #define RB_MAX_BUFFERS 32
 /* field: 0 progressive, 1 interlaced top first, 2 interlaced bottom first,
@@ -36,6 +36,8 @@ struct rb_pool {
  * only after copyout. A copyout fault after applying replies poisons the
  * session; never retry that exchange. Registration closes all new fds on
  * copyout failure. */
+/* Only header, results[0..reply_count) and events[0..event_count) are
+ * written back. Unused array storage is not an output of RB_EXCHANGE. */
 struct rb_batch {
   __u32 version, reply_count, event_count, reserved;
   struct rb_message replies[RB_BATCH_MAX], events[RB_BATCH_MAX];
@@ -62,7 +64,11 @@ enum rb_reply {
 #define RB_CAPTURE_REUSE 1U
 #define RB_RESET_CAPTURE_ONLY (1U << 16)
 #define RB_RESET_ABORT_DRAIN (1U << 17)
-/* PACKET.count is its monotonic input serial; DRAINING.count is the last
+/* PACKET.count and RECYCLE.count are nonzero queue-submission identities,
+ * independent of pool/index reuse. INPUT_DONE and FRAME respectively echo
+ * that identity. Old completions cannot acknowledge a newly queued buffer.
+ * Counters never wrap: exhaustion poisons the session.
+ * DRAINING.count is the last
  * input belonging to the ending bitstream, including a split end marker. */
 /* PACKET/FRAME flags preserve V4L2_BUF_FLAG_TSTAMP_SRC_MASK verbatim. */
 #define RB_FRAME_ERROR 2

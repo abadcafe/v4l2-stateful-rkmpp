@@ -28,7 +28,7 @@ from tests.support.syscalls import command, ioctl
 class CaptureSession:
     raw: Peer
     queue: Queue
-    event: Message
+    queued: tuple[Message, ...]
     packets: tuple[Message, ...]
 
 
@@ -44,6 +44,7 @@ def capture_session(
         coded_height=64,
         version=VERSION,
         kind=Reply.LAYOUT,
+        count=18,
         epoch=packets[0].epoch,
         width=64,
         height=64,
@@ -64,8 +65,16 @@ def capture_session(
     event = Message.from_buffer_copy(events.events)
     assert event.kind == Event.CAPTURE
     assert event.count == 18 and event.generation > 0
-    assert accepted(session.service.exchange()).event_count == 3
-    yield CaptureSession(session, queue, event, packets)
+    tail = accepted(session.service.exchange())
+    assert tail.event_count == 3
+    queued = tuple(
+        Message.from_buffer_copy(batch.events, i * ctypes.sizeof(Message))
+        for batch, start in ((events, 1), (tail, 0))
+        for i in range(start, batch.event_count)
+    )
+    assert all(event.kind == Event.RECYCLE and event.count for event in queued)
+    assert len({event.count for event in queued}) == 18
+    yield CaptureSession(session, queue, queued, packets)
 
 
 def frame(event: Message) -> Message:
@@ -80,7 +89,7 @@ def test_frame_reply_completes_once_preserves_timestamp_and_recycles(
     capture_session: CaptureSession,
 ) -> None:
     session = capture_session
-    reply = frame(session.event)
+    reply = frame(session.queued[0])
     assert accepted(session.raw.service.exchange([reply])).results[0] == 0
     assert accepted(session.raw.service.exchange([reply])).results[0] == -errno.ESTALE
     done = accepted(session.queue.dequeue())
@@ -98,22 +107,32 @@ def test_frame_reply_completes_once_preserves_timestamp_and_recycles(
         and event.pool_id == reply.pool_id
     )
     reply.timestamp += 1000000
+    assert accepted(session.raw.service.exchange([reply])).results[0] == -errno.ESTALE
+    pending = session.queue.dequeue()
+    assert isinstance(pending, Rejected) and pending.code == errno.EAGAIN
+    reply.count = event.count
     assert accepted(session.raw.service.exchange([reply])).results[0] == 0
     assert accepted(session.queue.dequeue()).sequence == 1
 
 
-@pytest.mark.parametrize("field", ["pool", "generation", "index", "payload"])
+@pytest.mark.parametrize(
+    "field", ["pool", "generation", "index", "token", "zero-token", "payload"]
+)
 def test_frame_reply_rejection_preserves_queued_capture_slot(
     capture_session: CaptureSession, field: str
 ) -> None:
     session = capture_session
-    reply = frame(session.event)
+    reply = frame(session.queued[0])
     if field == "pool":
         reply.pool_id += 1
     elif field == "generation":
         reply.generation += 1
     elif field == "index":
         reply.index = 32
+    elif field == "token":
+        reply.count += 1
+    elif field == "zero-token":
+        reply.count = 0
     else:
         reply.bytesused = 6145
     assert accepted(session.raw.service.exchange([reply])).results[0] == -(
@@ -122,7 +141,8 @@ def test_frame_reply_rejection_preserves_queued_capture_slot(
     empty = session.queue.dequeue()
     assert isinstance(empty, Rejected) and empty.code == errno.EAGAIN
     assert (
-        accepted(session.raw.service.exchange([frame(session.event)])).results[0] == 0
+        accepted(session.raw.service.exchange([frame(session.queued[0])])).results[0]
+        == 0
     )
     assert accepted(session.queue.dequeue()).index == 0
 
@@ -133,11 +153,11 @@ def test_eos_reply_marks_last_capture_and_delivers_eos_event(
     session = capture_session
     accepted(session.raw.video.stop())
     _ = accepted(session.raw.service.exchange())
-    eos = Message.from_buffer_copy(session.event)
+    eos = Message.from_buffer_copy(session.queued[0])
     eos.kind = Reply.EOS
-    assert accepted(session.raw.service.exchange([frame(session.event), eos])).results[
-        :2
-    ] == [0, 0]
+    assert accepted(
+        session.raw.service.exchange([frame(session.queued[0]), eos])
+    ).results[:2] == [0, 0]
     first, last = accepted(session.queue.dequeue()), accepted(session.queue.dequeue())
     assert first.bytesused == (6144,) and last.bytesused == (0,)
     assert last.flags & 0x100000
@@ -148,7 +168,7 @@ def test_failed_reply_requires_cleanup_of_both_queues(
     capture_session: CaptureSession,
 ) -> None:
     session = capture_session
-    failed = Message.from_buffer_copy(session.event)
+    failed = Message.from_buffer_copy(session.queued[0])
     failed.kind = Reply.FAILED
     terminal = session.raw.service.exchange([failed])
     assert isinstance(terminal, Rejected) and terminal.code == errno.EPIPE
@@ -163,11 +183,13 @@ def test_damaged_frame_returns_error_without_poisoning_session(
     capture_session: CaptureSession,
 ) -> None:
     session = capture_session
-    reply = frame(session.event)
+    reply = frame(session.queued[0])
     reply.flags = 2
     assert accepted(session.raw.service.exchange([reply])).results[0] == 0
     assert accepted(session.queue.dequeue()).flags & 0x40
     accepted(session.queue.queue(0))
+    recycled = Message.from_buffer_copy(accepted(session.raw.service.exchange()).events)
+    reply.count = recycled.count
     reply.flags = 0
     assert accepted(session.raw.service.exchange([reply])).results[0] == 0
     assert accepted(session.queue.dequeue()).flags & 0x40 == 0
@@ -178,7 +200,7 @@ def test_frame_dequeue_preserves_service_field_order(
     capture_session: CaptureSession, wire: int, field: int
 ) -> None:
     session = capture_session
-    reply = frame(session.event)
+    reply = frame(session.queued[0])
     reply.field = wire
     assert accepted(session.raw.service.exchange([reply])).results[0] == 0
     planes = (Plane * 1)()
@@ -199,10 +221,9 @@ def test_drain_completion_rejects_duplicate_eos_and_late_frame(
     session = capture_session
     accepted(session.raw.video.stop())
     _ = accepted(session.raw.service.exchange())
-    eos = Message.from_buffer_copy(session.event)
+    eos = Message.from_buffer_copy(session.queued[0])
     eos.kind = Reply.EOS
-    late = frame(session.event)
-    late.index = 2
+    late = frame(session.queued[2])
     if same_batch:
         results = accepted(session.raw.service.exchange([eos, eos, late])).results
         assert list(results[:3]) == [0, -errno.EBUSY, -errno.EBUSY]
@@ -244,11 +265,12 @@ def test_eos_requires_an_explicit_or_natural_drain(
     capture_session: CaptureSession,
 ) -> None:
     session = capture_session
-    eos = Message.from_buffer_copy(session.event)
+    eos = Message.from_buffer_copy(session.queued[0])
     eos.kind = Reply.EOS
     assert accepted(session.raw.service.exchange([eos])).results[0] == -errno.EBUSY
     assert accepted(session.raw.video.events()) == []
     assert (
-        accepted(session.raw.service.exchange([frame(session.event)])).results[0] == 0
+        accepted(session.raw.service.exchange([frame(session.queued[0])])).results[0]
+        == 0
     )
     assert accepted(session.queue.dequeue()).bytesused == (6144,)

@@ -14,7 +14,10 @@ Supports H.264, HEVC, VP8, VP9, and AV1. Vulkan converts 10-bit video to 8-bit N
 flowchart TD
     Chromium[Chromium] -->|V4L2 OUTPUT: compressed bitstream| Kernel[v4l2_rkmpp_bridge kernel module]
     Kernel <-->|Private ioctl: sessions, buffer pools, batched events| Service[v4l2-stateful-rkmpp Rust service]
-    Service --> Frontend[Unified framed input admission]
+    Service --> Async[Tokio current-thread runtime]
+    Async -->|bounded batches| Hardware[Shared spawn_blocking executor]
+    Hardware -->|DMA / GPU sync-file readiness| Async
+    Hardware --> Frontend[Unified framed input admission]
     Frontend --> Headers[GStreamer header and boundary validation]
     Frontend --> Tasks[Coded-frame tasks with input read leases]
     Tasks --> MPP[Rockchip MPP: synchronous execution]
@@ -28,7 +31,9 @@ flowchart TD
     GPU --> Display[Desktop compositing and display]
 ```
 
-8-bit decoding normally writes directly to CAPTURE buffers. Vulkan copies a frame into a reserved CAPTURE buffer when its source belongs to a retired pool, remains held by the client, or uses a temporary decode surface because decoding and presentation retain too many pictures simultaneously. Temporary surfaces are allocated on demand within a total limit of 32 decode surfaces; the V4L2 minimum buffer count stays unchanged. The 10-bit conversion writes directly to the final CAPTURE buffers. The bridge performs no full-frame CPU copies.
+The service uses one Tokio orchestration thread for admission, session scheduling, diagnostics and shutdown. One shared `spawn_blocking` executor owns all MPP/Vulkan contexts and executes command batches with bounded decode progress. DMA dependencies and Vulkan completion are awaited asynchronously through sync-files; frame and CAPTURE leases remain held until conversion completes. Sessions do not create native threads. Shutdown stops admission, waits for session operations, then destroys hardware contexts on their execution thread. Vendor libraries may still create their own internal threads.
+
+8-bit decoding uses registered CAPTURE buffers and waits for their return when the pool is exhausted. The service does not allocate temporary decode surfaces. It negotiates 18–32 CAPTURE buffers according to the stream’s reference/display storage budget. Vulkan handles images from retired pools or repeated presentations whose original buffer is still held by the client. The 10-bit conversion writes directly to the final CAPTURE buffers. The bridge performs no full-frame CPU copies.
 
 ## Build, install, and use
 

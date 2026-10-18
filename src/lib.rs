@@ -5,9 +5,9 @@ pub mod backend;
 pub mod bitstream;
 #[cfg(test)]
 mod bitstream_tests;
-pub mod converter;
 pub mod diagnostics;
 pub mod dma;
+pub mod hardware;
 pub mod image;
 pub mod mpp;
 pub mod notify;
@@ -21,11 +21,11 @@ pub mod transport;
 #[cfg(test)]
 mod backend_tests;
 #[cfg(test)]
-mod converter_tests;
-#[cfg(test)]
 mod diagnostics_tests;
 #[cfg(test)]
 mod dma_tests;
+#[cfg(test)]
+mod hardware_tests;
 #[cfg(test)]
 mod image_tests;
 #[cfg(test)]
@@ -59,7 +59,17 @@ mod frontend_tests;
 pub mod picture;
 
 mod submission;
-
-mod task;
 #[cfg(test)]
-mod task_tests;
+mod submission_tests;
+
+pub mod readiness;
+#[cfg(test)]
+mod readiness_tests;
+
+pub mod fence;
+#[cfg(test)]
+mod fence_tests;
+
+pub mod descriptor;
+#[cfg(test)]
+mod descriptor_tests;

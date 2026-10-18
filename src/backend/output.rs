@@ -1,19 +1,20 @@
 //! module: backend::output; responsibility: publish decoded images
 //! through an owned CAPTURE transaction. Pool admission, GPU work and
 //! display leases never escape this module. operations:
-//! register/start/recycle/stop/push/take and status queries;
+//! register/start/recycle/stop/push and status queries;
 //! entities: Output, Status; tests: output_tests and service
 //! acceptance.
 use std::io;
+use std::num::NonZeroU32;
 
-use super::capture::{CapturePool, Presentation};
+use super::capture::{CapturePool, CopyReason, Presentation};
 use super::frame::FrameInput;
-use super::layout::Extent;
-use crate::converter::{Converter, Job};
+use super::layout::Requirements;
 use crate::dma::Buffer;
+use crate::image::Depth;
 use crate::mpp::{Decoder, FrameInfo};
-use crate::notify::Notify;
 use crate::protocol::{Message, Reply};
+use crate::quantize::Quantizer;
 mod format;
 #[cfg(test)]
 mod format_tests;
@@ -22,13 +23,21 @@ mod negotiation;
 mod negotiation_tests;
 use format::Format;
 use negotiation::Negotiation;
+struct Conversion {
+  frame: FrameInput,
+  index: usize,
+  token: NonZeroU32,
+  bytesused: u32,
+  reason: Option<CopyReason>,
+}
 pub(super) struct Output {
-  notify: Notify,
   capture: CapturePool,
   format: Option<Format>,
   negotiation: Negotiation,
-  converter: Option<Converter<FrameInput>>,
-  converting: usize,
+  quantizer: Option<Quantizer>,
+  converting: Option<Conversion>,
+  transfers: [u64; 5],
+  capture_stalls: u64,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Status {
@@ -38,14 +47,15 @@ pub(super) enum Status {
   Stopped,
 }
 impl Output {
-  pub(super) fn new(notify: Notify) -> Self {
+  pub(super) fn new() -> Self {
     Self {
-      notify,
       capture: CapturePool::default(),
       format: None,
       negotiation: Negotiation::default(),
-      converter: None,
-      converting: 0,
+      quantizer: None,
+      converting: None,
+      transfers: [0; 5],
+      capture_stalls: 0,
     }
   }
 
@@ -73,12 +83,8 @@ impl Output {
     }
   }
 
-  pub(super) fn idle(&self) -> bool {
-    self.converting == 0
-  }
-
-  pub(super) fn extent(&self) -> Option<Extent> {
-    self.format.as_ref().map(Format::extent)
+  pub(super) fn requirements(&self) -> Option<Requirements> {
+    self.format.as_ref().map(Format::requirements)
   }
 
   pub(super) fn register(
@@ -87,12 +93,18 @@ impl Output {
     buffers: Vec<Buffer>,
     decoder: Option<&Decoder>,
   ) -> io::Result<()> {
+    if id == 0 || !(1..=32).contains(&buffers.len()) {
+      return Err(io::Error::other("invalid CAPTURE registration"));
+    }
     if self.capture.registration().0 != 0 {
       return Err(io::Error::other("unexpected capture registration"));
     }
     if decoder.is_some_and(Decoder::has_output)
       && self.format.as_ref().is_some_and(|f| {
-        buffers.iter().any(|b| b.size() < f.message().size as usize)
+        buffers.len() < f.message().count as usize
+          || buffers
+            .iter()
+            .any(|b| b.size() < f.message().size as usize)
       })
     {
       self.negotiation.retire();
@@ -107,6 +119,8 @@ impl Output {
     reuse: bool,
     mut decoder: Option<&mut Decoder>,
   ) -> io::Result<()> {
+    let mut negotiation = self.negotiation.clone();
+    negotiation.start(count, reuse)?;
     if reuse {
       if !self.waiting() {
         return Err(io::Error::other(
@@ -116,19 +130,25 @@ impl Output {
       let format = self.format.as_ref().ok_or_else(|| {
         io::Error::other("capture reuse without geometry")
       })?;
+      let layout = format.message();
+      if count != self.capture.registration().1
+        || !self
+          .capture
+          .fits(layout.count as usize, layout.size as usize)
+      {
+        return Err(io::Error::other(
+          "CAPTURE reuse does not satisfy negotiated layout",
+        ));
+      }
       let decoder = decoder.as_deref_mut().ok_or_else(|| {
         io::Error::other("capture reuse without decoder")
       })?;
       let reservations = decoder.reuse_output(format.ten())?;
-      if reservations.is_none() {
-        self.capture.forget_imports();
-      }
-      self.capture.reuse(
-        format.message().size as usize,
-        reservations.unwrap_or_default(),
-      )?;
+      self
+        .capture
+        .reuse(format.message().size as usize, reservations)?;
     }
-    self.negotiation.start(count, reuse)?;
+    self.negotiation = negotiation;
     self.ready(decoder)
   }
 
@@ -136,12 +156,13 @@ impl Output {
     &mut self,
     pool: u32,
     index: usize,
+    token: NonZeroU32,
     decoder: Option<&mut Decoder>,
   ) -> io::Result<()> {
     if pool == 0 || pool != self.capture.registration().0 {
       return Err(io::Error::other("invalid recycle pool"));
     }
-    self.capture.recycle(index, self.negotiation.retiring())?;
+    self.capture.recycle(index, token, self.negotiation.retiring())?;
     self.ready(decoder)
   }
 
@@ -172,8 +193,8 @@ impl Output {
     &mut self,
     decoder: Option<&mut Decoder>,
   ) -> io::Result<()> {
-    self.converter = None;
-    self.converting = 0;
+    self.quantizer = None;
+    self.converting = None;
     self.capture = CapturePool::default();
     self.negotiation.stop();
     if let Some(decoder) = decoder {
@@ -187,10 +208,10 @@ impl Output {
   fn announce(
     &mut self,
     info: FrameInfo,
-    extent: Extent,
+    requirements: Requirements,
     decoder: &mut Decoder,
   ) -> io::Result<Message> {
-    let format = Format::new(info, extent)?;
+    let format = Format::new(info, requirements)?;
     let retiring =
       decoder.has_output() || self.capture.registration().0 != 0;
     if !retiring {
@@ -205,12 +226,14 @@ impl Output {
   fn frame_reply(
     &self,
     index: usize,
+    token: NonZeroU32,
     info: FrameInfo,
     bytesused: u32,
   ) -> io::Result<Message> {
     Ok(Message {
       kind: Reply::Frame as u32,
       index: index as u32,
+      count: token.get(),
       bytesused,
       timestamp: info.timestamp,
       field: info.field,
@@ -221,25 +244,34 @@ impl Output {
     })
   }
 
+  pub(super) fn completion(&self) -> Option<crate::descriptor::Lease> {
+    self.quantizer.as_ref().and_then(Quantizer::completion)
+  }
+
+  pub(super) fn idle(&self) -> bool {
+    self.converting.is_none()
+  }
+
   pub(super) fn take(&mut self) -> io::Result<Option<Message>> {
-    let Some(completion) = self
-      .converter
-      .as_mut()
-      .map(Converter::take)
-      .transpose()?
-      .flatten()
-    else {
+    if self.converting.is_none() {
       return Ok(None);
-    };
-    let (index, frame, result) = completion.into_parts();
-    result?;
-    self.converting -= 1;
-    let layout = self.format.as_ref().unwrap().message();
+    }
+    if !self.quantizer.as_mut().unwrap().finish()? {
+      return Ok(None);
+    }
+    let done = self.converting.take().unwrap();
+    self.transfers[match done.reason {
+      None => 1,
+      Some(CopyReason::Unregistered) => 2,
+      Some(CopyReason::Held) => 3,
+      Some(CopyReason::Foreign) => 4,
+    }] += 1;
     self
       .frame_reply(
-        index as usize,
-        frame.info,
-        layout.stride * layout.rows * 3 / 2,
+        done.index,
+        done.token,
+        done.frame.info,
+        done.bytesused,
       )
       .map(Some)
   }
@@ -249,19 +281,19 @@ impl Output {
     frame: FrameInput,
     decoder: &mut Decoder,
   ) -> io::Result<(Option<FrameInput>, Option<Message>)> {
+    if !self.idle() {
+      return Ok((Some(frame), None));
+    }
     let info = frame.info;
     let image = frame.frame.plane()?.is_some();
     let changed = image
       && self
         .format
         .as_ref()
-        .is_some_and(|f| f.changed(info, frame.extent));
+        .is_some_and(|f| f.changed(info, frame.requirements));
     let ten = self.format.as_ref().is_some_and(Format::ten);
-    if !self.idle() && (info.info_change || changed || !image || !ten) {
-      return Ok((Some(frame), None));
-    }
     if info.info_change || changed {
-      let message = self.announce(info, frame.extent, decoder)?;
+      let message = self.announce(info, frame.requirements, decoder)?;
       return Ok(((!info.info_change).then_some(frame), Some(message)));
     }
     if self.waiting() && image {
@@ -275,24 +307,31 @@ impl Output {
           io::Error::other("decoded image without negotiated geometry")
         })?
         .message();
-      let frame = if !ten {
+      let (frame, reason) = if !ten {
         match self.capture.present(frame.frame)? {
-          Presentation::Direct(index) => {
+          Presentation::Direct(index, token) => {
+            self.transfers[0] += 1;
             return Ok((
               None,
               Some(self.frame_reply(
                 index,
+                token,
                 info,
                 layout.stride * layout.rows * 3 / 2,
               )?),
             ));
           }
-          Presentation::Convert(image) => {
-            FrameInput { frame: image, info, extent: frame.extent }
-          }
+          Presentation::Convert(image, reason) => (
+            FrameInput {
+              frame: image,
+              info,
+              requirements: frame.requirements,
+            },
+            Some(reason),
+          ),
         }
       } else {
-        frame
+        (frame, None)
       };
       let Some(target) = self.capture.prepare_write(
         decoder,
@@ -301,25 +340,29 @@ impl Output {
         layout.rows,
       )?
       else {
+        self.capture_stalls += 1;
         return Ok((Some(frame), None));
       };
-      if self.converter.is_none() {
-        self.converter = Some(Converter::new(self.notify.clone())?);
+      if self.quantizer.is_none() {
+        self.quantizer = Some(Quantizer::new()?);
       }
-      let job = Job::new(
-        target.index() as u32,
-        (layout.coded_width, layout.coded_height),
+      self.quantizer.as_mut().unwrap().submit(
+        if ten { Depth::Ten } else { Depth::Eight },
+        layout.coded_width,
+        layout.coded_height,
+        frame.frame.plane()?.ok_or_else(|| {
+          io::Error::other("conversion source missing")
+        })?,
+        target.plane(),
+      )?;
+      let (index, token) = target.commit();
+      self.converting = Some(Conversion {
         frame,
-        target.image(),
-      );
-      if let Err(error) = self.converter.as_mut().unwrap().submit(job) {
-        if !error.is_full() {
-          return Err(io::Error::other("conversion worker stopped"));
-        }
-        return Ok((Some(error.into_job().into_input()), None));
-      }
-      target.commit();
-      self.converting += 1;
+        index,
+        token,
+        bytesused: layout.stride * layout.rows * 3 / 2,
+        reason,
+      });
       return Ok((None, None));
     }
     if info.failed && self.active() {
@@ -337,10 +380,14 @@ impl Output {
         layout.rows,
       )?
       else {
+        self.capture_stalls += 1;
         return Ok((Some(frame), None));
       };
-      let index = target.commit();
-      return Ok((None, Some(self.frame_reply(index, info, 0)?)));
+      let (index, token) = target.commit();
+      return Ok((
+        None,
+        Some(self.frame_reply(index, token, info, 0)?),
+      ));
     }
     Ok((None, None))
   }
@@ -348,6 +395,21 @@ impl Output {
 
 impl Drop for Output {
   fn drop(&mut self) {
-    self.converter = None;
+    if self.transfers.iter().any(|&count| count != 0) {
+      eprintln!(
+        "rkmpp transfers: direct={} quantized={} unregistered_copy={} \
+         held_copy={} foreign_copy={} capture_stalls={}",
+        self.transfers[0],
+        self.transfers[1],
+        self.transfers[2],
+        self.transfers[3],
+        self.transfers[4],
+        self.capture_stalls
+      );
+    }
+    // GPU completion precedes release of decoder references and
+    // CAPTURE.
+    self.quantizer = None;
+    self.converting = None;
   }
 }

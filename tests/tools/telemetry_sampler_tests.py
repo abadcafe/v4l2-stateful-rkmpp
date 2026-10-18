@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.support import service_runtime
-from tests.support.diagnostics import Control, Identity, Snapshot
+from tests.support.diagnostics import Control, Identity, Measurement
 from tests.support.outcome import Ok, Rejected, Result, accepted
 from tests.support.service_runtime import Running
 from tests.tools import cpu
@@ -49,17 +49,14 @@ def counters(
             }
         )
 
-    def sample(owner: Running) -> Result[Snapshot]:
+    def sample(owner: Running) -> Result[Measurement]:
         assert owner == running
         return Ok(
-            Snapshot(
+            Measurement(
                 protocol=1,
                 identity=identity,
                 state="ready",
                 cpu_seconds=service_cpu[0],
-                fds=2,
-                threads=1,
-                sessions=(),
             )
         )
 
@@ -73,7 +70,7 @@ def counters(
 
     monkeypatch.setattr(time, "monotonic", now)
     monkeypatch.setattr(cpu, "processes", processes)
-    monkeypatch.setattr(service_runtime, "sample", sample)
+    monkeypatch.setattr(service_runtime, "measure", sample)
     monkeypatch.setattr(Path, "read_text", read)
     return running, clock, service_cpu
 
@@ -88,7 +85,7 @@ def test_read_combines_owned_tree_and_service_self_cpu(
     sample = accepted(sampler.read())
     assert sample.elapsed == 1 and sample.cpu["bridge"] == 25
     assert sample.cpu["chromium"] > 0 and sample.gpu_percent == 25
-    assert sample.mpp == {"core0": 12}
+    assert sample.mpp_completed_window_load == {"core0": 12}
 
 
 def test_read_decreased_cpu_and_unavailable_status_are_errors(
@@ -100,11 +97,11 @@ def test_read_decreased_cpu_and_unavailable_status_are_errors(
     service_cpu[0] = 0
     assert isinstance(sampler.read(), Rejected)
 
-    def gone(owner: Running) -> Result[Snapshot]:
+    def gone(owner: Running) -> Result[Measurement]:
         assert owner == running
         return Rejected(errno.ESRCH, "service exited")
 
-    monkeypatch.setattr(service_runtime, "sample", gone)
+    monkeypatch.setattr(service_runtime, "measure", gone)
     assert isinstance(sampler.read(), Rejected)
 
 
@@ -125,4 +122,20 @@ def test_read_without_compositor_keeps_decode_counters(
     sample = accepted(sampler.read())
     assert "desktop-compositor" not in sample.cpu
     assert sample.cpu["bridge"] == 25 and sample.cpu["chromium"] > 0
-    assert sample.gpu_percent == 25 and sample.mpp == {"core0": 12}
+    assert sample.gpu_percent == 25 and sample.mpp_completed_window_load == {
+        "core0": 12
+    }
+
+
+def test_read_reports_the_interval_of_each_cpu_delta(
+    counters: tuple[Running, list[float], list[float]],
+) -> None:
+    running, clock, service_cpu = counters
+    sampler = accepted(Sampler.open(1, running))
+    clock[0] = 11
+    service_cpu[0] = 2
+    first = accepted(sampler.read())
+    clock[0] = 20
+    second = accepted(sampler.read())
+    assert (first.interval_start, first.elapsed, first.cpu["bridge"]) == (0, 1, 100)
+    assert (second.interval_start, second.elapsed, second.cpu["bridge"]) == (1, 10, 0)

@@ -23,7 +23,7 @@ fn test_apply_new_sequence_never_reuses_picture_identity() {
   assert_eq!(b.1, vec![b.0]);
 }
 
-fn bits(parts: &[&str]) -> super::bits::Bits {
+fn bits(parts: &[&str]) -> Vec<u8> {
   let mut data = parts.concat();
   while !data.len().is_multiple_of(8) {
     data.push('0');
@@ -33,11 +33,12 @@ fn bits(parts: &[&str]) -> super::bits::Bits {
     .chunks(8)
     .map(|c| c.iter().fold(0, |v, b| v * 2 + b - b'0'))
     .collect();
-  super::bits::Bits::from_rbsp(&bytes)
+  bytes
 }
 #[test]
 fn test_parse_explicit_set_preserves_unused_following_pictures() {
-  let mut b = bits(&["011", "010", "1", "0", "010", "1", "010", "0"]);
+  let bytes = bits(&["011", "010", "1", "0", "010", "1", "010", "0"]);
+  let mut b = super::bits::Bits::from_rbsp(&bytes);
   assert_eq!(
     super::hevc_rps::parse(&mut b, &[], false).unwrap(),
     vec![-1, -3, 2]
@@ -45,7 +46,8 @@ fn test_parse_explicit_set_preserves_unused_following_pictures() {
 }
 #[test]
 fn test_parse_prediction_sorts_negative_and_positive_deltas() {
-  let mut b = bits(&["1", "0", "1", "1111"]);
+  let bytes = bits(&["1", "0", "1", "1111"]);
+  let mut b = super::bits::Bits::from_rbsp(&bytes);
   assert_eq!(
     super::hevc_rps::parse(&mut b, &[vec![-1, -3, 2]], false).unwrap(),
     vec![-2, 1, 3]
@@ -53,7 +55,8 @@ fn test_parse_prediction_sorts_negative_and_positive_deltas() {
 }
 #[test]
 fn test_parse_inline_prediction_uses_declared_prior_index() {
-  let mut b = bits(&["1", "010", "1", "1", "11"]);
+  let bytes = bits(&["1", "010", "1", "1", "11"]);
+  let mut b = super::bits::Bits::from_rbsp(&bytes);
   assert_eq!(
     super::hevc_rps::parse(&mut b, &[vec![-2], vec![-7]], true)
       .unwrap(),
@@ -70,7 +73,8 @@ fn test_parse_rejects_truncated_and_invalid_prediction() {
     )
     .is_err()
   );
-  let mut b = bits(&["1", "010"]);
+  let bytes = bits(&["1", "010"]);
+  let mut b = super::bits::Bits::from_rbsp(&bytes);
   assert!(super::hevc_rps::parse(&mut b, &[vec![-1]], true).is_err());
 }
 #[test]

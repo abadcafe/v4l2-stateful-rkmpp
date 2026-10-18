@@ -1,28 +1,26 @@
 //! module: quantize::imports; responsibility: cache owned Vulkan
-//! DMA-BUF imports. operations: new, pair; entities: Cache; tests:
-//! imports_tests, quantize_tests.
+//! DMA-BUF imports. operations: new, pair, descriptors; entities:
+//! Cache, Pair, Entry, Imported; tests: imports_tests, quantize_tests.
 use std::io;
 use std::num::NonZeroUsize;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::sync::Arc;
+use std::os::fd::{AsRawFd, BorrowedFd, IntoRawFd};
+use std::rc::Rc;
 
 use ash::vk;
 
-use super::context::Device;
+use super::device::Device;
 struct Imported {
-  gpu: Arc<Device>,
+  gpu: Rc<Device>,
   buffer: vk::Buffer,
   memory: vk::DeviceMemory,
   identity: (u64, u64),
   size: u64,
-  age: u64,
 }
 impl Imported {
   fn new(
-    gpu: Arc<Device>,
+    gpu: Rc<Device>,
     fd: BorrowedFd<'_>,
-    stat: &libc::stat,
-    age: u64,
+    stat: &crate::dma::system::Metadata,
   ) -> io::Result<Self> {
     if stat.st_size <= 0 {
       return Err(io::Error::new(
@@ -36,59 +34,58 @@ impl Imported {
       memory: vk::DeviceMemory::null(),
       identity: (stat.st_dev, stat.st_ino),
       size: stat.st_size as u64,
-      age,
     };
-    unsafe {
-      let d = imported.gpu.api();
-      let mut external = vk::ExternalMemoryBufferCreateInfo::default()
-        .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
-      let info = vk::BufferCreateInfo::default()
-        .push_next(&mut external)
-        .size(imported.size)
-        .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
-      imported.buffer = d.create_buffer(&info, None).map_err(|r| {
+    // SAFETY: every Vulkan resource below is owned by imported;
+    // descriptor chains borrow local storage only until their call
+    // returns.
+    let d = imported.gpu.api();
+    let mut external = vk::ExternalMemoryBufferCreateInfo::default()
+      .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+    let info = vk::BufferCreateInfo::default()
+      .push_next(&mut external)
+      .size(imported.size)
+      .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+      .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    imported.buffer =
+      unsafe { d.create_buffer(&info, None) }.map_err(|r| {
         io::Error::other(format!("Vulkan create import: {r:?}"))
       })?;
-      let requirements =
-        d.get_buffer_memory_requirements(imported.buffer);
-      if requirements.size > imported.size {
-        return Err(io::Error::new(
-          io::ErrorKind::InvalidInput,
-          "Vulkan allocation exceeds DMA-BUF",
-        ));
-      }
-      let bits = requirements.memory_type_bits
-        & imported.gpu.memory_bits(fd.as_raw_fd())?;
-      if bits == 0 {
-        return Err(io::Error::new(
-          io::ErrorKind::Unsupported,
-          "no compatible DMA-BUF memory type",
-        ));
-      }
-      let raw = libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0);
-      if raw < 0 {
-        return Err(io::Error::last_os_error());
-      }
-      let duplicate = OwnedFd::from_raw_fd(raw);
-      let mut external = vk::ImportMemoryFdInfoKHR::default()
-        .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-        .fd(raw);
-      let info = vk::MemoryAllocateInfo::default()
-        .push_next(&mut external)
-        .allocation_size(requirements.size)
-        .memory_type_index(bits.trailing_zeros());
-      imported.memory =
-        d.allocate_memory(&info, None).map_err(|r| {
-          io::Error::other(format!("Vulkan import memory: {r:?}"))
-        })?;
-      // Vulkan takes ownership only after successful allocation.
-      let _ = duplicate.into_raw_fd();
-      d.bind_buffer_memory(imported.buffer, imported.memory, 0)
-        .map_err(|r| {
-          io::Error::other(format!("Vulkan bind import: {r:?}"))
-        })?;
+    let requirements =
+      unsafe { d.get_buffer_memory_requirements(imported.buffer) };
+    if requirements.size > imported.size {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "Vulkan allocation exceeds DMA-BUF",
+      ));
     }
+    let bits =
+      requirements.memory_type_bits & imported.gpu.memory_bits(fd)?;
+    if bits == 0 {
+      return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no compatible DMA-BUF memory type",
+      ));
+    }
+    let duplicate = fd.try_clone_to_owned()?;
+    let mut external = vk::ImportMemoryFdInfoKHR::default()
+      .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+      .fd(duplicate.as_raw_fd());
+    let info = vk::MemoryAllocateInfo::default()
+      .push_next(&mut external)
+      .allocation_size(requirements.size)
+      .memory_type_index(bits.trailing_zeros());
+    imported.memory = unsafe { d.allocate_memory(&info, None) }
+      .map_err(|r| {
+        io::Error::other(format!("Vulkan import memory: {r:?}"))
+      })?;
+    // Vulkan takes ownership only after successful allocation.
+    let _ = duplicate.into_raw_fd();
+    unsafe {
+      d.bind_buffer_memory(imported.buffer, imported.memory, 0)
+    }
+    .map_err(|r| {
+      io::Error::other(format!("Vulkan bind import: {r:?}"))
+    })?;
     Ok(imported)
   }
 }
@@ -100,15 +97,38 @@ impl Drop for Imported {
     }
   }
 }
+pub(super) struct Pair([Rc<Imported>; 2]);
+impl Pair {
+  pub(super) fn descriptors(
+    &self,
+    gpu: &Device,
+  ) -> io::Result<[vk::DescriptorBufferInfo; 2]> {
+    if self.0.iter().any(|i| !std::ptr::eq(i.gpu.as_ref(), gpu)) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "conversion imports belong to another Vulkan device",
+      ));
+    }
+    Ok(self.0.each_ref().map(|entry| {
+      vk::DescriptorBufferInfo::default()
+        .buffer(entry.buffer)
+        .range(entry.size)
+    }))
+  }
+}
+struct Entry {
+  import: Rc<Imported>,
+  age: u64,
+}
 pub(super) struct Cache {
-  gpu: Arc<Device>,
-  entries: Vec<Imported>,
+  gpu: Rc<Device>,
+  entries: Vec<Entry>,
   clock: u64,
   capacity: usize,
 }
 impl Cache {
   pub(super) fn new(
-    gpu: Arc<Device>,
+    gpu: Rc<Device>,
     capacity: NonZeroUsize,
   ) -> io::Result<Self> {
     if capacity.get() < 2 {
@@ -127,32 +147,46 @@ impl Cache {
 
   pub(super) fn pair(
     &mut self,
-    source: BorrowedFd<'_>,
-    source_stat: &libc::stat,
-    destination: BorrowedFd<'_>,
-    destination_stat: &libc::stat,
-  ) -> io::Result<[vk::DescriptorBufferInfo; 2]> {
-    let input = self.get(source, source_stat, None)?;
+    source: crate::image::Plane<'_>,
+    destination: crate::image::Plane<'_>,
+  ) -> io::Result<Pair> {
+    let source_stat = source.metadata()?;
+    let destination_stat = destination.metadata()?;
+    if (source_stat.st_dev, source_stat.st_ino)
+      == (destination_stat.st_dev, destination_stat.st_ino)
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "conversion images alias the same DMA-BUF",
+      ));
+    }
+    let input = self.get(source.fd(), &source_stat, None)?;
     let output =
-      self.get(destination, destination_stat, Some(input))?;
-    Ok([self.descriptor(input), self.descriptor(output)])
+      self.get(destination.fd(), &destination_stat, Some(input))?;
+    Ok(Pair([
+      self.entries[input].import.clone(),
+      self.entries[output].import.clone(),
+    ]))
   }
 
   fn get(
     &mut self,
     fd: BorrowedFd<'_>,
-    stat: &libc::stat,
+    stat: &crate::dma::system::Metadata,
     avoid: Option<usize>,
   ) -> io::Result<usize> {
     self.clock = self.clock.wrapping_add(1);
     let identity = (stat.st_dev, stat.st_ino);
     if let Some(index) =
-      self.entries.iter().position(|e| e.identity == identity)
+      self.entries.iter().position(|e| e.import.identity == identity)
     {
       self.entries[index].age = self.clock;
       return Ok(index);
     }
-    let entry = Imported::new(self.gpu.clone(), fd, stat, self.clock)?;
+    let entry = Entry {
+      import: Rc::new(Imported::new(self.gpu.clone(), fd, stat)?),
+      age: self.clock,
+    };
     if self.entries.len() < self.capacity {
       self.entries.push(entry);
       return Ok(self.entries.len() - 1);
@@ -167,12 +201,5 @@ impl Cache {
       .0;
     self.entries[index] = entry;
     Ok(index)
-  }
-
-  fn descriptor(&self, index: usize) -> vk::DescriptorBufferInfo {
-    let entry = &self.entries[index];
-    vk::DescriptorBufferInfo::default()
-      .buffer(entry.buffer)
-      .range(entry.size)
   }
 }

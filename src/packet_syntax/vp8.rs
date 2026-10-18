@@ -53,6 +53,8 @@ impl Validator {
     }
     self.needs_keyframe = false;
     Ok(super::unit::Unit {
+      prefix: 0,
+      header: None,
       boundary: None,
       range: 0..bytes.len(),
       display: header.show_frame != 0,

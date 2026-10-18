@@ -15,22 +15,23 @@ pub unsafe extern "C" fn pthread_create(
   start: Start,
   argument: *mut c_void,
 ) -> libc::c_int {
-  unsafe {
-    let marker = libc::getenv(c"RKMPP_TEST_THREAD_FAILURE".as_ptr());
-    if !marker.is_null() && libc::access(marker, libc::F_OK) == 0 {
-      return libc::EAGAIN;
-    }
-    let symbol =
-      libc::dlsym(libc::RTLD_NEXT, c"pthread_create".as_ptr());
-    if symbol.is_null() {
-      return libc::ENOSYS;
-    }
-    let native: unsafe extern "C" fn(
-      *mut libc::pthread_t,
-      *const libc::pthread_attr_t,
-      Start,
-      *mut c_void,
-    ) -> libc::c_int = std::mem::transmute(symbol);
-    native(thread, attr, start, argument)
+  let marker =
+    unsafe { libc::getenv(c"RKMPP_TEST_THREAD_FAILURE".as_ptr()) };
+  if !marker.is_null()
+    && unsafe { libc::access(marker, libc::F_OK) } == 0
+  {
+    return libc::EAGAIN;
   }
+  let symbol =
+    unsafe { libc::dlsym(libc::RTLD_NEXT, c"pthread_create".as_ptr()) };
+  if symbol.is_null() {
+    return libc::ENOSYS;
+  }
+  let native: unsafe extern "C" fn(
+    *mut libc::pthread_t,
+    *const libc::pthread_attr_t,
+    Start,
+    *mut c_void,
+  ) -> libc::c_int = unsafe { std::mem::transmute(symbol) };
+  unsafe { native(thread, attr, start, argument) }
 }

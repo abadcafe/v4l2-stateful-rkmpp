@@ -89,6 +89,7 @@ def test_register_invalid_pool_response_closes_all_transferred_descriptors(
                 batch.events[0] = Message(
                     version=VERSION,
                     kind=Event.PACKET,
+                    count=1,
                     epoch=1,
                     pool_id=1,
                     codec=Codec.H264.fourcc,
@@ -170,6 +171,7 @@ def test_register_errno_discards_stale_event_or_reports_failed(
         batch.events[0] = Message(
             version=VERSION,
             kind=Event.PACKET,
+            count=1,
             epoch=1,
             pool_id=1,
             codec=Codec.H264.fourcc,

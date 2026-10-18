@@ -159,3 +159,17 @@ fn test_prepare_applies_new_latency_bound_before_decoding() {
   assert_eq!(q.take(), Some(1));
   assert_eq!(q.take(), None);
 }
+
+#[test]
+fn test_picture_duplicate_identity_counts_once_toward_capacity() {
+  let mut q = Presentation::default();
+  let mut p = plan(1, 0, 4);
+  p.limits = Limits::new(4, 4, None).unwrap();
+  p.references = vec![2, 3, 4];
+  q.picture(10, &p.build());
+  q.picture(11, &p.build());
+  assert_eq!(q.take(), None);
+  q.drain();
+  assert_eq!(q.take(), Some(10));
+  assert_eq!(q.take(), Some(11));
+}

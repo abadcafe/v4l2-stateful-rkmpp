@@ -7,22 +7,7 @@ use std::collections::BTreeMap;
 use std::io;
 
 use super::super::ffi;
-#[derive(PartialEq, Eq)]
-enum Operation {
-  ForgetShort(u32),
-  ForgetLong(u32),
-  LongFromShort { difference: u32, index: u32 },
-  LongLimit(u32),
-  Reset,
-  CurrentLong(u32),
-}
-#[derive(PartialEq, Eq)]
-enum Marking {
-  Disposable,
-  Idr { discard: bool, long: bool },
-  Sliding,
-  Adaptive(Vec<Operation>),
-}
+use crate::packet_syntax::header::{Marking, Operation};
 impl Marking {
   fn parse(
     nal: &ffi::GstH264NalUnit,
@@ -76,16 +61,18 @@ impl Markings {
     &mut self,
     nal: &ffi::GstH264NalUnit,
     slice: &ffi::GstH264SliceHdr,
-  ) -> io::Result<()> {
+  ) -> io::Result<&Marking> {
     let marking = Marking::parse(nal, slice)?;
-    if let Some(previous) = self.0.get(&slice.redundant_pic_cnt) {
-      if *previous != marking {
-        return Err(invalid());
+    use std::collections::btree_map::Entry;
+    match self.0.entry(slice.redundant_pic_cnt) {
+      Entry::Vacant(entry) => Ok(entry.insert(marking)),
+      Entry::Occupied(entry) => {
+        if *entry.get() != marking {
+          return Err(invalid());
+        }
+        Ok(entry.into_mut())
       }
-    } else {
-      self.0.insert(slice.redundant_pic_cnt, marking);
     }
-    Ok(())
   }
 }
 fn invalid() -> io::Error {

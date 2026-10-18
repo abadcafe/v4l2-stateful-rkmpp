@@ -41,11 +41,8 @@ unsafe extern "C" {
 pub struct Frame {
   handle: NonNull<c_void>,
   info: FrameInfo,
+  metadata: std::sync::OnceLock<crate::dma::system::Metadata>,
 }
-// SAFETY: Frame transfers exclusive ownership; MPP frame/buffer
-// refcounts support cross-thread release. No reference to the frame is
-// shared between the session and conversion worker.
-unsafe impl Send for Frame {}
 #[derive(Clone, Copy, Debug)]
 pub struct FrameInfo {
   pub width: u32,
@@ -66,9 +63,13 @@ pub struct FrameInfo {
   pub range: u32,
 }
 impl Frame {
+  /// # Safety
+  /// A non-null handle transfers one initialized MppFrame reference;
+  /// no other owner may mutate or deinitialize it after this call.
   pub(super) unsafe fn from_raw(handle: *mut c_void) -> Option<Self> {
     NonNull::new(handle).map(|handle| Self {
-      info: Self::describe(handle.as_ptr()),
+      info: unsafe { Self::describe(handle.as_ptr()) },
+      metadata: std::sync::OnceLock::new(),
       handle,
     })
   }
@@ -77,36 +78,34 @@ impl Frame {
     self.info
   }
 
-  fn describe(frame: *mut c_void) -> FrameInfo {
+  unsafe fn describe(frame: *mut c_void) -> FrameInfo {
     // SAFETY: this owner holds the frame for every getter, with no
     // simultaneous mutation.
-    unsafe {
-      FrameInfo {
-        width: mpp_frame_get_width(frame),
-        height: mpp_frame_get_height(frame),
-        stride: mpp_frame_get_hor_stride(frame),
-        rows: mpp_frame_get_ver_stride(frame),
-        size: mpp_frame_get_buf_size(frame),
-        format: mpp_frame_get_fmt(frame) & !0x0c000000,
-        timestamp: mpp_frame_get_pts(frame) as u64,
-        timestamp_source: mpp_frame_get_dts(frame) as u32,
-        field: match mpp_frame_get_mode(frame) & 15 {
-          1 => 3,
-          2 => 4,
-          7 => 1,
-          11 => 2,
-          3 | 15 => 5,
-          _ => 0,
-        },
-        eos: mpp_frame_get_eos(frame) != 0,
-        info_change: mpp_frame_get_info_change(frame) != 0,
-        failed: mpp_frame_get_errinfo(frame) != 0
-          || mpp_frame_get_discard(frame) != 0,
-        primaries: mpp_frame_get_color_primaries(frame),
-        matrix: mpp_frame_get_colorspace(frame),
-        transfer: mpp_frame_get_color_trc(frame),
-        range: mpp_frame_get_color_range(frame),
-      }
+    FrameInfo {
+      width: unsafe { mpp_frame_get_width(frame) },
+      height: unsafe { mpp_frame_get_height(frame) },
+      stride: unsafe { mpp_frame_get_hor_stride(frame) },
+      rows: unsafe { mpp_frame_get_ver_stride(frame) },
+      size: unsafe { mpp_frame_get_buf_size(frame) },
+      format: unsafe { mpp_frame_get_fmt(frame) } & !0x0c000000,
+      timestamp: unsafe { mpp_frame_get_pts(frame) } as u64,
+      timestamp_source: unsafe { mpp_frame_get_dts(frame) } as u32,
+      field: match unsafe { mpp_frame_get_mode(frame) } & 15 {
+        1 => 3,
+        2 => 4,
+        7 => 1,
+        11 => 2,
+        3 | 15 => 5,
+        _ => 0,
+      },
+      eos: unsafe { mpp_frame_get_eos(frame) } != 0,
+      info_change: unsafe { mpp_frame_get_info_change(frame) } != 0,
+      failed: unsafe { mpp_frame_get_errinfo(frame) } != 0
+        || unsafe { mpp_frame_get_discard(frame) } != 0,
+      primaries: unsafe { mpp_frame_get_color_primaries(frame) },
+      matrix: unsafe { mpp_frame_get_colorspace(frame) },
+      transfer: unsafe { mpp_frame_get_color_trc(frame) },
+      range: unsafe { mpp_frame_get_color_range(frame) },
     }
   }
 
@@ -127,7 +126,12 @@ impl Frame {
     // SAFETY: the buffer and its fd remain owned by this frame until
     // the borrow ends.
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-    Ok(Some(Plane::new(fd, self.info.stride, self.info.rows)))
+    Ok(Some(Plane::registered(
+      fd,
+      self.info.stride,
+      self.info.rows,
+      &self.metadata,
+    )))
   }
 
   pub fn pool_index(&self) -> Option<usize> {

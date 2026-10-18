@@ -7,9 +7,6 @@ use crate::bitstream::hevc_rps;
 pub(in crate::bitstream) struct Sequence {
   pub geometry: Geometry,
   pub poc_bits: usize,
-  pub separate: bool,
-  pub sets: Vec<Vec<i32>>,
-  pub long_term: Option<Vec<u32>>,
   pub layers: Vec<crate::picture::Limits>,
 }
 use crate::bitstream::bits::Bits;
@@ -112,22 +109,18 @@ pub(in crate::bitstream) fn parse(data: &[u8]) -> io::Result<Sequence> {
   for _ in 0..count {
     sets.push(hevc_rps::parse(b, &sets, false)?);
   }
-  let long_term = if b.get(1)? != 0 {
+  if b.get(1)? != 0 {
     let count = b.ue()?;
     if count > 32 {
       return Err(io::Error::other(
         "too many HEVC long-term references",
       ));
     }
-    let mut values = Vec::new();
     for _ in 0..count {
-      values.push(b.get(poc_bits)?);
+      b.get(poc_bits)?;
       b.skip(1)?;
     }
-    Some(values)
-  } else {
-    None
-  };
+  }
   let x = if !separate && matches!(chroma, 1 | 2) { 2 } else { 1 };
   let y = if !separate && chroma == 1 { 2 } else { 1 };
   let width = u32::try_from(
@@ -167,12 +160,5 @@ pub(in crate::bitstream) fn parse(data: &[u8]) -> io::Result<Sequence> {
       )
     })?,
   };
-  Ok(Sequence {
-    geometry,
-    poc_bits,
-    separate,
-    sets,
-    long_term,
-    layers: limits,
-  })
+  Ok(Sequence { geometry, poc_bits, layers: limits })
 }

@@ -153,7 +153,7 @@ def _workloads(
             usage = measured.value.utilization
             if usage is not None and entry.dropped_percent is not None:
                 print(
-                    f"  CPU Chromium={usage.cpu['chromium'].mean:.2f}% service={usage.cpu['bridge'].mean:.2f}% GPU={usage.gpu.mean:.2f}% dropped={entry.dropped_percent:.2f}%",
+                    f"  CPU Chromium={usage.cpu['chromium'].mean_percent:.2f}% service={usage.cpu['bridge'].mean_percent:.2f}% GPU={usage.gpu.mean:.2f}% dropped={entry.dropped_percent:.2f}%",
                     flush=True,
                 )
             presentation = measured.value.presentation

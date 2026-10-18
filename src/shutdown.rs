@@ -1,47 +1,38 @@
 //! module: shutdown; responsibility: deliver process termination
 //! through owned descriptors. operations: install, consume, shutdown,
-//! block_worker, stopping, request; entities: Signals, Shutdown. tests:
+//! wait, stopping, request; entities: Signals, Shutdown. tests:
 //! shutdown_tests, tests/service/test_recovery. No asynchronous Rust
 //! signal callbacks.
 use std::io;
 use std::marker::PhantomData;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-
-use crate::notify::Notify;
-struct State {
-  notify: Notify,
-  stopped: AtomicBool,
-}
+use std::time::Duration;
 #[derive(Clone)]
-pub struct Shutdown(Arc<State>);
+pub struct Shutdown(tokio::sync::watch::Sender<bool>);
 impl Shutdown {
   pub fn stopping(&self) -> bool {
-    self.0.stopped.load(Ordering::Acquire)
+    *self.0.borrow()
   }
 
   pub fn request(&self) {
-    self.0.stopped.store(true, Ordering::Release);
-    let _ = self.0.notify.signal();
+    self.0.send_replace(true);
   }
-}
-impl AsFd for Shutdown {
-  fn as_fd(&self) -> BorrowedFd<'_> {
-    self.0.notify.as_fd()
+
+  pub async fn cancelled(&self) {
+    let mut receiver = self.0.subscribe();
+    let _ = receiver.wait_for(|stopped| *stopped).await;
   }
 }
 pub struct Signals {
   shutdown: Shutdown,
   fd: OwnedFd,
+  ready: std::cell::OnceCell<crate::readiness::Readable>,
   old_mask: libc::sigset_t,
   _same_thread: PhantomData<Rc<()>>,
 }
 impl Signals {
   pub fn install() -> io::Result<Self> {
-    let notify = Notify::new()?;
     let mask = termination_mask();
     let mut old_mask = unsafe { std::mem::zeroed() };
     let result = unsafe {
@@ -65,11 +56,9 @@ impl Signals {
       return Err(error);
     }
     Ok(Self {
-      shutdown: Shutdown(Arc::new(State {
-        notify,
-        stopped: AtomicBool::new(false),
-      })),
+      shutdown: Shutdown(tokio::sync::watch::channel(false).0),
       fd: unsafe { OwnedFd::from_raw_fd(raw) },
+      ready: std::cell::OnceCell::new(),
       old_mask,
       _same_thread: PhantomData,
     })
@@ -103,63 +92,19 @@ impl Signals {
 
   /// Wait without consuming broker readiness; termination interrupts
   /// backoff.
-  pub fn wait(&self, duration: Duration) -> io::Result<()> {
-    let started = Instant::now();
-    while !self.shutdown.stopping() {
-      let remaining = duration.saturating_sub(started.elapsed());
-      if remaining.is_zero() {
-        return Ok(());
-      }
-      let mut fds = [
-        libc::pollfd {
-          fd: self.fd.as_raw_fd(),
-          events: libc::POLLIN,
-          revents: 0,
-        },
-        libc::pollfd {
-          fd: self.shutdown.as_fd().as_raw_fd(),
-          events: libc::POLLIN,
-          revents: 0,
-        },
-      ];
-      let milliseconds =
-        remaining.as_millis().saturating_add(1).min(i32::MAX as u128)
-          as i32;
-      let status =
-        unsafe { libc::poll(fds.as_mut_ptr(), 2, milliseconds) };
-      if status < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::Interrupted {
-          continue;
-        }
-        return Err(error);
-      }
-      if fds.iter().any(|fd| {
-        fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
-          != 0
-      }) {
-        return Err(io::Error::other("termination descriptor failed"));
-      }
-      if fds[0].revents & libc::POLLIN != 0 {
-        self.consume()?;
-      }
+  pub async fn wait(&self, duration: Duration) -> io::Result<()> {
+    if self.ready.get().is_none() {
+      let ready = crate::readiness::Readable::new(
+        self.as_fd().try_clone_to_owned()?,
+      )?;
+      let _ = self.ready.set(ready);
     }
-    Ok(())
-  }
-
-  pub fn block_worker() -> io::Result<()> {
-    let mask = termination_mask();
-    let result = unsafe {
-      libc::pthread_sigmask(
-        libc::SIG_BLOCK,
-        &mask,
-        std::ptr::null_mut(),
-      )
-    };
-    if result != 0 {
-      return Err(io::Error::from_raw_os_error(result));
+    let ready = self.ready.get().unwrap();
+    tokio::select! {
+      result = ready.wait() => { result?; self.consume() },
+      () = self.shutdown.cancelled() => Ok(()),
+      () = tokio::time::sleep(duration) => Ok(()),
     }
-    Ok(())
   }
 }
 impl AsFd for Signals {

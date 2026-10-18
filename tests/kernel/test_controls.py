@@ -15,12 +15,14 @@ from tests.support.syscalls import command, ioctl
 from tests.support.video import Video
 
 
-def test_control_capture_minimum_is_readonly_eighteen_buffers(video: Video) -> None:
+def test_control_capture_minimum_starts_at_eighteen_and_is_readonly(
+    video: Video,
+) -> None:
     query = QueryControl(id=0x980927)
     assert (
         accepted(ioctl(video.fd, command(3, "V", 36, ctypes.sizeof(query)), query)) == 0
     )
-    assert (query.minimum, query.maximum, query.default, query.step) == (18, 18, 18, 1)
+    assert (query.minimum, query.maximum, query.default, query.step) == (18, 32, 18, 1)
     assert query.flags & 4
     value = Control(id=query.id)
     assert (

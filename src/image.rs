@@ -16,12 +16,54 @@ pub enum Depth {
 #[derive(Clone, Copy, Debug)]
 pub struct Plane<'a> {
   fd: BorrowedFd<'a>,
+  metadata:
+    Option<&'a std::sync::OnceLock<crate::dma::system::Metadata>>,
+  known: Option<crate::dma::system::Metadata>,
   stride: u32,
   rows: u32,
 }
 impl<'a> Plane<'a> {
   pub fn new(fd: BorrowedFd<'a>, stride: u32, rows: u32) -> Self {
-    Self { fd, stride, rows }
+    Self { fd, stride, rows, metadata: None, known: None }
+  }
+
+  pub(crate) fn from_buffer(
+    buffer: &'a Buffer,
+    stride: u32,
+    rows: u32,
+  ) -> Self {
+    Self {
+      fd: buffer.as_fd(),
+      stride,
+      rows,
+      metadata: None,
+      known: Some(buffer.metadata()),
+    }
+  }
+
+  pub(crate) fn registered(
+    fd: BorrowedFd<'a>,
+    stride: u32,
+    rows: u32,
+    metadata: &'a std::sync::OnceLock<crate::dma::system::Metadata>,
+  ) -> Self {
+    Self { fd, stride, rows, metadata: Some(metadata), known: None }
+  }
+
+  pub(crate) fn metadata(
+    self,
+  ) -> std::io::Result<crate::dma::system::Metadata> {
+    if let Some(known) = self.known {
+      return Ok(known);
+    }
+    if let Some(cache) = self.metadata {
+      if let Some(value) = cache.get() {
+        return Ok(*value);
+      }
+      let value = crate::dma::system::metadata(self.fd)?;
+      return Ok(*cache.get_or_init(|| value));
+    }
+    crate::dma::system::metadata(self.fd)
   }
 
   pub fn fd(self) -> BorrowedFd<'a> {
@@ -48,6 +90,6 @@ impl Image {
   }
 
   pub fn plane(&self) -> Plane<'_> {
-    Plane::new(self.buffer.as_fd(), self.stride, self.rows)
+    Plane::from_buffer(&self.buffer, self.stride, self.rows)
   }
 }

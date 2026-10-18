@@ -1,4 +1,4 @@
-//! module: service::worker_tests; responsibility: define the
+//! module: service::scheduler_tests; responsibility: define the
 //! corresponding public module contract. operations: Rust test
 //! entrypoints; entities: Observed, Control, Decoder; tests:
 //! test_run_requested_shutdown_does_not_exchange
@@ -23,7 +23,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 
-use super::worker::{Channel, Engine, run};
+use super::scheduler::{Channel, Engine, run};
 use crate::dma::Buffer;
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
@@ -38,6 +38,7 @@ struct Observed {
   pools: Vec<u32>,
   waits: usize,
   steps: usize,
+  advances: usize,
   dropped: bool,
 }
 struct Control {
@@ -74,9 +75,10 @@ impl Channel for Control {
     Pool::new(direction, id, vec![Buffer::allocate(4096)?])
   }
 
-  fn wait(
+  async fn wait(
     &mut self,
     _notify: &Notify,
+    _notification: &crate::readiness::Readable,
     _shutdown: &Shutdown,
   ) -> io::Result<bool> {
     self.seen.borrow_mut().waits += 1;
@@ -91,16 +93,23 @@ struct Decoder {
   seen: Rc<RefCell<Observed>>,
 }
 impl Engine for Decoder {
+  async fn close(self) -> io::Result<()> {
+    drop(self);
+    Ok(())
+  }
+
   fn notification(&self) -> Notify {
     self.notify.clone()
   }
 
-  fn register(&mut self, pool: Pool) -> io::Result<()> {
-    self.seen.borrow_mut().pools.push(pool.into_parts().1);
-    Ok(())
-  }
-
-  fn event(&mut self, command: Command) -> io::Result<()> {
+  fn submit(
+    &mut self,
+    command: Command,
+    pool: Option<Pool>,
+  ) -> io::Result<()> {
+    if let Some(pool) = pool {
+      self.seen.borrow_mut().pools.push(pool.into_parts().1);
+    }
     self.seen.borrow_mut().events.push(*command.message());
     if self.event_error {
       Err(io::Error::other("event rejected"))
@@ -109,9 +118,21 @@ impl Engine for Decoder {
     }
   }
 
-  fn step(&mut self) -> io::Result<bool> {
-    self.seen.borrow_mut().steps += 1;
-    self.steps.pop_front().unwrap_or(Ok(false))
+  async fn advance(&mut self) -> io::Result<bool> {
+    self.seen.borrow_mut().advances += 1;
+    let mut progressed = false;
+    for _ in 0..4 {
+      self.seen.borrow_mut().steps += 1;
+      progressed = self.steps.pop_front().unwrap_or(Ok(false))?;
+      if !progressed {
+        break;
+      }
+    }
+    Ok(progressed)
+  }
+
+  async fn wait(&self) -> io::Result<()> {
+    std::future::pending().await
   }
 
   fn take_reply(&mut self) -> Option<Message> {
@@ -166,33 +187,39 @@ fn close() -> io::Result<Batch> {
   Ok(batch(&[message(Event::Close as u32, 0)]))
 }
 
-#[test]
-fn test_run_requested_shutdown_does_not_exchange() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_requested_shutdown_does_not_exchange() {
   let (mut control, engine, seen) = fixture(vec![]);
   let signals = Signals::install().unwrap();
   signals.shutdown().request();
   assert_eq!(
-    run(&mut control, engine, &signals.shutdown()).unwrap().exchanges,
+    run(&mut control, engine, &signals.shutdown())
+      .await
+      .unwrap()
+      .exchanges,
     0
   );
   assert!(seen.borrow().replies.is_empty() && seen.borrow().dropped);
 }
-#[test]
-fn test_run_close_drops_decoder_without_delivering_close_to_engine() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_close_drops_decoder_without_delivering_close_to_engine()
+ {
   let (mut control, engine, seen) = fixture(vec![close()]);
   let signals = Signals::install().unwrap();
-  let stats = run(&mut control, engine, &signals.shutdown()).unwrap();
+  let stats =
+    run(&mut control, engine, &signals.shutdown()).await.unwrap();
   assert_eq!((stats.exchanges, stats.events), (1, 1));
   assert!(seen.borrow().events.is_empty() && seen.borrow().dropped);
 }
-#[test]
-fn test_run_reuses_registered_pool_and_batches_ordered_replies() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_reuses_registered_pool_and_batches_ordered_replies() {
   let packet = message(Event::Packet as u32, 7);
   let (mut control, mut engine, seen) =
     fixture(vec![Ok(batch(&[packet, packet])), close()]);
   engine.replies = vec![message(Reply::InputDone as u32, 7); 2].into();
   let signals = Signals::install().unwrap();
-  let stats = run(&mut control, engine, &signals.shutdown()).unwrap();
+  let stats =
+    run(&mut control, engine, &signals.shutdown()).await.unwrap();
   assert_eq!(
     (stats.registrations, stats.replies, stats.max_replies),
     (1, 2, 2)
@@ -200,10 +227,11 @@ fn test_run_reuses_registered_pool_and_batches_ordered_replies() {
   let seen = seen.borrow();
   assert_eq!(seen.pools, vec![7]);
   assert_eq!(seen.events.len(), 2);
+  assert_eq!(seen.advances, 1);
   assert_eq!(seen.replies[1].len(), 2);
 }
-#[test]
-fn test_run_capture_reset_replaces_capture_registration_only() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_capture_reset_replaces_capture_registration_only() {
   let mut reset = message(Event::Reset as u32, 0);
   reset.flags = Message::RESET_CAPTURE_ONLY;
   let events = [
@@ -218,14 +246,15 @@ fn test_run_capture_reset_replaces_capture_registration_only() {
   let signals = Signals::install().unwrap();
   assert_eq!(
     run(&mut control, engine, &signals.shutdown())
+      .await
       .unwrap()
       .registrations,
     3
   );
   assert_eq!(seen.borrow().pools, vec![1, 2, 2]);
 }
-#[test]
-fn test_run_full_reset_replaces_both_registrations() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_full_reset_replaces_both_registrations() {
   let events = [
     message(Event::Packet as u32, 1),
     message(Event::Capture as u32, 2),
@@ -238,14 +267,15 @@ fn test_run_full_reset_replaces_both_registrations() {
   let signals = Signals::install().unwrap();
   assert_eq!(
     run(&mut control, engine, &signals.shutdown())
+      .await
       .unwrap()
       .registrations,
     4
   );
   assert_eq!(seen.borrow().pools, vec![1, 2, 1, 2]);
 }
-#[test]
-fn test_run_splits_more_than_one_batch_without_reordering() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_splits_more_than_one_batch_without_reordering() {
   let (mut control, mut engine, seen) =
     fixture(vec![Ok(batch(&[])), Ok(batch(&[])), close()]);
   engine.replies = (0..17)
@@ -255,7 +285,8 @@ fn test_run_splits_more_than_one_batch_without_reordering() {
     })
     .collect();
   let signals = Signals::install().unwrap();
-  let stats = run(&mut control, engine, &signals.shutdown()).unwrap();
+  let stats =
+    run(&mut control, engine, &signals.shutdown()).await.unwrap();
   assert_eq!((stats.replies, stats.max_replies), (17, 16));
   let seen = seen.borrow();
   assert_eq!((seen.replies[1].len(), seen.replies[2].len()), (16, 1));
@@ -264,31 +295,36 @@ fn test_run_splits_more_than_one_batch_without_reordering() {
     (0..17).collect::<Vec<_>>()
   );
 }
-#[test]
-fn test_run_full_event_batch_fetches_again_without_wait() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_full_event_batch_fetches_again_without_wait() {
   let events = [message(Event::Resume as u32, 0); 16];
   let (mut control, engine, seen) =
     fixture(vec![Ok(batch(&events)), close()]);
   let signals = Signals::install().unwrap();
   assert_eq!(
-    run(&mut control, engine, &signals.shutdown()).unwrap().max_events,
+    run(&mut control, engine, &signals.shutdown())
+      .await
+      .unwrap()
+      .max_events,
     16
   );
   assert_eq!(seen.borrow().waits, 0);
 }
-#[test]
-fn test_run_bounded_progress_yields_to_control_after_four_steps() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_bounded_progress_yields_to_control_after_four_steps()
+{
   let (mut control, mut engine, seen) = fixture(vec![
     Ok(batch(&[message(Event::Resume as u32, 0)])),
     close(),
   ]);
   engine.steps = (0..8).map(|_| Ok(true)).collect();
   let signals = Signals::install().unwrap();
-  run(&mut control, engine, &signals.shutdown()).unwrap();
+  run(&mut control, engine, &signals.shutdown()).await.unwrap();
   assert_eq!(seen.borrow().steps, 4);
+  assert_eq!(seen.borrow().advances, 1);
 }
-#[test]
-fn test_run_stale_and_disconnected_registration_skip_event() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_stale_and_disconnected_registration_skip_event() {
   for error in [libc::ESTALE, libc::EPIPE] {
     let (mut control, engine, seen) = fixture(vec![
       Ok(batch(&[message(Event::Packet as u32, 1)])),
@@ -298,6 +334,7 @@ fn test_run_stale_and_disconnected_registration_skip_event() {
     let signals = Signals::install().unwrap();
     assert_eq!(
       run(&mut control, engine, &signals.shutdown())
+        .await
         .unwrap()
         .registrations,
       0
@@ -305,22 +342,24 @@ fn test_run_stale_and_disconnected_registration_skip_event() {
     assert!(seen.borrow().events.is_empty());
   }
 }
-#[test]
-fn test_run_exchange_disconnect_finishes_without_failed_reply() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_exchange_disconnect_finishes_without_failed_reply() {
   let (mut control, engine, seen) =
     fixture(vec![Err(io::Error::from_raw_os_error(libc::EPIPE))]);
   let signals = Signals::install().unwrap();
-  run(&mut control, engine, &signals.shutdown()).unwrap();
+  run(&mut control, engine, &signals.shutdown()).await.unwrap();
   assert_eq!(seen.borrow().replies.len(), 1);
 }
-#[test]
-fn test_run_invalid_event_version_sends_failed_after_decoder_drop() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_invalid_event_version_sends_failed_after_decoder_drop()
+ {
   let mut event = message(Event::Packet as u32, 1);
   event.version += 1;
   let (mut control, engine, seen) = fixture(vec![Ok(batch(&[event]))]);
   let signals = Signals::install().unwrap();
   assert!(
     run(&mut control, engine, &signals.shutdown())
+      .await
       .unwrap_err()
       .contains("version")
   );
@@ -331,8 +370,8 @@ fn test_run_invalid_event_version_sends_failed_after_decoder_drop() {
     Reply::Failed as u32
   );
 }
-#[test]
-fn test_run_reply_errors_reject_invalid_and_tolerate_stale_or_disconnect()
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_reply_errors_reject_invalid_and_tolerate_stale_or_disconnect()
  {
   for status in [-libc::EINVAL, -libc::ESTALE, -libc::EPIPE] {
     let mut response = batch(&[]);
@@ -342,18 +381,19 @@ fn test_run_reply_errors_reject_invalid_and_tolerate_stale_or_disconnect()
     engine.replies.push_back(message(Reply::InputDone as u32, 1));
     let signals = Signals::install().unwrap();
     assert_eq!(
-      run(&mut control, engine, &signals.shutdown()).is_ok(),
+      run(&mut control, engine, &signals.shutdown()).await.is_ok(),
       status != -libc::EINVAL
     );
   }
 }
-#[test]
-fn test_run_backpressure_overflow_sends_failed_reply() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_backpressure_overflow_sends_failed_reply() {
   let (mut control, mut engine, seen) = fixture(vec![Ok(batch(&[]))]);
   engine.replies = vec![message(Reply::InputDone as u32, 1); 65].into();
   let signals = Signals::install().unwrap();
   assert!(
     run(&mut control, engine, &signals.shutdown())
+      .await
       .unwrap_err()
       .contains("backpressure")
   );
@@ -362,24 +402,26 @@ fn test_run_backpressure_overflow_sends_failed_reply() {
     Reply::Failed as u32
   );
 }
-#[test]
-fn test_run_interrupted_wait_retries_without_losing_control_fetch() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_interrupted_wait_retries_without_losing_control_fetch()
+ {
   let (mut control, engine, seen) =
     fixture(vec![Ok(batch(&[])), close()]);
   control.waits =
     vec![Err(io::Error::from_raw_os_error(libc::EINTR)), Ok(true)]
       .into();
   let signals = Signals::install().unwrap();
-  run(&mut control, engine, &signals.shutdown()).unwrap();
+  run(&mut control, engine, &signals.shutdown()).await.unwrap();
   assert_eq!(seen.borrow().waits, 2);
 }
-#[test]
-fn test_run_wait_error_sends_failed_reply() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_wait_error_sends_failed_reply() {
   let (mut control, engine, seen) = fixture(vec![Ok(batch(&[]))]);
   control.waits.push_back(Err(io::Error::from_raw_os_error(libc::EIO)));
   let signals = Signals::install().unwrap();
   assert!(
     run(&mut control, engine, &signals.shutdown())
+      .await
       .unwrap_err()
       .contains("wait")
   );
@@ -388,26 +430,28 @@ fn test_run_wait_error_sends_failed_reply() {
     Reply::Failed as u32
   );
 }
-#[test]
-fn test_run_backend_event_failure_preserves_failure_context() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_backend_event_failure_preserves_failure_context() {
   let (mut control, mut engine, seen) =
     fixture(vec![Ok(batch(&[message(Event::Resume as u32, 0)]))]);
   engine.event_error = true;
   let signals = Signals::install().unwrap();
   assert!(
     run(&mut control, engine, &signals.shutdown())
+      .await
       .unwrap_err()
       .contains("backend event")
   );
   assert_eq!(seen.borrow().replies.last().unwrap()[0].epoch, 1);
 }
-#[test]
-fn test_run_backend_progress_error_sends_failed_reply() {
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_backend_progress_error_sends_failed_reply() {
   let (mut control, mut engine, seen) = fixture(vec![Ok(batch(&[]))]);
   engine.steps.push_back(Err(io::Error::other("decode failed")));
   let signals = Signals::install().unwrap();
   assert!(
     run(&mut control, engine, &signals.shutdown())
+      .await
       .unwrap_err()
       .contains("backend progress")
   );
@@ -417,8 +461,8 @@ fn test_run_backend_progress_error_sends_failed_reply() {
   );
 }
 
-#[test]
-fn test_run_rejects_reserved_before_close_registration_or_engine_mutation()
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_rejects_reserved_before_close_registration_or_engine_mutation()
  {
   for kind in [
     Event::Packet,
@@ -434,7 +478,9 @@ fn test_run_rejects_reserved_before_close_registration_or_engine_mutation()
     let (mut control, engine, seen) =
       fixture(vec![Ok(batch(&[invalid]))]);
     let signals = Signals::install().unwrap();
-    assert!(run(&mut control, engine, &signals.shutdown()).is_err());
+    assert!(
+      run(&mut control, engine, &signals.shutdown()).await.is_err()
+    );
     let seen = seen.borrow();
     assert!(seen.events.is_empty() && seen.pools.is_empty());
     assert!(seen.dropped);
@@ -444,4 +490,17 @@ fn test_run_rejects_reserved_before_close_registration_or_engine_mutation()
     assert_eq!(failed[0].reserved, [0]);
     assert_eq!(failed[0].epoch, invalid.epoch);
   }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_waits_after_consumed_events_when_engine_has_no_runnable_work()
+ {
+  let (mut control, engine, seen) = fixture(vec![
+    Ok(batch(&[message(Event::Resume as u32, 0)])),
+    close(),
+  ]);
+  let signals = Signals::install().unwrap();
+  run(&mut control, engine, &signals.shutdown()).await.unwrap();
+  assert_eq!(seen.borrow().advances, 1);
+  assert_eq!(seen.borrow().waits, 1);
 }

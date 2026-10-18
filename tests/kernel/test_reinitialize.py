@@ -54,6 +54,7 @@ def test_full_cleanup_reinitializes_same_fd_with_isolated_service_endpoint(
             layout = Message(
                 version=VERSION,
                 kind=Reply.LAYOUT,
+                count=18,
                 epoch=packet.epoch,
                 width=128,
                 height=64,

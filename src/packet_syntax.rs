@@ -74,3 +74,8 @@ mod hevc_tests;
 pub(crate) mod unit;
 #[cfg(test)]
 mod unit_tests;
+
+pub(crate) mod header;
+
+#[cfg(test)]
+mod header_tests;

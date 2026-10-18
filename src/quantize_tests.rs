@@ -216,3 +216,59 @@ fn test_convert_first_gpu_write_is_visible_in_never_cpu_mapped_oversized_output(
     assert!(pixels[..256 * 128 * 3 / 2].iter().all(|&v| v == 128));
   }
 }
+
+// Tests synchronously observe completion through the public submission
+// API.
+trait Complete {
+  fn convert(
+    &mut self,
+    depth: Depth,
+    width: u32,
+    height: u32,
+    source: Plane<'_>,
+    destination: Plane<'_>,
+  ) -> std::io::Result<()>;
+}
+impl Complete for Quantizer {
+  fn convert(
+    &mut self,
+    depth: Depth,
+    width: u32,
+    height: u32,
+    source: Plane<'_>,
+    destination: Plane<'_>,
+  ) -> std::io::Result<()> {
+    self.submit(depth, width, height, source, destination)?;
+    while !self.finish()? {
+      std::thread::sleep(std::time::Duration::from_micros(100));
+    }
+    Ok(())
+  }
+}
+
+#[test]
+fn test_submit_drop_waits_for_started_gpu_work_before_releasing_imports()
+ {
+  let source = Buffer::allocate(4096).unwrap();
+  let target = Buffer::allocate(4096).unwrap();
+  source.write().unwrap().fill(37);
+  target.write().unwrap().fill(0);
+  let mut quantizer = Quantizer::new().unwrap();
+  quantizer
+    .submit(
+      Depth::Eight,
+      32,
+      32,
+      Plane::new(source.as_fd(), 32, 32),
+      Plane::new(target.as_fd(), 32, 32),
+    )
+    .unwrap();
+  // Both CPU producers have completed. finish advances dependency
+  // acquisition and submits GPU work; its return may be either
+  // pending or complete.
+  let _complete = quantizer.finish().unwrap();
+  drop(quantizer);
+  assert!(
+    target.read().unwrap()[..1536].iter().all(|value| *value == 37)
+  );
+}

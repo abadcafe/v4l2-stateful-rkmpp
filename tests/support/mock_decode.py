@@ -89,7 +89,10 @@ class _Stream:
         natural_sequences: int,
         capture_count: int,
         sources: tuple[int, ...],
+        capture_delay: int,
     ) -> None:
+        self._capture_delay: int = capture_delay
+        self._held_capture: deque[int] = deque()
         self._natural_remaining: int = natural_sequences
         self._capture_count: int = capture_count
         self._sources: tuple[int, ...] = sources
@@ -116,8 +119,9 @@ class _Stream:
         self._layout: Message | None = None
         self._frames: list[Frame] = []
         self._layouts: list[tuple[int, int]] = []
-        self._inflight: set[int] = set()
-        self._available: set[int] = set()
+        self._inflight: dict[int, int] = {}
+        self._available: dict[int, int] = {}
+        self._capture_serial: int = 0
         self._draining: bool = False
         self._replacing: bool = False
         self._eos: bool = False
@@ -160,7 +164,7 @@ class _Stream:
         if isinstance(written, Rejected):
             return written
         self._next += 1
-        self._inflight.add(index)
+        self._inflight[index] = self._next
         self._input_timestamps[index] = packet.timestamp * 1000
         self._events.append(
             self._event(
@@ -175,18 +179,23 @@ class _Stream:
         )
         return Ok(None)
 
+    def _recycle(self, index: int) -> Message:
+        self._capture_serial += 1
+        self._available[index] = self._capture_serial
+        return self._event(Event.RECYCLE, index, count=self._capture_serial)
+
     def _prepare_capture(self, size: int) -> Result[None]:
+        self._held_capture.clear()
         self._capture = []
-        for _ in range(self._capture_count):
+        minimum = self._layout.count if self._layout is not None else 18
+        for _ in range(max(self._capture_count, minimum)):
             buffer = Buffer.allocate(size)
             if isinstance(buffer, Rejected):
                 return buffer
             self._capture.append(self._owned.enter_context(buffer.value))
-        self._available = set(range(len(self._capture)))
+        self._available.clear()
         self._events.append(self._event(Event.CAPTURE, count=len(self._capture)))
-        self._events.extend(
-            self._event(Event.RECYCLE, index) for index in self._available
-        )
+        self._events.extend(self._recycle(index) for index in range(len(self._capture)))
         return Ok(None)
 
     def _register(self, request: Request) -> Response:
@@ -221,9 +230,11 @@ class _Stream:
             return Rejected(errno.EPROTO, "service reply version or epoch changed")
         self._reply_order.append(message.kind)
         if message.kind == Reply.INPUT_DONE:
-            if message.pool_id != self._input_id or message.index not in self._inflight:
+            if message.pool_id != self._input_id or message.count != self._inflight.get(
+                message.index
+            ):
                 return Rejected(errno.EPROTO, "service completed an unowned input")
-            self._inflight.remove(message.index)
+            _ = self._inflight.pop(message.index)
             self._input_completions.append(
                 InputCompletion(
                     index=message.index,
@@ -242,6 +253,7 @@ class _Stream:
             if (
                 replacing
                 and self._reuse_capture
+                and len(self._capture) >= message.count
                 and all(buffer.size >= message.size for buffer in self._capture)
             ):
                 self._events = deque(
@@ -251,7 +263,8 @@ class _Stream:
                     self._event(Event.CAPTURE, count=len(self._capture), flags=1)
                 )
                 self._events.extend(
-                    self._event(Event.RECYCLE, index) for index in self._available
+                    self._event(Event.RECYCLE, index, count=token)
+                    for index, token in self._available.items()
                 )
                 return Ok(None)
             self._capture_id += 1
@@ -301,7 +314,7 @@ class _Stream:
                 layout is None
                 or message.pool_id != self._capture_id
                 or message.generation != self._generation
-                or message.index not in self._available
+                or message.count != self._available.get(message.index)
                 or (
                     message.bytesused != layout.stride * layout.rows * 3 // 2
                     and not (message.bytesused == 0 and message.flags & 2)
@@ -310,13 +323,12 @@ class _Stream:
                 return Rejected(
                     errno.EPROTO, "service completed an unowned capture slot"
                 )
-            self._available.remove(message.index)
+            _ = self._available.pop(message.index)
             if message.bytesused == 0:
                 self._errors.append(
                     DecodeError(timestamp=message.timestamp, flags=message.flags)
                 )
-                self._available.add(message.index)
-                self._events.append(self._event(Event.RECYCLE, message.index))
+                self._events.append(self._recycle(message.index))
                 return Ok(None)
             pixels = i420(
                 self._capture[message.index].fd,
@@ -344,7 +356,6 @@ class _Stream:
                     quantization=layout.quantization,
                 )
             )
-            self._available.add(message.index)
             if self._draining and self._abort_drain:
                 self._abort_drain = False
                 self._drain_at = 0
@@ -366,7 +377,10 @@ class _Stream:
                 )
                 self._events.append(self._event(Event.RESET, flags=9 | (1 << 16)))
             elif not self._ordinary_restart:
-                self._events.append(self._event(Event.RECYCLE, message.index))
+                self._held_capture.append(message.index)
+                if len(self._held_capture) > self._capture_delay:
+                    index = self._held_capture.popleft()
+                    self._events.append(self._recycle(index))
             return Ok(None)
         if message.kind == Reply.DRAINING:
             self._draining = True
@@ -504,6 +518,7 @@ def play(
     natural_sequences: int = 1,
     capture_count: int = 18,
     sources: tuple[int, ...] = (),
+    capture_delay: int = 0,
 ) -> Result[Decoded]:
     if not 1 <= repetitions <= 32:
         return Rejected(errno.EINVAL, "invalid decode repetition count")
@@ -525,6 +540,8 @@ def play(
         )
     if not 18 <= capture_count <= 32:
         return Rejected(errno.EINVAL, "invalid capture buffer count")
+    if not 0 <= capture_delay < capture_count:
+        return Rejected(errno.EINVAL, "invalid capture return delay")
     if not sources:
         sources = (0,) * len(chunks)
     if len(sources) != len(chunks) or any(s not in (0, 0x10000) for s in sources):
@@ -548,4 +565,5 @@ def play(
             natural_sequences,
             capture_count,
             sources,
+            capture_delay,
         ).run(process)

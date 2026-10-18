@@ -7,8 +7,10 @@ use std::io;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
+mod access;
+#[cfg(test)]
+mod access_tests;
 pub(crate) mod system;
 #[cfg(test)]
 mod system_tests;
@@ -17,7 +19,7 @@ mod system_tests;
 // Weak entries do not extend storage lifetime; import serializes lookup
 // and insertion so dup/reopened descriptors cannot create competing
 // locks.
-type StorageLeases = BTreeMap<(u64, u64), Weak<AtomicBool>>;
+type StorageLeases = BTreeMap<(u64, u64), Weak<access::State>>;
 static STORAGE_LEASES: LazyLock<Mutex<StorageLeases>> =
   LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
@@ -25,7 +27,8 @@ static STORAGE_LEASES: LazyLock<Mutex<StorageLeases>> =
 struct Allocation {
   fd: OwnedFd,
   size: usize,
-  cpu_busy: Arc<AtomicBool>,
+  metadata: system::Metadata,
+  cpu_busy: Arc<access::State>,
 }
 #[derive(Clone, Debug)]
 pub struct Buffer(Arc<Allocation>);
@@ -60,15 +63,24 @@ impl Buffer {
       .get(&identity)
       .and_then(Weak::upgrade)
       .unwrap_or_else(|| {
-        let lease = Arc::new(AtomicBool::new(false));
+        let lease = Arc::new(access::State::default());
         leases.insert(identity, Arc::downgrade(&lease));
         lease
       });
-    Ok(Self(Arc::new(Allocation { fd, size, cpu_busy })))
+    Ok(Self(Arc::new(Allocation {
+      fd,
+      size,
+      metadata: stat,
+      cpu_busy,
+    })))
   }
 
   pub(crate) fn same_storage(&self, other: &Self) -> bool {
     Arc::ptr_eq(&self.0.cpu_busy, &other.0.cpu_busy)
+  }
+
+  pub(crate) fn metadata(&self) -> system::Metadata {
+    self.0.metadata
   }
 
   pub fn size(&self) -> usize {
@@ -88,63 +100,26 @@ impl Buffer {
   }
 
   fn begin(&self, write: bool) -> io::Result<CpuAccess> {
-    if self
-      .0
-      .cpu_busy
-      .compare_exchange(
-        false,
-        true,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-      )
-      .is_err()
-    {
-      return Err(io::Error::new(
-        io::ErrorKind::WouldBlock,
-        "DMA buffer already has a CPU access lease",
-      ));
-    }
-    if let Err(error) = system::sync(self.as_fd(), true, write) {
-      self.0.cpu_busy.store(false, Ordering::Release);
-      return Err(error);
-    }
-    Ok(CpuAccess::new(self.clone(), write))
-  }
-
-  fn end(&self, write: bool) -> io::Result<()> {
-    let result = system::sync(self.as_fd(), false, write);
-    self.0.cpu_busy.store(false, Ordering::Release);
-    result
+    access::Lease::new(self.clone(), write)
   }
 }
+impl access::Owner for Buffer {
+  fn state(&self) -> &access::State {
+    &self.0.cpu_busy
+  }
+
+  fn synchronize(&self, start: bool, write: bool) -> io::Result<()> {
+    system::sync(self.as_fd(), start, write)
+  }
+}
+
 impl AsFd for Buffer {
   fn as_fd(&self) -> BorrowedFd<'_> {
     self.0.fd.as_fd()
   }
 }
 
-pub(crate) struct CpuAccess {
-  buffer: Buffer,
-  write: bool,
-  active: bool,
-}
-impl CpuAccess {
-  fn new(buffer: Buffer, write: bool) -> Self {
-    Self { buffer, write, active: true }
-  }
-
-  pub(crate) fn finish(mut self) -> io::Result<()> {
-    self.active = false;
-    self.buffer.end(self.write)
-  }
-}
-impl Drop for CpuAccess {
-  fn drop(&mut self) {
-    if self.active {
-      let _ = self.buffer.end(self.write);
-    }
-  }
-}
+pub(crate) type CpuAccess = access::Lease<Buffer>;
 struct Map {
   buffer: Buffer,
   ptr: NonNull<u8>,

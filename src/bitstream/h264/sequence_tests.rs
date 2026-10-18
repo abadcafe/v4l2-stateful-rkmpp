@@ -84,7 +84,8 @@ fn sequence(
 }
 #[test]
 fn test_parse_unifies_geometry_reference_and_order_parameters() {
-  use super::sequence::{PictureOrder, parse};
+  use super::poc::Parameters;
+  use super::sequence::parse;
   for profile in [66, 100] {
     for poc in 0..3 {
       for frame in [false, true] {
@@ -99,14 +100,10 @@ fn test_parse_unifies_geometry_reference_and_order_parameters() {
             (s.frame_bits, s.maximum, s.gaps_allowed),
             (8, 4, gaps)
           );
-          assert_eq!(
-            (s.frame_only, s.separate, s.chroma),
-            (frame, false, 1)
-          );
-          match (poc, s.order) {
-            (0, PictureOrder::Lsb(10))
-            | (1, PictureOrder::Delta { always_zero: true })
-            | (2, PictureOrder::FrameNumber) => {}
+          match (poc, s.poc) {
+            (0, Parameters::Lsb(10))
+            | (1, Parameters::Delta { .. })
+            | (2, Parameters::FrameNumber) => {}
             _ => panic!("wrong parsed POC mode"),
           }
           assert_eq!(s.geometry.limits.capacity(), 16);

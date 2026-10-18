@@ -30,6 +30,7 @@ from tests.support.stream import Codec, load
     ],
 )
 @pytest.mark.parametrize("capture_count", [18, 32])
+@pytest.mark.parametrize("capture_delay", [0, 2])
 def test_decode_all_pixels_timestamps_color_and_eos_use_mock_kernel(
     executable: Path,
     artifacts: Path,
@@ -41,6 +42,7 @@ def test_decode_all_pixels_timestamps_color_and_eos_use_mock_kernel(
     height: int,
     count: int,
     capture_count: int,
+    capture_delay: int,
 ) -> None:
     expected = accepted(frame_hashes(artifacts / file, depth, width, height))
     library = (
@@ -48,9 +50,23 @@ def test_decode_all_pixels_timestamps_color_and_eos_use_mock_kernel(
     )
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         result = accepted(
-            play(process, codec, artifacts / file, capture_count=capture_count)
+            play(
+                process,
+                codec,
+                artifacts / file,
+                capture_count=capture_count,
+                capture_delay=capture_delay,
+            )
         )
         assert result.eos and len(result.frames) == count
+        # Stable-layout decoding must never spill pixels to auxiliary
+        # surfaces. Ten-bit input has exactly one quantization per display;
+        # eight-bit input is delivered from its registered CAPTURE storage.
+        direct, quantized = (count, 0) if depth == 8 else (0, count)
+        assert (
+            f"direct={direct} quantized={quantized} unregistered_copy=0 "
+            "held_copy=0 foreign_copy=0"
+        ) in process.log()
         assert result.registrations == ((10, 1), (9, 1))
         assert 0 < result.maximum_reply_batch <= 16
         if count > 1:

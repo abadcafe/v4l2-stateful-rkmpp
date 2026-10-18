@@ -9,8 +9,8 @@ pub(super) struct Message {
   pub kind: u32,
   pub payload: Vec<u8>,
 }
-pub(super) struct Messages {
-  bits: Bits,
+pub(super) struct Messages<'a> {
+  bits: Bits<'a>,
   finished: bool,
 }
 fn extended(bits: &mut Bits) -> io::Result<u32> {
@@ -25,8 +25,8 @@ fn extended(bits: &mut Bits) -> io::Result<u32> {
     }
   }
 }
-impl Messages {
-  pub(super) fn new(data: &[u8]) -> Self {
+impl<'a> Messages<'a> {
+  pub(super) fn new(data: &'a [u8]) -> Self {
     Self { bits: Bits::new(data), finished: false }
   }
 

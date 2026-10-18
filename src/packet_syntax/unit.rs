@@ -9,13 +9,21 @@ pub(crate) enum Boundary {
   Stream,
 }
 pub(crate) struct Unit {
+  pub prefix: usize,
+  pub header: Option<super::header::Header>,
   pub range: std::ops::Range<usize>,
   pub display: bool,
   pub boundary: Option<Boundary>,
 }
 impl Unit {
   pub(super) fn annexb(size: usize) -> Self {
-    Self { range: 0..size, display: true, boundary: None }
+    Self {
+      prefix: size,
+      header: None,
+      range: 0..size,
+      display: true,
+      boundary: None,
+    }
   }
 
   pub(super) fn sequence_end(

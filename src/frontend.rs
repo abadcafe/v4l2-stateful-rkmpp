@@ -22,7 +22,7 @@ pub(crate) struct Frontend {
   codec: Codec,
   fourcc: u32,
   serial: u64,
-  metadata: Vec<u8>,
+  metadata: crate::submission::Prefix,
 }
 impl Frontend {
   pub(crate) fn new(fourcc: u32) -> io::Result<Self> {
@@ -32,7 +32,12 @@ impl Frontend {
       }
       _ => Codec::Framed(crate::packet_syntax::Validator::new(fourcc)?),
     };
-    Ok(Self { codec, fourcc, serial: 0, metadata: Vec::new() })
+    Ok(Self {
+      codec,
+      fourcc,
+      serial: 0,
+      metadata: crate::submission::Prefix::default(),
+    })
   }
 
   pub(crate) fn admit(
@@ -41,21 +46,14 @@ impl Frontend {
     timestamp: u64,
     source: Source,
   ) -> io::Result<Admission> {
-    let admission = self.inspect(bytes, timestamp, source)?;
-    if admission.tasks.iter().any(|task| {
-      let size = match &task.payload {
-        Payload::Input(range) => range.len(),
-        Payload::Owned(bytes) => bytes.len(),
-      };
-      size > crate::submission::MAX_PACKET_SIZE
-    }) {
+    let result = self.inspect(bytes, timestamp, source);
+    // Annex B owns its metadata/recovery transaction in Parser. Framed
+    // codecs retain metadata here, so reset that whole transaction on
+    // any rejected submission, not only on assembled-task overflow.
+    if result.is_err() && matches!(self.codec, Codec::Framed(_)) {
       self.seek()?;
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "compressed task including metadata exceeds input limit",
-      ));
     }
-    Ok(admission)
+    result
   }
 
   fn inspect(
@@ -83,20 +81,15 @@ impl Frontend {
         Ok(Admission { tasks, end: report.end })
       }
       Codec::Framed(validator) => {
+        if bytes.len() > crate::submission::MAX_PACKET_SIZE {
+          return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compressed input exceeds limit",
+          ));
+        }
         let ranges = validator.validate(bytes)?;
         if ranges.is_empty() {
-          if self
-            .metadata
-            .len()
-            .checked_add(bytes.len())
-            .is_none_or(|n| n > crate::submission::MAX_PACKET_SIZE)
-          {
-            return Err(io::Error::new(
-              io::ErrorKind::InvalidData,
-              "metadata prefix exceeds input limit",
-            ));
-          }
-          self.metadata.extend_from_slice(bytes);
+          self.metadata.append(bytes)?;
         }
         let mut tasks = Vec::new();
         for unit in ranges {
@@ -117,13 +110,8 @@ impl Frontend {
             false,
             Output { display: unit.display, ..Output::default() },
           );
-          let payload = if self.metadata.is_empty() {
-            Payload::Input(unit.range)
-          } else {
-            let mut prefix = std::mem::take(&mut self.metadata);
-            prefix.extend_from_slice(&bytes[unit.range]);
-            Payload::Owned(prefix)
-          };
+          let payload =
+            self.metadata.compose(&[], bytes, unit.range)?;
           tasks.push(Task {
             payload,
             descriptor: Descriptor {

@@ -33,12 +33,15 @@ class Identity(BaseModel, frozen=True):
     control: Control
 
 
-class Snapshot(BaseModel, frozen=True):
+class Measurement(BaseModel, frozen=True):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
     protocol: int = Field(ge=1, le=1, strict=True)
     identity: Identity
     state: Literal["ready", "stopping"]
     cpu_seconds: float = Field(ge=0, allow_inf_nan=False)
+
+
+class Snapshot(Measurement, frozen=True):
     fds: int = Field(gt=0)
     threads: int = Field(gt=0)
     sessions: tuple[int, ...]
@@ -50,6 +53,16 @@ class _Failure(BaseModel):
 
 
 def query(endpoint: Path) -> Result[Snapshot]:
+    return _query(endpoint, b"snapshot\n", TypeAdapter(Snapshot | _Failure))
+
+
+def measure(endpoint: Path) -> Result[Measurement]:
+    return _query(endpoint, b"measure\n", TypeAdapter(Measurement | _Failure))
+
+
+def _query[T: Measurement](
+    endpoint: Path, request: bytes, schema: TypeAdapter[T | _Failure]
+) -> Result[T]:
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(1)
@@ -58,7 +71,7 @@ def query(endpoint: Path) -> Result[Snapshot]:
             pid, uid, _ = TypeAdapter(tuple[int, int, int]).validate_python(
                 struct.unpack("3i", credentials), strict=True
             )
-            client.sendall(b"snapshot\n")
+            client.sendall(request)
             response = bytearray()
             deadline = time.monotonic() + 1
             while len(response) <= 65536:
@@ -86,9 +99,7 @@ def query(endpoint: Path) -> Result[Snapshot]:
             "Diagnostics response is missing, truncated or exceeds the size limit",
         )
     try:
-        status = TypeAdapter(Snapshot | _Failure).validate_json(
-            bytes(response), strict=True
-        )
+        status = schema.validate_json(bytes(response), strict=True)
     except ValidationError as error:
         return Rejected(errno.EPROTO, f"Invalid service diagnostics response: {error}")
     if isinstance(status, _Failure):
@@ -98,8 +109,10 @@ def query(endpoint: Path) -> Result[Snapshot]:
             errno.EPROTO,
             "Diagnostics identity does not match kernel SO_PEERCRED credentials",
         )
-    if any(fd < 0 for fd in status.sessions) or len(set(status.sessions)) != len(
-        status.sessions
+    result: Result[T] = Ok(status)
+    if isinstance(status, Snapshot) and (
+        any(fd < 0 for fd in status.sessions)
+        or len(set(status.sessions)) != len(status.sessions)
     ):
         return Rejected(errno.EPROTO, "Invalid service session descriptors")
-    return Ok(status)
+    return result

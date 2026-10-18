@@ -10,6 +10,10 @@ use std::os::fd::{AsRawFd, IntoRawFd};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
+// Every adopt call below transfers descriptors produced by
+// into_raw_fd; malformed-header cases preserve that ownership
+// contract. Duplicate wire entries still represent only one
+// transferred OS descriptor.
 use super::registration::adopt;
 use crate::pool::Direction;
 use crate::protocol::VERSION;
@@ -66,7 +70,7 @@ fn test_adopt_registered_buffers_transfers_unique_owned_descriptors() {
   let wire = returned(MAX_BUFFERS);
   let first = wire.buffers[0].fd;
   let last = wire.buffers[MAX_BUFFERS - 1].fd;
-  let pool = adopt(wire, Direction::Output, 3, 7).unwrap();
+  let pool = unsafe { adopt(wire, Direction::Output, 3, 7) }.unwrap();
   let (direction, id, buffers) = pool.into_parts();
   assert_eq!(
     (direction, id, buffers.len()),
@@ -89,22 +93,24 @@ fn test_adopt_invalid_response_headers_close_exported_fds() {
       4 => wire.reserved[0] = 1,
       _ => wire.count = MAX_BUFFERS as u32 + 1,
     }
-    assert!(adopt(wire, Direction::Output, 3, 7).is_err());
+    assert!(unsafe { adopt(wire, Direction::Output, 3, 7) }.is_err());
     closed(peers);
   }
   assert!(
-    adopt(
-      Pool {
-        version: VERSION,
-        kind: 10,
-        epoch: 3,
-        pool_id: 7,
-        ..Default::default()
-      },
-      Direction::Output,
-      3,
-      7
-    )
+    unsafe {
+      adopt(
+        Pool {
+          version: VERSION,
+          kind: 10,
+          epoch: 3,
+          pool_id: 7,
+          ..Default::default()
+        },
+        Direction::Output,
+        3,
+        7,
+      )
+    }
     .is_err()
   );
 }
@@ -114,12 +120,12 @@ fn test_adopt_negative_and_duplicate_descriptors_close_other_exports() {
   let (mut wire, peers) = rejected(3);
   assert_eq!(unsafe { libc::close(wire.buffers[1].fd) }, 0);
   wire.buffers[1].fd = -1;
-  assert!(adopt(wire, Direction::Output, 3, 7).is_err());
+  assert!(unsafe { adopt(wire, Direction::Output, 3, 7) }.is_err());
   closed(peers);
   let (mut wire, peers) = rejected(2);
   assert_eq!(unsafe { libc::close(wire.buffers[1].fd) }, 0);
   wire.buffers[1].fd = wire.buffers[0].fd;
-  assert!(adopt(wire, Direction::Output, 3, 7).is_err());
+  assert!(unsafe { adopt(wire, Direction::Output, 3, 7) }.is_err());
   closed(peers);
 }
 
@@ -127,6 +133,6 @@ fn test_adopt_negative_and_duplicate_descriptors_close_other_exports() {
 fn test_adopt_undersized_buffer_closes_all_exports() {
   let (mut wire, peers) = rejected(2);
   wire.buffers[0].size = 8192;
-  assert!(adopt(wire, Direction::Output, 3, 7).is_err());
+  assert!(unsafe { adopt(wire, Direction::Output, 3, 7) }.is_err());
   closed(peers);
 }

@@ -30,13 +30,20 @@ impl<T> Default for Presentation<T> {
 }
 impl<T> Presentation<T> {
   fn occupancy(&self) -> usize {
-    self
-      .references
-      .iter()
-      .copied()
-      .chain(self.pictures.values().map(|p| p.id))
-      .collect::<BTreeSet<_>>()
-      .len()
+    self.references.len()
+      + self
+        .pictures
+        .values()
+        .enumerate()
+        .filter(|(index, p)| {
+          !self.references.contains(&p.id)
+            && !self
+              .pictures
+              .values()
+              .take(*index)
+              .any(|prior| prior.id == p.id)
+        })
+        .count()
   }
 
   fn bump(&mut self) -> bool {

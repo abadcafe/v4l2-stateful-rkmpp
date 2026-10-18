@@ -112,3 +112,14 @@ def sample(running: Running) -> Result[Snapshot]:
     if status.value.state != "ready":
         return Rejected(errno.ESHUTDOWN, "Service is stopping")
     return status
+
+
+def measure(running: Running) -> Result[diagnostics.Measurement]:
+    status = diagnostics.measure(running.endpoint)
+    if isinstance(status, Rejected):
+        return status
+    if status.value.identity != running.identity:
+        return Rejected(errno.ESTALE, "Service process identity changed")
+    if status.value.state != "ready":
+        return Rejected(errno.ESHUTDOWN, "Service is stopping")
+    return status

@@ -61,6 +61,7 @@ def decoding(process: Process, buffer: Buffer, size: int) -> threading.Event:
             batch.events[0] = Message(
                 version=VERSION,
                 kind=Event.PACKET,
+                count=1,
                 epoch=1,
                 pool_id=1,
                 codec=Codec.H264.fourcc,

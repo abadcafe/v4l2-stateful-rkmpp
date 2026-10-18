@@ -95,7 +95,9 @@ def test_exchange_invalid_event_returns_failed_without_killing_other_sessions(
         if first:
             first = False
             batch.event_count = 1
-            batch.events[0] = Message(version=version, kind=kind, flags=flags, epoch=1)
+            batch.events[0] = Message(
+                version=version, kind=kind, flags=flags, epoch=1, count=1
+            )
             return Response(body=bytes(batch))
         replies.extend(
             Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message)).kind

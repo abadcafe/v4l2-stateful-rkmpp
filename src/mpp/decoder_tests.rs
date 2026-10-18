@@ -6,8 +6,9 @@
 //! test_import_capture_and_ready_require_output_group
 use super::decoder::{Decoder, Submission};
 use crate::dma::Buffer;
-use crate::mpp::Packet;
+use crate::mpp::{Input, Packet};
 use crate::notify::Notify;
+use crate::submission::Payload;
 use crate::timestamp::Source;
 
 #[test]
@@ -24,7 +25,7 @@ fn test_packet_repeated_reference_publishes_each_presentation() {
     [key, &[0x88], &[0x88], &[0x88]].into_iter().enumerate()
   {
     let packet =
-      Packet::owned(data.to_vec(), index as u64, Source::End).unwrap();
+      packet(data, Payload::Input(0..data.len()), index as u64);
     let mut accepted = false;
     for _ in 0..64 {
       if !accepted {
@@ -124,22 +125,8 @@ fn test_packet_av1_internal_progress_does_not_require_an_external_wakeup()
     ) as usize;
     let bytes = &stream[offset + 12..offset + 12 + size];
     for task in frontend.admit(bytes, 0, Source::End).unwrap().tasks {
-      let data = match task.payload {
-        crate::submission::Payload::Input(range) => {
-          bytes[range].to_vec()
-        }
-        crate::submission::Payload::Owned(bytes) => bytes,
-      };
       identity += 1;
-      let buffer = Buffer::allocate(data.len()).unwrap();
-      let mut write = buffer.write().unwrap();
-      write[..data.len()].copy_from_slice(&data);
-      write.finish().unwrap();
-      let mut input = Packet::input(buffer).unwrap();
-      let access =
-        input.prepare(0, data.len(), identity, Source::End).unwrap();
-      let packet =
-        access.packet(0..data.len(), identity, Source::End).unwrap();
+      let packet = packet(bytes, task.payload, identity);
       let mut consumed = false;
       for _ in 0..64 {
         if !consumed {
@@ -187,14 +174,8 @@ fn test_packet_av1_completes_each_display_without_future_input() {
     ) as usize;
     let bytes = &stream[offset + 12..offset + 12 + size];
     for task in frontend.admit(bytes, 0, Source::End).unwrap().tasks {
-      let data = match task.payload {
-        crate::submission::Payload::Input(range) => {
-          bytes[range].to_vec()
-        }
-        crate::submission::Payload::Owned(bytes) => bytes,
-      };
       identity += 1;
-      let packet = Packet::owned(data, identity, Source::End).unwrap();
+      let packet = packet(bytes, task.payload, identity);
       let mut consumed = false;
       for _ in 0..64 {
         if !consumed {
@@ -232,4 +213,14 @@ fn test_packet_av1_completes_each_display_without_future_input() {
     );
     offset += 12 + size;
   }
+}
+
+fn packet(bytes: &[u8], payload: Payload, identity: u64) -> Packet {
+  let buffer = Buffer::allocate(bytes.len()).unwrap();
+  let mut write = buffer.write().unwrap();
+  write[..bytes.len()].copy_from_slice(bytes);
+  write.finish().unwrap();
+  let input = Input::new(buffer).unwrap();
+  let access = input.prepare(0, bytes.len()).unwrap();
+  access.packet(payload, identity, Source::End).unwrap()
 }

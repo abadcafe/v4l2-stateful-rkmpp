@@ -7,6 +7,7 @@ use std::ffi::{c_char, c_void};
 use std::io;
 use std::ptr::NonNull;
 
+use super::api::Api;
 use super::frame::Frame;
 use super::group::Group;
 use super::packet::Packet;
@@ -14,22 +15,9 @@ use super::reservation::Reservation;
 use crate::dma::Buffer;
 use crate::notify::Notify;
 type Handle = *mut c_void;
-#[repr(C)]
-struct Api {
-  size: u32,
-  version: u32,
-  decode:
-    Option<unsafe extern "C" fn(Handle, Handle, *mut Handle) -> i32>,
-  put: Option<unsafe extern "C" fn(Handle, Handle) -> i32>,
-  get: Option<unsafe extern "C" fn(Handle, *mut Handle) -> i32>,
-  other: [usize; 9],
-  reset: Option<unsafe extern "C" fn(Handle) -> i32>,
-  control: Option<unsafe extern "C" fn(Handle, u32, Handle) -> i32>,
-  reserved: [u32; 16],
-}
 #[link(name = "rockchip_mpp")]
 unsafe extern "C" {
-  fn mpp_create(context: *mut Handle, api: *mut *mut Api) -> i32;
+  fn mpp_create(context: *mut Handle, api: *mut Handle) -> i32;
   fn mpp_init(context: Handle, kind: u32, coding: u32) -> i32;
   fn mpp_destroy(context: Handle) -> i32;
   fn mpp_dec_cfg_init(config: *mut Handle) -> i32;
@@ -62,7 +50,7 @@ pub enum Submission {
 }
 pub struct Decoder {
   context: Option<NonNull<c_void>>,
-  api: NonNull<Api>,
+  api: Api,
   group: Option<Group>,
   retired: Vec<Group>,
   callback: Box<Callback>,
@@ -117,22 +105,17 @@ impl Decoder {
       }
       return Err(io::Error::other("null MPP API"));
     };
-    // SAFETY: mpp_create returns the published MppApi ABI. Check size
-    // and required entries before calls.
-    let valid = unsafe {
-      let api = api.as_ref();
-      api.size as usize >= std::mem::size_of::<Api>()
-        && api.decode.is_some()
-        && api.get.is_some()
-        && api.reset.is_some()
-        && api.control.is_some()
-    };
-    if !valid {
-      unsafe {
-        mpp_destroy(context.as_ptr());
+    // SAFETY: mpp_create publishes an initialized size-prefixed ABI;
+    // librockchip_mpp stays linked throughout this owner's lifetime.
+    let api = match unsafe { Api::read(api) } {
+      Ok(api) => api,
+      Err(error) => {
+        unsafe {
+          mpp_destroy(context.as_ptr());
+        }
+        return Err(error);
       }
-      return Err(io::Error::other("incompatible MPP API table"));
-    }
+    };
     let mut decoder = Self {
       context: Some(context),
       api,
@@ -189,29 +172,30 @@ impl Decoder {
     command: u32,
     parameter: Handle,
   ) -> io::Result<()> {
-    unsafe {
-      check(
-        "control",
-        self.api.as_ref().control.unwrap()(
-          self.context.unwrap().as_ptr(),
-          command,
-          parameter,
-        ),
+    // SAFETY: all callers are this owner; the context remains live and
+    // parameters have the specific MPP control command's
+    // representation.
+    check("control", unsafe {
+      (self.api.control)(
+        self.context.unwrap().as_ptr(),
+        command,
+        parameter,
       )
-    }
+    })
   }
 
   pub fn packet(&mut self, packet: &Packet) -> io::Result<Submission> {
-    if !self.info_wait
-      && let Some(group) = self.group.as_mut()
-    {
-      group.ensure_available()?;
-    }
+    // Output publication and registered storage bound admission.
+    // Exhaustion waits for a real lease release; it never grows the
+    // pool.
     if self.parked
       || self.publication_pending
       || !self.frames.is_empty()
-      || !self.can_decode()
+      || self.info_wait
     {
+      return Ok(Submission::Blocked);
+    }
+    if !self.can_decode() {
       return Ok(Submission::Blocked);
     }
     self.completion_packet = None;
@@ -230,7 +214,7 @@ impl Decoder {
   fn decode(&mut self, packet: Handle) -> io::Result<()> {
     let mut raw = std::ptr::null_mut();
     check("decode", unsafe {
-      self.api.as_ref().decode.unwrap()(
+      (self.api.decode)(
         self.context.unwrap().as_ptr(),
         packet,
         &mut raw,
@@ -246,10 +230,7 @@ impl Decoder {
     loop {
       let mut queued = std::ptr::null_mut();
       super::status::frame(unsafe {
-        self.api.as_ref().get.unwrap()(
-          self.context.unwrap().as_ptr(),
-          &mut queued,
-        )
+        (self.api.get)(self.context.unwrap().as_ptr(), &mut queued)
       })?;
       let Some(frame) = (unsafe { Frame::from_raw(queued) }) else {
         break;
@@ -374,14 +355,9 @@ impl Decoder {
     self.frames.clear();
     self.parked = false;
     self.info_wait = false;
-    unsafe {
-      check(
-        "reset",
-        self.api.as_ref().reset.unwrap()(
-          self.context.unwrap().as_ptr(),
-        ),
-      )?;
-    }
+    check("reset", unsafe {
+      (self.api.reset)(self.context.unwrap().as_ptr())
+    })?;
     self.completion_packet = None;
     self.publication_pending = false;
     Ok(())
@@ -396,8 +372,7 @@ impl Decoder {
       return Ok(());
     };
     self.frames.clear();
-    let reset =
-      unsafe { self.api.as_ref().reset.unwrap()(context.as_ptr()) };
+    let reset = unsafe { (self.api.reset)(context.as_ptr()) };
     let destroy = unsafe { mpp_destroy(context.as_ptr()) };
     self.group = None;
     self.retired.clear();

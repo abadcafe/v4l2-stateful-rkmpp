@@ -1,4 +1,4 @@
-"""module: test_concurrency; responsibility: specify independent process workers.
+"""module: test_concurrency; responsibility: specify independent asynchronous sessions.
 
 operations: pytest cases; entities: none; tests: same/mixed codecs preserve pixels.
 """
@@ -19,7 +19,7 @@ from tests.support.stream import Codec
 @pytest.mark.parametrize(
     "codecs", [(Codec.VP9, Codec.VP9), (Codec.VP9, Codec.AV1)], ids=["same", "mixed"]
 )
-def test_decode_concurrent_workers_preserve_all_registered_buffers(
+def test_decode_concurrent_sessions_preserve_all_registered_buffers(
     mock_service: Process, artifacts: Path, codecs: tuple[Codec, Codec]
 ) -> None:
     inputs = {Codec.VP9: "vp9-yuv420p10le.ivf", Codec.AV1: "av1-yuv420p10le.ivf"}

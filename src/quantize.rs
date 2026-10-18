@@ -1,8 +1,9 @@
 //! module: quantize; responsibility: produce NV12 on the GPU from
 //! decoded eight-bit or packed ten-bit images. Eight-bit samples are
-//! preserved; ten-bit samples are dithered. operations: new, convert;
-//! entities: Quantizer; tests: quantize_tests. No CPU pixel maps, no
-//! per-frame fd duplication after an import is cached.
+//! preserved; ten-bit samples are dithered. operations: new, submit,
+//! completion, finish; entities: Quantizer; tests: quantize_tests. No
+//! CPU pixel maps, no per-frame fd duplication after an import is
+//! cached.
 use std::io;
 use std::num::NonZeroUsize;
 
@@ -11,6 +12,9 @@ use crate::image::{Depth, Plane};
 mod context;
 #[cfg(test)]
 mod context_tests;
+mod device;
+#[cfg(test)]
+mod device_tests;
 mod imports;
 #[cfg(test)]
 mod imports_tests;
@@ -21,20 +25,27 @@ use context::Context;
 use imports::Cache;
 use layout::Layout;
 
+struct Prepared {
+  buffers: imports::Pair,
+  layout: Layout,
+  dependencies: [crate::fence::Fence; 2],
+  next: usize,
+}
 pub struct Quantizer {
   context: Context,
   imports: Cache,
   failed: bool,
+  prepared: Option<Prepared>,
 }
 impl Quantizer {
   pub fn new() -> io::Result<Self> {
     let context = Context::new()?;
     let imports =
       Cache::new(context.device(), NonZeroUsize::new(64).unwrap())?;
-    Ok(Self { context, imports, failed: false })
+    Ok(Self { context, imports, failed: false, prepared: None })
   }
 
-  pub fn convert(
+  pub fn submit(
     &mut self,
     depth: Depth,
     width: u32,
@@ -47,10 +58,16 @@ impl Quantizer {
         "Vulkan quantizer failed previously",
       ));
     }
+    if !self.finish()? {
+      return Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "conversion still owns its command resources",
+      ));
+    }
     let layout =
       Layout::new(depth, width, height, source, destination)?;
-    let src = dma::metadata(source.fd())?;
-    let dst = dma::metadata(destination.fd())?;
+    let src = source.metadata()?;
+    let dst = destination.metadata()?;
     if (src.st_dev == dst.st_dev && src.st_ino == dst.st_ino)
       || src.st_size < layout.source_size() as i64
       || dst.st_size < layout.destination_size() as i64
@@ -60,17 +77,53 @@ impl Quantizer {
         "undersized or aliased conversion buffers",
       ));
     }
-    dma::wait_read(source.fd())?;
-    dma::wait_write(destination.fd())?;
-    let buffers =
-      self.imports.pair(source.fd(), &src, destination.fd(), &dst)?;
-    let result = self.context.dispatch(buffers, layout);
-    if result.is_err() {
-      self.failed = true;
-      // Preserve the input/output leases through any outstanding GPU
-      // work before publishing an error.
-      let _ = self.context.quiesce();
+    let source_ready =
+      crate::fence::Fence::new(Some(dma::export_read(source.fd())?));
+    let target_ready = crate::fence::Fence::new(Some(
+      dma::export_write(destination.fd())?,
+    ));
+    let buffers = self.imports.pair(source, destination)?;
+    self.prepared = Some(Prepared {
+      buffers,
+      layout,
+      dependencies: [source_ready, target_ready],
+      next: 0,
+    });
+    Ok(())
+  }
+
+  pub fn completion(&self) -> Option<crate::descriptor::Lease> {
+    self
+      .prepared
+      .as_ref()
+      .and_then(|p| p.dependencies.get(p.next))
+      .and_then(crate::fence::Fence::lease)
+      .or_else(|| self.context.completion())
+  }
+
+  pub fn finish(&mut self) -> io::Result<bool> {
+    if self.failed {
+      return Err(io::Error::other(
+        "Vulkan quantizer failed previously",
+      ));
     }
-    result
+    if let Some(prepared) = self.prepared.as_mut() {
+      while let Some(fence) = prepared.dependencies.get(prepared.next) {
+        if !fence.ready()? {
+          return Ok(false);
+        }
+        prepared.next += 1;
+      }
+      let prepared = self.prepared.take().unwrap();
+      match self.context.dispatch(prepared.buffers, prepared.layout) {
+        Ok(()) => {}
+        Err(error) => {
+          self.failed = true;
+          let _ = self.context.quiesce();
+          return Err(error);
+        }
+      }
+    }
+    self.context.finish()
   }
 }

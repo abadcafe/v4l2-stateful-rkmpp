@@ -28,8 +28,20 @@ fn test_sync_cpu_and_read_write_fences_on_dma_buf() {
     system::sync(fd.as_fd(), true, write).unwrap();
     system::sync(fd.as_fd(), false, write).unwrap();
   }
-  system::wait_read(fd.as_fd()).unwrap();
-  system::wait_write(fd.as_fd()).unwrap();
+  assert!(
+    crate::fence::Fence::new(Some(
+      system::export_read(fd.as_fd()).unwrap()
+    ))
+    .ready()
+    .unwrap()
+  );
+  assert!(
+    crate::fence::Fence::new(Some(
+      system::export_write(fd.as_fd()).unwrap()
+    ))
+    .ready()
+    .unwrap()
+  );
 }
 
 #[test]
@@ -41,6 +53,6 @@ fn test_allocate_rejects_zero_size() {
 fn test_sync_and_fence_export_reject_non_dma_file() {
   let file = std::fs::File::open("/dev/null").unwrap();
   assert!(system::sync(file.as_fd(), true, false).is_err());
-  assert!(system::wait_read(file.as_fd()).is_err());
-  assert!(system::wait_write(file.as_fd()).is_err());
+  assert!(system::export_read(file.as_fd()).is_err());
+  assert!(system::export_write(file.as_fd()).is_err());
 }
