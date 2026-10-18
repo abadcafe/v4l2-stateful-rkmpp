@@ -1,6 +1,6 @@
 //! module: bitstream::bits; responsibility: read bounded RBSP syntax.
-//! operations: new, get, skip, ue, se; entities: Bits; tests:
-//! bits_tests.
+//! operations: new, get, skip, take_bytes, ue, se; entities: Bits;
+//! tests: bits_tests.
 use std::io;
 #[derive(Clone)]
 pub(super) struct Bits<'a> {
@@ -11,11 +11,39 @@ pub(super) struct Bits<'a> {
 }
 impl<'a> Bits<'a> {
   pub(super) fn new(data: &'a [u8]) -> Self {
-    Self { bytes: data, zeros: Some(0), cache: 0, available: 0 }
+    let mut bits = Self::from_rbsp(data);
+    bits.zeros = Some(0);
+    bits
   }
 
   pub(super) fn from_rbsp(data: &'a [u8]) -> Self {
     Self { bytes: data, zeros: None, cache: 0, available: 0 }
+  }
+
+  /// Split a byte-aligned payload without allocating or losing its
+  /// preceding emulation-prevention context. Failure consumes nothing.
+  pub(super) fn take_bytes(
+    &mut self,
+    count: usize,
+  ) -> io::Result<Self> {
+    if self.available != 0 {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "unaligned RBSP payload",
+      ));
+    }
+    let length = count.checked_mul(8).ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        "RBSP payload overflow",
+      )
+    })?;
+    let mut end = self.clone();
+    end.skip(length)?;
+    let mut payload = self.clone();
+    payload.bytes = &self.bytes[..self.bytes.len() - end.bytes.len()];
+    *self = end;
+    Ok(payload)
   }
 
   fn byte(&mut self) -> Option<u8> {

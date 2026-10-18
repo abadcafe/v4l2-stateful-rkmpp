@@ -36,10 +36,17 @@ class Message:
         self.close()
 
 
+@dataclass(frozen=True)
+class _Binding:
+    path: Path
+    device: int
+    inode: int
+
+
 class Socket:
-    def __init__(self, endpoint: socket.socket, path: Path | None = None) -> None:
+    def __init__(self, endpoint: socket.socket) -> None:
         self._socket: socket.socket = endpoint
-        self._path: Path | None = path
+        self._binding: _Binding | None = None
         self._closed: bool = False
         self._socket.settimeout(0.1)
 
@@ -60,10 +67,13 @@ class Socket:
         try:
             endpoint.bind(str(path))
             endpoint.listen(32)
+            metadata = path.lstat()
         except OSError as error:
             endpoint.close()
             return Rejected(error.errno or 0, "bind Unix listener")
-        return Ok(cls(endpoint, path))
+        owner = cls(endpoint)
+        owner._binding = _Binding(path, metadata.st_dev, metadata.st_ino)
+        return Ok(owner)
 
     @classmethod
     def connect(cls, path: Path) -> Result[Socket]:
@@ -131,12 +141,28 @@ class Socket:
             return Rejected(errno.EPIPE, "Unix peer closed")
         return Ok(Message(body, tuple(owners)))
 
-    def close(self) -> None:
+    def close(self) -> Result[None]:
         if not self._closed:
-            self._socket.close()
-            if self._path is not None:
-                self._path.unlink()
+            try:
+                self._socket.close()
+            except OSError as error:
+                return Rejected(error.errno or 0, "close Unix endpoint")
             self._closed = True
+        if self._binding is not None:
+            binding = self._binding
+            try:
+                metadata = binding.path.lstat()
+                if (metadata.st_dev, metadata.st_ino) == (
+                    binding.device,
+                    binding.inode,
+                ):
+                    binding.path.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                return Rejected(error.errno or 0, "remove owned Unix endpoint")
+            self._binding = None
+        return Ok(None)
 
     def __enter__(self) -> Socket:
         return self
@@ -147,4 +173,5 @@ class Socket:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        result = self.close()
+        assert isinstance(result, Ok), result

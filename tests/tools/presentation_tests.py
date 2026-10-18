@@ -74,14 +74,15 @@ def test_read_preserves_raw_gaps_and_summarizes_after_warmup(peer: PeerFactory) 
                     "result": {
                         "result": {
                             "value": {
-                                "callbacks": 4,
-                                "frames": 4,
+                                "callbacks": 5,
+                                "frames": 5,
                                 "first_ms": 0.0,
                                 "last_ms": 7000.0,
-                                "maximum_gap_ms": 50.0,
+                                "maximum_gap_ms": 1000.0,
                                 "media_time": 7.0,
                                 "gaps": [
                                     {"elapsed": 1.0, "milliseconds": 20.0},
+                                    {"elapsed": 5.01, "milliseconds": 1000.0},
                                     {"elapsed": 6.0, "milliseconds": 30.0},
                                     {"elapsed": 7.0, "milliseconds": 50.0},
                                 ],
@@ -97,7 +98,8 @@ def test_read_preserves_raw_gaps_and_summarizes_after_warmup(peer: PeerFactory) 
         timing = accepted(monitor.read(5))
         assert timing.availability == "available" and timing.steady_gap is not None
         assert timing.steady_gap.mean == 40 and timing.steady_gap.maximum == 50
-        assert len(timing.gaps) == 3 and timing.callbacks == 4
+        assert len(timing.gaps) == 4 and timing.callbacks == 5
+        assert timing.maximum_gap_ms == 1000
 
 
 def test_start_remote_failure_is_rejected(peer: PeerFactory) -> None:

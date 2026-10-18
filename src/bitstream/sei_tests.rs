@@ -9,10 +9,16 @@ fn test_next_reads_reserved_types_and_extended_payload_sizes() {
   data.extend([0x55; 256]);
   data.push(0x80);
   let mut messages = Messages::new(&data);
-  let first = messages.next().unwrap().unwrap();
-  assert_eq!((first.kind, first.payload), (128, vec![0x55]));
-  let second = messages.next().unwrap().unwrap();
-  assert_eq!((second.kind, second.payload), (383, vec![0x55; 256]));
+  let mut first = messages.next().unwrap().unwrap();
+  assert_eq!(first.kind, 128);
+  assert_eq!(first.payload.get(8).unwrap(), 0x55);
+  assert!(first.payload.get(1).is_err());
+  let mut second = messages.next().unwrap().unwrap();
+  assert_eq!(second.kind, 383);
+  for _ in 0..256 {
+    assert_eq!(second.payload.get(8).unwrap(), 0x55);
+  }
+  assert!(second.payload.get(1).is_err());
   assert!(messages.next().unwrap().is_none());
   assert!(messages.next().unwrap().is_none());
 }
@@ -21,9 +27,9 @@ fn test_next_reads_reserved_types_and_extended_payload_sizes() {
 fn test_next_consumes_empty_payload_and_annex_b_trailing_zeros() {
   let mut messages = Messages::new(&[128, 0, 6, 0, 0x80, 0, 0]);
   for kind in [128, 6] {
-    let message = messages.next().unwrap().unwrap();
+    let mut message = messages.next().unwrap().unwrap();
     assert_eq!(message.kind, kind);
-    assert!(message.payload.is_empty());
+    assert!(message.payload.get(1).is_err());
   }
   assert!(messages.next().unwrap().is_none());
 }
@@ -54,8 +60,12 @@ fn test_next_unescapes_payload_once_without_reading_into_following_message()
  {
   let mut messages =
     Messages::new(&[5, 4, 0, 0, 3, 3, 4, 6, 1, 0x78, 0x80]);
-  assert_eq!(messages.next().unwrap().unwrap().payload, [0, 0, 3, 4]);
-  let recovery = messages.next().unwrap().unwrap();
-  assert_eq!((recovery.kind, recovery.payload), (6, vec![0x78]));
+  let mut first = messages.next().unwrap().unwrap();
+  let mut recovery = messages.next().unwrap().unwrap();
+  assert_eq!(first.payload.get(32).unwrap(), 0x00000304);
+  assert!(first.payload.get(1).is_err());
+  assert_eq!(recovery.kind, 6);
+  assert_eq!(recovery.payload.get(8).unwrap(), 0x78);
+  assert!(recovery.payload.get(1).is_err());
   assert!(messages.next().unwrap().is_none());
 }

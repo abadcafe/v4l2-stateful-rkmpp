@@ -3,6 +3,27 @@
 //! truncation.
 use super::bits::Bits;
 #[test]
+fn test_take_bytes_preserves_escape_context_and_payload_boundary() {
+  let mut bits = Bits::new(&[0, 0, 3, 1, 0x55]);
+  assert_eq!(bits.get(16).unwrap(), 0);
+  let mut payload = bits.take_bytes(1).unwrap();
+  assert_eq!(payload.get(8).unwrap(), 1);
+  assert!(payload.get(1).is_err());
+  assert_eq!(bits.get(8).unwrap(), 0x55);
+}
+
+#[test]
+fn test_take_bytes_rejects_unaligned_or_truncated_ranges_atomically() {
+  let mut bits = Bits::new(&[0x55]);
+  assert!(bits.take_bytes(2).is_err());
+  assert!(bits.take_bytes(usize::MAX).is_err());
+  assert!(bits.take_bytes(0).unwrap().get(1).is_err());
+  assert_eq!(bits.get(4).unwrap(), 5);
+  assert!(bits.take_bytes(1).is_err());
+  assert_eq!(bits.get(4).unwrap(), 5);
+}
+
+#[test]
 fn test_get_unescapes_and_rejects_truncation() {
   let mut bits = Bits::new(&[0, 0, 3, 1]);
   assert_eq!(bits.get(24).unwrap(), 1);

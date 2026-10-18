@@ -6,7 +6,7 @@
 
 为 RK3588 vendor 内核提供 V4L2 stateful 解码设备，通过 Rust 服务调用 Rockchip MPP，使 Chromium 使用硬件解码，无需修改 Chromium、Mesa 或 MPP。
 
-支持 H.264、HEVC、VP8、VP9、AV1。10-bit 视频经 Vulkan 抖动量化为 8-bit NV12 输出。本机 Chromium 153 的 stateful 后端不支持 HEVC，其余编码已通过浏览器验证。
+支持 H.264、HEVC、VP8、VP9、AV1。10-bit 视频经 Vulkan 抖动量化为 8-bit NV12 输出。
 
 ## 架构
 
@@ -37,7 +37,7 @@ flowchart TD
 
 ## 编译/安装/使用方式
 
-源码编译需要 Rust、C 工具链、匹配的 vendor 内核 headers、pahole、glslang、libclang、GStreamer codecparsers 开发头文件及库、pkg-config、rockchip-mpp 和 vulkan-icd-loader。服务不依赖 libavcodec。客户端负责分帧：H.264/HEVC 提交完整 AU 或独立元数据，VP8/VP9 提交帧，AV1 提交 temporal unit；模块不声明连续字节流能力。服务校验编码头和边界，将 AV1 TU／VP9 superframe 内的编码帧拆为独立任务，五种编码统一调用 MPP 同步接口。H.264/HEVC 按规范计算 POC 和参考关系，统一显示调度器执行对应的重排策略。普通 STOP/START 保留参考帧；AV1 在每个任务完成时通过 MPP 的参考保持排空路径交付延迟显示图像，其他编码不发送 MPP EOS。隔行图像保留场序，不调用隐式去隔行处理。在项目根目录执行：
+源码编译需要 Rust、C 工具链、匹配的 vendor 内核 headers、pahole、glslang、libclang、GStreamer codecparsers 开发头文件及库、pkg-config、rockchip-mpp 和 vulkan-icd-loader。在项目根目录执行：
 
 ```sh
 make -C kernel
@@ -72,13 +72,20 @@ Chromium 的 GTK、显示后端、ANGLE 和合成后端均使用其默认选择�
 
 播放视频后，在 `chrome://media-internals` 确认 `kVideoDecoderName` 为 `V4L2VideoDecoder`。
 
-FFmpeg 的 V4L2 M2M 解码入口如下，但本机版本仍有下述兼容性限制：
+FFmpeg 的 V4L2 M2M 解码命令示例：
 
 ```sh
 ffmpeg -c:v h264_v4l2m2m -i input.mp4 -an -fps_mode passthrough -f null -
 ```
 
-HEVC、VP8、VP9 分别使用 `hevc_v4l2m2m`、`vp8_v4l2m2m`、`vp9_v4l2m2m`，解码器参数放在 `-i` 前。本机 FFmpeg 没有 AV1 V4L2 M2M 解码器。FFmpeg 可能将存储对齐行作为输出高度，导出图像时需按可见尺寸裁剪；本机 FFmpeg 仅比较宽高来决定是否重建 CAPTURE，忽略 `sizeimage` 增大，可能复用过小的缓冲区并提前结束解码；单帧等短流在排空期间遇到首次分辨率变化时，还可能触发其内部断言。目前不能保证 FFmpeg 完整解码，桥接不会为兼容它而放宽缓冲区容量检查。
+HEVC、VP8、VP9 分别使用 `hevc_v4l2m2m`、`vp8_v4l2m2m`、`vp9_v4l2m2m`，解码器参数放在 `-i` 前。
+
+## 测试版本及已知限制
+
+- Chromium **153.0.8010.36**（Arch Linux ARM）：stateful 后端不支持 HEVC；H.264、VP8、VP9、AV1 已通过浏览器验证。
+- FFmpeg **n9.0.2**：该测试构建没有 AV1 V4L2 M2M 解码器。V4L2 M2M 输出可能将存储对齐行计入高度，导出图像时需按可见尺寸裁剪。该版本仅比较宽高来决定是否重建 CAPTURE，忽略 `sizeimage` 增大，可能复用过小的缓冲区并提前结束解码；单帧等短流在排空期间遇到首次分辨率变化时，还可能触发内部断言。因此该版本的 FFmpeg 尚不能保证完整解码，桥接仍严格检查缓冲区容量。
+
+以上限制对应所列测试版本及构建。
 
 ## 测试命令
 

@@ -4,7 +4,9 @@ operations: read_bytes, i420; entities: none; tests: dmabuf_tests and decode pix
 """
 
 import ctypes
+import errno
 import mmap
+import sys
 from typing import final
 
 from tests.support.outcome import Ok, Rejected, Result
@@ -18,6 +20,8 @@ class _Sync(ctypes.Structure):
 
 
 def read_bytes(fd: int, length: int, offset: int = 0) -> Result[bytes]:
+    if length <= 0 or offset < 0 or length + offset > sys.maxsize:
+        return Rejected(errno.EINVAL, "invalid DMA-BUF read extent")
     start = ioctl(fd, command(1, "b", 0, 8), _Sync(flags=1))
     if isinstance(start, Rejected):
         return start
@@ -44,6 +48,19 @@ def i420(
     left: int = 0,
     top: int = 0,
 ) -> Result[bytes]:
+    # A planar 4:2:0 crop must start on a complete chroma sample. Reject
+    # invalid layouts before Python slices can silently truncate them.
+    if (
+        width <= 0
+        or height <= 0
+        or left < 0
+        or top < 0
+        or left % 2 != 0
+        or top % 2 != 0
+        or left + 2 * ((width + 1) // 2) > stride
+        or top + height > rows
+    ):
+        return Rejected(errno.EINVAL, "invalid NV12 crop geometry")
     raw = read_bytes(fd, stride * (rows + (top + height + 1) // 2))
     if isinstance(raw, Rejected):
         return raw

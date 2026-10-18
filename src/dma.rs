@@ -11,6 +11,9 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 mod access;
 #[cfg(test)]
 mod access_tests;
+pub(crate) mod persistent;
+#[cfg(test)]
+mod persistent_tests;
 pub(crate) mod system;
 #[cfg(test)]
 mod system_tests;
@@ -95,10 +98,6 @@ impl Buffer {
     WriteMapping::new(self.clone())
   }
 
-  pub(crate) fn begin_read(&self) -> io::Result<CpuAccess> {
-    self.begin(false)
-  }
-
   fn begin(&self, write: bool) -> io::Result<CpuAccess> {
     access::Lease::new(self.clone(), write)
   }
@@ -119,7 +118,7 @@ impl AsFd for Buffer {
   }
 }
 
-pub(crate) type CpuAccess = access::Lease<Buffer>;
+type CpuAccess = access::Lease<Buffer>;
 struct Map {
   buffer: Buffer,
   ptr: NonNull<u8>,
@@ -152,6 +151,8 @@ impl Map {
   }
 
   fn bytes(&self) -> &[u8] {
+    // SAFETY: Map owns the live, size-checked mapping. All callers
+    // retain an exclusive CPU lease throughout the returned borrow.
     unsafe {
       std::slice::from_raw_parts(self.ptr.as_ptr(), self.buffer.size())
     }

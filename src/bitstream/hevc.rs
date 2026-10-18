@@ -58,11 +58,11 @@ impl Syntax for Hevc {
       match kind {
         32 => {
           let id = b.get(4)?;
-          self.sets.insert(kind, id, nal);
+          self.sets.insert(kind, id, nal)?;
         }
         33 => {
           let seq = parse(&nal[2..])?;
-          self.sets.insert(kind, seq.geometry.id, nal);
+          self.sets.insert(kind, seq.geometry.id, nal)?;
           self.sequences.insert(seq.geometry.id, seq);
         }
         34 => {
@@ -75,8 +75,8 @@ impl Syntax for Hevc {
               "invalid HEVC parameter reference",
             ));
           }
+          self.sets.insert(kind, id, nal)?;
           self.pictures.insert(id, Pps { sequence });
-          self.sets.insert(kind, id, nal);
         }
         _ => {}
       }
@@ -150,7 +150,7 @@ impl Syntax for Hevc {
       });
     }
     let (id, references) =
-      self.references.apply(poc, &targets, reset)?;
+      self.references.apply(poc, &targets, reset, limits)?;
     let mut geometry = seq.geometry;
     geometry.limits = limits;
     self.seeking = false;

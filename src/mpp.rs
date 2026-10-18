@@ -14,9 +14,6 @@ mod frame_tests;
 mod group;
 #[cfg(test)]
 mod group_tests;
-mod input;
-#[cfg(test)]
-mod input_tests;
 mod reservation;
 #[cfg(test)]
 mod reservation_tests;

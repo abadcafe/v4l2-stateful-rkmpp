@@ -25,6 +25,7 @@ impl Memory {
     poc: i32,
     targets: &[Target],
     reset: bool,
+    limits: crate::picture::Limits,
   ) -> io::Result<(u64, Vec<u64>)> {
     if reset {
       self.entries.clear();
@@ -52,6 +53,12 @@ impl Memory {
       }
     }
     self.entries.retain(|e| kept.contains(&e.id));
+    if self.entries.len() >= limits.capacity() {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "HEVC reference set exceeds operating point capacity",
+      ));
+    }
     self.serial = self
       .serial
       .checked_add(1)

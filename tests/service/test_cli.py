@@ -64,6 +64,30 @@ def test_cli_missing_control_device_fails(executable: Path, tmp_path: Path) -> N
     assert result.returncode == 1 and "control" in result.stderr
 
 
+@pytest.mark.parametrize("serve", [False, True])
+def test_cli_non_utf8_arguments_report_errors_without_panicking(
+    executable: Path, tmp_path: Path, serve: bool
+) -> None:
+    arguments = (
+        [
+            b"serve",
+            os.fsencode(tmp_path) + b"/missing-\xff",
+            os.fsencode(tmp_path / "status"),
+        ]
+        if serve
+        else [b"\xff"]
+    )
+    result = subprocess.run(
+        [os.fsencode(executable), *arguments],
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert (b"control" if serve else b"unknown command") in result.stderr
+    assert b"panicked" not in result.stderr
+
+
 def test_cli_diagnostic_startup_failure_preserves_occupied_path(
     executable: Path, tmp_path: Path
 ) -> None:

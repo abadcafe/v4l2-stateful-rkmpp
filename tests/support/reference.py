@@ -88,9 +88,10 @@ def frame_hashes(
     size = width * height + 2 * ((width + 1) // 2) * ((height + 1) // 2)
     if not raw or len(raw) % size:
         return Rejected(errno.EINVAL, "reference frame dimensions do not match")
+    frames = memoryview(raw)
     return Ok(
         tuple(
-            hashlib.sha256(raw[offset : offset + size]).hexdigest()
+            hashlib.sha256(frames[offset : offset + size]).hexdigest()
             for offset in range(0, len(raw), size)
         )
     )

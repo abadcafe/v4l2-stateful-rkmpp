@@ -50,7 +50,7 @@ impl Order {
     let kind = header & 31;
     if kind == 7 {
       let s = super::sequence::parse(data)?;
-      self.sets.insert(kind, s.geometry.id, nal);
+      self.sets.insert(kind, s.geometry.id, nal)?;
       self.sequence.insert(s.geometry.id, s);
     } else if kind == 8 {
       let mut bits = Bits::new(data);
@@ -61,8 +61,8 @@ impl Order {
           "invalid H264 parameter identity",
         ));
       }
+      self.sets.insert(kind, id, nal)?;
       self.picture.insert(id, sequence);
-      self.sets.insert(kind, id, nal);
     }
     Ok(())
   }

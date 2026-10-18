@@ -93,6 +93,12 @@ impl CapturePool {
       .slots
       .get_mut(index)
       .ok_or_else(|| io::Error::other("unknown CAPTURE index"))?;
+    if !retiring && matches!(slot.state, SlotState::Queued(_)) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "CAPTURE slot is already queued",
+      ));
+    }
     let old = std::mem::replace(
       &mut slot.state,
       if retiring { SlotState::Idle } else { SlotState::Queued(token) },

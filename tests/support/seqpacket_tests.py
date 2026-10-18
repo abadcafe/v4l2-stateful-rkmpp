@@ -46,7 +46,7 @@ def test_listen_connect_accept_cleanup_is_scoped_to_owned_endpoint(
             with accepted(server.receive()) as message:
                 assert message.body == b"request"
     assert not path.exists()
-    listener.close()
+    accepted(listener.close())
 
 
 def test_receive_timeout_and_closed_peer_are_distinct() -> None:
@@ -54,7 +54,7 @@ def test_receive_timeout_and_closed_peer_are_distinct() -> None:
     with left, right:
         timeout = right.receive()
         assert isinstance(timeout, Rejected) and timeout.code == errno.ETIMEDOUT
-        left.close()
+        accepted(left.close())
         closed = right.receive()
         assert isinstance(closed, Rejected) and closed.code == errno.EPIPE
 
@@ -67,6 +67,23 @@ def test_connect_missing_and_listen_existing_paths_are_rejected(tmp_path: Path) 
     result = Socket.listen(occupied)
     assert isinstance(result, Rejected) and result.code == errno.EADDRINUSE
     assert occupied.read_bytes() == b"preserve"
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_close_preserves_replaced_or_removed_listener_path(
+    tmp_path: Path, replacement: bool
+) -> None:
+    path = tmp_path / "peer.sock"
+    listener = accepted(Socket.listen(path))
+    path.unlink()
+    if replacement:
+        _ = path.write_bytes(b"replacement")
+    accepted(listener.close())
+    accepted(listener.close())
+    if replacement:
+        assert path.read_bytes() == b"replacement"
+    else:
+        assert not path.exists()
 
 
 @pytest.mark.parametrize(

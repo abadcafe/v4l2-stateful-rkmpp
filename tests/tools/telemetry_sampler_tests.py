@@ -139,3 +139,36 @@ def test_read_reports_the_interval_of_each_cpu_delta(
     second = accepted(sampler.read())
     assert (first.interval_start, first.elapsed, first.cpu["bridge"]) == (0, 1, 100)
     assert (second.interval_start, second.elapsed, second.cpu["bridge"]) == (1, 10, 0)
+
+
+@pytest.mark.parametrize("pid", [1, 2], ids=["browser", "compositor"])
+@pytest.mark.parametrize("replaced", [False, True], ids=["missing", "reused-pid"])
+def test_read_rejects_lost_workload_identity(
+    counters: tuple[Running, list[float], list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+    pid: int,
+    replaced: bool,
+) -> None:
+    running, clock, _ = counters
+    sampler = accepted(Sampler.open(1, running, 2))
+    provider = cpu.processes
+
+    def changed(browser_pid: int, desktop_pid: int | None) -> Result[Processes]:
+        values = accepted(provider(browser_pid, desktop_pid))
+        if replaced:
+            values[pid] = Process(
+                parent=0, start=2, ticks=0, name="chromium", kind="browser"
+            )
+        else:
+            del values[pid]
+        return Ok(values)
+
+    monkeypatch.setattr(cpu, "processes", changed)
+    clock[0] = 11
+    result = sampler.read()
+    assert isinstance(result, Rejected) and result.code == errno.ESRCH
+    # A rejected snapshot must not advance the accepted baseline.
+    monkeypatch.setattr(cpu, "processes", provider)
+    clock[0] = 12
+    sample = accepted(sampler.read())
+    assert (sample.interval_start, sample.elapsed) == (0, 2)

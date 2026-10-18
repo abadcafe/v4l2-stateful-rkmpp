@@ -58,6 +58,33 @@ fn test_sliding_window_retains_only_newest_short_references() {
   assert_eq!(b.references, vec![a.id, b.id]);
   assert_eq!(c.references, vec![b.id, c.id]);
 }
+
+#[test]
+fn test_apply_rejects_adaptive_marking_that_exceeds_reference_capacity()
+{
+  let mut memory = Memory::default();
+  let mut first = picture(0);
+  first.maximum = 1;
+  first.idr = true;
+  memory.apply(first.into()).unwrap();
+  let mut next = picture(1);
+  next.maximum = 1;
+  next.adaptive = true;
+  assert!(memory.apply(next.into()).is_err());
+}
+
+#[test]
+fn test_apply_rejects_sliding_window_without_an_evictable_reference() {
+  let mut memory = Memory::default();
+  let mut first = picture(0);
+  first.maximum = 1;
+  first.idr = true;
+  first.long_idr = true;
+  memory.apply(first.into()).unwrap();
+  let mut next = picture(1);
+  next.maximum = 1;
+  assert!(memory.apply(next.into()).is_err());
+}
 #[test]
 fn test_mmco_short_long_and_reset() {
   let mut memory = Memory::default();

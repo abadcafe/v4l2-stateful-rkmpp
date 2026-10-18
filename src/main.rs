@@ -5,7 +5,7 @@ use std::env;
 use std::path::Path;
 use std::process::ExitCode;
 fn main() -> ExitCode {
-  let args: Vec<String> = env::args().skip(1).collect();
+  let args: Vec<std::ffi::OsString> = env::args_os().skip(1).collect();
   let result = match args.as_slice() {
     [] => {
       println!(

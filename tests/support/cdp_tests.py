@@ -102,6 +102,30 @@ def test_call_timeout_is_bounded(peer: PeerFactory) -> None:
             completed.set()
 
 
+def test_call_expired_deadline_does_not_consume_buffered_messages(
+    peer: PeerFactory,
+) -> None:
+    buffered = threading.Event()
+    completed = threading.Event()
+
+    def handle(connection: ServerConnection) -> None:
+        connection.send('{"method":"Example.changed","params":{}}')
+        # The pong proves that the client has received the preceding frame.
+        assert connection.ping().wait(timeout=5)
+        buffered.set()
+        _ = connection.recv()
+        assert completed.wait(timeout=5)
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        try:
+            assert buffered.wait(timeout=5)
+            result = cdp.call("Example.call", timeout=1e-300)
+            assert isinstance(result, Rejected) and result.code == errno.ETIMEDOUT
+            assert cdp.events() == ()
+        finally:
+            completed.set()
+
+
 def test_call_closed_peer_is_rejected(peer: PeerFactory) -> None:
     def handle(connection: ServerConnection) -> None:
         connection.close()

@@ -3,7 +3,6 @@
 //! entities: Point, Recovery; tests: recovery_tests.
 use std::io;
 
-use super::bits::Bits;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Point {
   pub count: u32,
@@ -15,7 +14,7 @@ impl Point {
     let mut point = None;
     while let Some(message) = messages.next()? {
       if message.kind == 6 {
-        let mut payload = Bits::from_rbsp(&message.payload);
+        let mut payload = message.payload;
         let count = payload.ue()?;
         payload.skip(1)?; // exact_match_flag does not alter the boundary.
         let broken = payload.get(1)? != 0;

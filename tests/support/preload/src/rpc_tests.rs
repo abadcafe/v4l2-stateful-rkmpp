@@ -7,6 +7,84 @@ use std::time::Duration;
 
 use super::rpc::decode;
 
+#[test]
+fn test_intercept_empty_descriptor_message_closes_received_owners() {
+  const CHILD: &str = "RKMPP_EMPTY_MESSAGE_CHILD";
+  if std::env::var_os(CHILD).is_some() {
+    let count = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let before = count();
+    let mut payload = 0u32;
+    // SAFETY: fd 0 is the inherited session socket and payload is a
+    // complete initialized, writable four-byte ioctl object.
+    let result = unsafe {
+      super::rpc::intercept(
+        0,
+        (3 << 30) | (4 << 16) | 0x5284,
+        (&mut payload as *mut u32) as usize,
+      )
+    };
+    assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EPIPE));
+    assert_eq!(count(), before, "empty message leaked SCM_RIGHTS");
+    return;
+  }
+  let mut pair = [-1; 2];
+  // SAFETY: pair provides space for both newly created descriptors.
+  assert_eq!(
+    unsafe {
+      libc::socketpair(
+        libc::AF_UNIX,
+        libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+        0,
+        pair.as_mut_ptr(),
+      )
+    },
+    0
+  );
+  // SAFETY: socketpair transferred unique ownership of both fds.
+  let [receiver, sender] =
+    pair.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+  let child = std::process::Command::new(std::env::current_exe().unwrap())
+    .args(["--exact", "rpc_tests::test_intercept_empty_descriptor_message_closes_received_owners", "--nocapture"])
+    .env(CHILD, "1")
+    .env("RKMPP_TEST_KERNEL_SOCKET", "")
+    .env("RKMPP_TEST_KERNEL_CONTROL", "/unused-test-control")
+    .stdin(std::process::Stdio::from(receiver))
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn().unwrap();
+  let (owner, _peer) = descriptor();
+  // SAFETY: CMSG_SPACE sizes aligned storage for one descriptor.
+  let size = unsafe { libc::CMSG_SPACE(4) } as usize;
+  let mut control =
+    vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
+  // SAFETY: zero is a valid empty msghdr; no payload is sent.
+  let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+  message.msg_control = control.as_mut_ptr().cast();
+  message.msg_controllen = size;
+  // SAFETY: the aligned control buffer contains one complete header
+  // and descriptor; sendmsg borrows them only for this call.
+  unsafe {
+    let header = libc::CMSG_FIRSTHDR(&message);
+    (*header).cmsg_level = libc::SOL_SOCKET;
+    (*header).cmsg_type = libc::SCM_RIGHTS;
+    (*header).cmsg_len = libc::CMSG_LEN(4) as usize;
+    libc::CMSG_DATA(header)
+      .cast::<i32>()
+      .write_unaligned(owner.as_raw_fd());
+    assert_eq!(
+      libc::sendmsg(sender.as_raw_fd(), &message, libc::MSG_NOSIGNAL),
+      0
+    );
+  }
+  let output = child.wait_with_output().unwrap();
+  assert!(
+    output.status.success(),
+    "{}{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+}
+
 fn packet(
   code: u64,
   body: &[u8],

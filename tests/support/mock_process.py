@@ -67,7 +67,7 @@ class Peer:
                         self._result = sent
                         return
         finally:
-            self._endpoint.close()
+            assert isinstance(self._endpoint.close(), Ok)
             self._done.set()
 
     def wait(self, timeout: float) -> Result[None]:
@@ -86,7 +86,7 @@ class Peer:
 
     def close(self) -> None:
         self._stop.set()
-        self._endpoint.close()
+        assert isinstance(self._endpoint.close(), Ok)
         self._thread.join(timeout=5)
         assert not self._thread.is_alive()
 
@@ -182,7 +182,7 @@ class Process:
             endpoint = accepted.value
             received = endpoint.receive()
             if isinstance(received, Rejected):
-                endpoint.close()
+                assert isinstance(endpoint.close(), Ok)
                 continue
             with received.value as message:
                 request = read_request(message.body)
@@ -193,21 +193,21 @@ class Process:
                 encoded = reply(Reply(code=errno.EAGAIN))
                 assert isinstance(encoded, Ok)
                 _ = endpoint.send(encoded.value)
-                endpoint.close()
+                assert isinstance(endpoint.close(), Ok)
                 continue
             assert os.read(self._fifo.fd, 1) == b"1"
             if isinstance(offer, int):
                 encoded = reply(Reply(code=offer))
                 assert isinstance(encoded, Ok)
                 _ = endpoint.send(encoded.value)
-                endpoint.close()
+                assert isinstance(endpoint.close(), Ok)
                 continue
             handler, future = offer
             encoded = reply(Reply())
             assert isinstance(encoded, Ok)
             sent = endpoint.send(encoded.value)
             if isinstance(sent, Rejected):
-                endpoint.close()
+                assert isinstance(endpoint.close(), Ok)
                 continue
             peer = Peer(endpoint, handler)
             self._peers.append(peer)
@@ -243,7 +243,7 @@ class Process:
             self.process.terminate()
         for peer in self._peers:
             peer.close()
-        self._listener.close()
+        assert isinstance(self._listener.close(), Ok)
         self._thread.join(timeout=5)
         assert not self._thread.is_alive()
         if self.process.poll() is None:

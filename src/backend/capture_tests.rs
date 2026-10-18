@@ -113,3 +113,16 @@ fn test_fits_requires_capacity_and_every_allocation() {
   assert!(!pool.fits(3, 4096));
   assert!(!pool.fits(2, 8192));
 }
+
+#[test]
+fn test_recycle_duplicate_queue_preserves_original_submission() {
+  let mut decoder = decoder();
+  let mut pool =
+    CapturePool::new(1, vec![Buffer::allocate(4096).unwrap()]);
+  let original = NonZeroU32::new(7).unwrap();
+  pool.recycle(0, original, false).unwrap();
+  assert!(pool.recycle(0, NonZeroU32::new(8).unwrap(), false).is_err());
+  let target =
+    pool.prepare_write(&mut decoder, 4096, 64, 32).unwrap().unwrap();
+  assert_eq!(target.commit(), (0, original));
+}

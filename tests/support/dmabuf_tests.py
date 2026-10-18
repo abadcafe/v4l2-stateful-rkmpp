@@ -14,6 +14,9 @@ import os
 from pathlib import Path
 from typing import final
 
+import pytest
+
+from tests.support.dma_heap import Buffer
 from tests.support.dmabuf import i420, read_bytes
 from tests.support.outcome import Rejected, accepted
 from tests.support.syscalls import OwnedFd, command, ioctl, open_fd
@@ -41,6 +44,18 @@ def test_read_bytes_and_i420_reject_non_dma_file() -> None:
             assert isinstance(result, Rejected) and result.code == errno.ENOTTY
 
 
+@pytest.mark.parametrize(
+    "length,offset", [(-1, 0), (0, 0), (1, -1), (4097, 0), (1, 4096), (1 << 128, 0)]
+)
+def test_read_bytes_rejects_invalid_extent_without_mapping(
+    length: int, offset: int
+) -> None:
+    with accepted(Buffer.allocate(4096)) as buffer:
+        result = read_bytes(buffer.fd, length, offset)
+        assert isinstance(result, Rejected) and result.code == errno.EINVAL
+        accepted(buffer.write(b"still accessible"))
+
+
 def test_i420_strips_padding_and_deinterleaves_chroma() -> None:
     with accepted(open_fd(Path("/dev/dma_heap/system"))) as heap:
         allocation = _Allocate(size=4096, flags=os.O_RDWR | os.O_CLOEXEC)
@@ -57,3 +72,26 @@ def test_i420_strips_padding_and_deinterleaves_chroma() -> None:
         assert accepted(i420(owner.fd, 4, 2, 8, 4)) == bytes(
             [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 20, 21]
         )
+
+
+@pytest.mark.parametrize(
+    "width,height,stride,rows,left,top",
+    [
+        (0, 2, 8, 4, 0, 0),
+        (4, 0, 8, 4, 0, 0),
+        (4, 2, 3, 4, 0, 0),
+        (4, 2, 8, 1, 0, 0),
+        (4, 2, 8, 4, -2, 0),
+        (4, 2, 8, 4, 0, -2),
+        (4, 2, 8, 4, 6, 0),
+        (4, 2, 8, 4, 0, 4),
+        (4, 2, 8, 4, 1, 0),
+        (4, 2, 8, 4, 0, 1),
+    ],
+)
+def test_i420_rejects_invalid_or_chroma_unaligned_geometry(
+    width: int, height: int, stride: int, rows: int, left: int, top: int
+) -> None:
+    with accepted(Buffer.allocate(4096)) as buffer:
+        result = i420(buffer.fd, width, height, stride, rows, left=left, top=top)
+        assert isinstance(result, Rejected) and result.code == errno.EINVAL

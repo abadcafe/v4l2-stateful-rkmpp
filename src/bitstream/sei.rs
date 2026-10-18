@@ -1,13 +1,15 @@
 //! module: bitstream::sei; responsibility: frame bounded SEI messages
-//! independently of payload semantics. operations: new, next;
+//! independently of payload semantics without payload allocations.
+//! Returned readers borrow input and cannot cross message boundaries.
+//! operations: new, next;
 //! entities: Messages, Message; tests: sei_tests.
 use std::io;
 
 use super::bits::Bits;
 
-pub(super) struct Message {
+pub(super) struct Message<'a> {
   pub kind: u32,
-  pub payload: Vec<u8>,
+  pub payload: Bits<'a>,
 }
 pub(super) struct Messages<'a> {
   bits: Bits<'a>,
@@ -30,7 +32,7 @@ impl<'a> Messages<'a> {
     Self { bits: Bits::new(data), finished: false }
   }
 
-  pub(super) fn next(&mut self) -> io::Result<Option<Message>> {
+  pub(super) fn next(&mut self) -> io::Result<Option<Message<'a>>> {
     if self.finished {
       return Ok(None);
     }
@@ -41,10 +43,7 @@ impl<'a> Messages<'a> {
     }
     let kind = extended(&mut self.bits)?;
     let length = extended(&mut self.bits)?;
-    let mut payload = Vec::with_capacity(length.min(1024) as usize);
-    for _ in 0..length {
-      payload.push(self.bits.get(8)? as u8);
-    }
+    let payload = self.bits.take_bytes(length as usize)?;
     Ok(Some(Message { kind, payload }))
   }
 }

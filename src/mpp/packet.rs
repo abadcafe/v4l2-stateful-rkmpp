@@ -9,8 +9,8 @@ use std::io;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use super::input::{InputMap, ReadAccess};
 use crate::dma::Buffer;
+use crate::dma::persistent::{InputMap, ReadAccess};
 use crate::submission::Payload;
 use crate::timestamp::Source;
 #[link(name = "rockchip_mpp")]

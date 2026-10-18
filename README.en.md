@@ -6,7 +6,7 @@
 
 Provides a V4L2 stateful decoder device for the RK3588 vendor kernel. A Rust service calls Rockchip MPP to enable hardware decoding in Chromium without modifying Chromium, Mesa, or MPP.
 
-Supports H.264, HEVC, VP8, VP9, and AV1. Vulkan converts 10-bit video to 8-bit NV12 using dithering and quantization. The stateful backend in Chromium 153 tested on this machine does not support HEVC; the other codecs have passed browser validation.
+Supports H.264, HEVC, VP8, VP9, and AV1. Vulkan converts 10-bit video to 8-bit NV12 using dithering and quantization.
 
 ## Architecture
 
@@ -37,7 +37,7 @@ The service uses one Tokio orchestration thread for admission, session schedulin
 
 ## Build, install, and use
 
-Building requires Rust, a C toolchain, matching vendor kernel headers, pahole, glslang, libclang, GStreamer codecparsers development headers and library, pkg-config, rockchip-mpp, and vulkan-icd-loader. The service does not depend on libavcodec. Clients frame input: complete AUs or separate metadata for H.264/HEVC, frames for VP8/VP9, and temporal units for AV1; the module does not advertise continuous bytestream support. The service validates headers and boundaries, splits coded frames within AV1 TUs and VP9 superframes into separate tasks, and uses synchronous MPP execution for all five codecs. Normative H.264/HEVC POC and reference state drive the shared presentation scheduler. Ordinary STOP/START preserves reference pictures. AV1 uses MPP’s reference-preserving drain at each task completion to publish delayed displays; other codecs do not receive MPP EOS. Interlaced images retain their field order without implicit deinterlacing. Run from the project root:
+Building requires Rust, a C toolchain, matching vendor kernel headers, pahole, glslang, libclang, GStreamer codecparsers development headers and library, pkg-config, rockchip-mpp, and vulkan-icd-loader. Run from the project root:
 
 ```sh
 make -C kernel
@@ -72,13 +72,20 @@ Chromium uses its default choices for GTK, the display backend, ANGLE, and the c
 
 After starting video playback, open `chrome://media-internals` and confirm that `kVideoDecoderName` is `V4L2VideoDecoder`.
 
-FFmpeg exposes the following V4L2 M2M decoding entry point, but the locally installed version has the compatibility limitations described below:
+Example FFmpeg command for V4L2 M2M decoding:
 
 ```sh
 ffmpeg -c:v h264_v4l2m2m -i input.mp4 -an -fps_mode passthrough -f null -
 ```
 
-For HEVC, VP8, and VP9, use `hevc_v4l2m2m`, `vp8_v4l2m2m`, and `vp9_v4l2m2m`, respectively, placing the decoder option before `-i`. The locally installed FFmpeg has no AV1 V4L2 M2M decoder. FFmpeg may expose storage padding as part of the output height; crop exported images to their visible dimensions. The locally installed FFmpeg compares only width and height when deciding whether to reallocate CAPTURE buffers. It ignores increases in `sizeimage`, potentially reusing undersized buffers and ending decoding early. Single-frame and other short streams may also trigger an internal assertion if the initial resolution change occurs during draining. Complete FFmpeg decoding is therefore not guaranteed; the bridge retains its buffer capacity checks.
+For HEVC, VP8, and VP9, use `hevc_v4l2m2m`, `vp8_v4l2m2m`, and `vp9_v4l2m2m`, respectively, placing the decoder option before `-i`.
+
+## Tested versions and known limitations
+
+- Chromium **153.0.8010.36** (Arch Linux ARM): its stateful backend does not support HEVC. H.264, VP8, VP9, and AV1 have passed browser validation.
+- FFmpeg **n9.0.2**: this tested build has no AV1 V4L2 M2M decoder. V4L2 M2M output may include storage padding in its height; crop exported images to their visible dimensions. This version compares only width and height when deciding whether to reallocate CAPTURE buffers, ignoring increases in `sizeimage`. It may reuse undersized buffers and end decoding early. Single-frame and other short streams may also trigger an internal assertion if the initial resolution change occurs during draining. Complete decoding with this FFmpeg version is therefore not guaranteed; the bridge retains strict buffer capacity checks.
+
+These limitations apply to the listed tested versions and builds.
 
 ## Test commands
 

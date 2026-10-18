@@ -224,7 +224,20 @@ impl Memory {
     if picture.maximum == 0 {
       self.entries.clear();
     }
+    let mut references: BTreeSet<_> =
+      self.entries.iter().map(|entry| entry.id).collect();
     if reference && picture.maximum != 0 {
+      // Adaptive marking must free capacity explicitly. Sliding marking
+      // cannot evict long-term pictures. Neither path may grow the DPB
+      // beyond the SPS contract; the admission owner resets rejected
+      // syntax transactions before accepting another coded picture.
+      references.insert(id);
+      if references.len() > picture.maximum as usize {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          "H264 reference marking exceeds SPS capacity",
+        ));
+      }
       for bottom in [false, true] {
         if picture.field.is_none_or(|field| field == bottom) {
           self.entries.push(Entry {
@@ -242,13 +255,7 @@ impl Memory {
     Ok(State {
       id,
       continuation,
-      references: self
-        .entries
-        .iter()
-        .map(|entry| entry.id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect(),
+      references: references.into_iter().collect(),
     })
   }
 

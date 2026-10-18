@@ -75,6 +75,7 @@ impl Broker {
 impl Session {
   pub fn exchange(&self, batch: &mut Batch) -> io::Result<()> {
     batch.validate()?;
+    let submitted = batch.reply_count;
     // SAFETY: Batch matches bridge_uapi.h and remains writable until
     // ioctl completes.
     if unsafe {
@@ -87,7 +88,21 @@ impl Session {
     {
       return Err(io::Error::last_os_error());
     }
-    batch.validate()
+    batch.validate()?;
+    // Each submitted reply has exactly one zero-or-negative errno
+    // result. Reject malformed results here, before scheduling events
+    // or converting a negative status to its positive errno.
+    if batch.reply_count != submitted
+      || batch.results[..submitted as usize]
+        .iter()
+        .any(|status| !(-4095..=0).contains(status))
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid exchange response",
+      ));
+    }
+    Ok(())
   }
 
   pub fn register(

@@ -1,9 +1,10 @@
-//! module: mpp::input_tests; responsibility: define checked persistent
-//! input reads through the public mapping interface. operations: test
-//! entrypoints; entities: none; tests: read ownership and boundaries.
+//! module: dma::persistent_tests; responsibility: define checked
+//! persistent input reads through the public mapping interface.
+//! operations: test entrypoints; entities: none; tests: read ownership
+//! and boundaries.
 use std::rc::Rc;
 
-use super::input::InputMap;
+use super::persistent::InputMap;
 use crate::dma::Buffer;
 
 #[test]

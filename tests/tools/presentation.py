@@ -68,7 +68,11 @@ class Monitor:
             return snapshot
         observed = snapshot.value
         gaps = [
-            gap.milliseconds for gap in observed.gaps if gap.elapsed >= warmup_seconds
+            gap.milliseconds
+            for gap in observed.gaps
+            # An interval ending after warmup may still contain startup time.
+            # Retain it in raw observations, but summarize only whole intervals.
+            if gap.elapsed - gap.milliseconds / 1000 >= warmup_seconds
         ]
         summary: Distribution | None = None
         availability: Literal["available", "no-callbacks", "no-steady-intervals"] = (

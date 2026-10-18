@@ -222,9 +222,6 @@ fn receive(fd: i32, expected: usize) -> io::Result<Vec<u8>> {
       }
       return Err(error);
     }
-    if length == 0 {
-      return Err(io::Error::from_raw_os_error(libc::EPIPE));
-    }
     let mut owners = Vec::new();
     let mut valid = true;
     // SAFETY: recvmsg populated message's complete control buffer.
@@ -262,6 +259,11 @@ fn receive(fd: i32, expected: usize) -> io::Result<Vec<u8>> {
       }
       // SAFETY: The next header is derived from this received message.
       header = unsafe { libc::CMSG_NXTHDR(&message, header) };
+    }
+    // A zero-length SEQPACKET can still transfer SCM_RIGHTS. Adopt
+    // every delivered descriptor before any post-receive rejection.
+    if length == 0 {
+      return Err(io::Error::from_raw_os_error(libc::EPIPE));
     }
     if !valid
       || message.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0

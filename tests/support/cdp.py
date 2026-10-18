@@ -86,7 +86,10 @@ class Cdp:
                 )
             )
             while True:
-                raw = self._connection.recv(timeout=max(0, deadline - time.monotonic()))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return Rejected(errno.ETIMEDOUT, "CDP " + method)
+                raw = self._connection.recv(timeout=remaining)
                 try:
                     envelope = _Envelope.model_validate_json(raw, strict=True)
                 except ValidationError as error:

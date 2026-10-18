@@ -64,6 +64,11 @@ class Sampler:
         self._start: float = time.monotonic()
         self._previous_time: float = self._start
         self._previous: cpu.Processes = initial
+        self._identities: dict[int, int] = {
+            pid: initial[pid].start
+            for pid in (browser_pid, desktop_pid)
+            if pid is not None
+        }
 
     @classmethod
     def open(
@@ -96,6 +101,10 @@ class Sampler:
         current = cpu.processes(self._browser_pid, self._desktop_pid)
         if isinstance(current, Rejected):
             return current
+        for pid, start in self._identities.items():
+            process = current.value.get(pid)
+            if process is None or process.start != start:
+                return Rejected(errno.ESRCH, "measured workload process was lost")
         percentages = cpu.account(
             current.value,
             self._previous,
