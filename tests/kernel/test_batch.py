@@ -45,17 +45,20 @@ def test_open_broker_is_exclusive_and_empty_accept_is_nonblocking(
 
 
 @pytest.mark.parametrize(
-    ("version", "replies", "reserved"),
+    ("version", "replies", "events", "reserved"),
     [
-        pytest.param(VERSION + 1, 0, 0, id="version"),
-        pytest.param(VERSION, 17, 0, id="count-overflow"),
-        pytest.param(VERSION, 0, 1, id="reserved"),
+        pytest.param(VERSION + 1, 0, 0, 0, id="version"),
+        pytest.param(VERSION, 17, 0, 0, id="reply-count-overflow"),
+        pytest.param(VERSION, 0, 17, 0, id="event-count-overflow"),
+        pytest.param(VERSION, 0, 0, 1, id="reserved"),
     ],
 )
 def test_exchange_rejects_invalid_header(
-    raw_session: Peer, version: int, replies: int, reserved: int
+    raw_session: Peer, version: int, replies: int, events: int, reserved: int
 ) -> None:
-    batch = Batch(version=version, reply_count=replies, reserved=reserved)
+    batch = Batch(
+        version=version, reply_count=replies, event_count=events, reserved=reserved
+    )
     result = ioctl(raw_session.service.fd, EXCHANGE, batch)
     assert isinstance(result, Rejected) and result.code == errno.EINVAL
 

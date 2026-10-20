@@ -12,6 +12,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import final
 
+from tests.support.dma_sync import finish_write, start_write
 from tests.support.outcome import Ok, Rejected, Result
 from tests.support.syscalls import OwnedFd, command, ioctl, open_fd
 
@@ -28,12 +29,6 @@ class _Allocation(ctypes.Structure):
         ("fd_flags", ctypes.c_uint32),
         ("heap_flags", ctypes.c_uint64),
     ]
-
-
-@final
-class _Sync(ctypes.Structure):
-    flags: int = 0
-    _fields_ = [("flags", ctypes.c_uint64)]
 
 
 class Buffer:
@@ -70,7 +65,7 @@ class Buffer:
     def write(self, data: bytes, offset: int = 0) -> Result[None]:
         if offset < 0 or offset + len(data) > self._size:
             return Rejected(errno.EINVAL, "mock DMA write outside allocation")
-        started = ioctl(self.fd, command(1, "b", 0, 8), _Sync(flags=3))
+        started = start_write(self.fd)
         if isinstance(started, Rejected):
             return started
         result: Result[None] = Ok(None)
@@ -80,7 +75,7 @@ class Buffer:
         except OSError as error:
             result = Rejected(error.errno or 0, "map mock DMA buffer")
         finally:
-            ended = ioctl(self.fd, command(1, "b", 0, 8), _Sync(flags=7))
+            ended = finish_write(self.fd)
         return ended if isinstance(ended, Rejected) else result
 
     def close(self) -> None:

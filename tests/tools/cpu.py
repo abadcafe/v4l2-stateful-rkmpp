@@ -5,6 +5,7 @@ tests: cpu_tests, direct performance tool runs; unit is one CPU core = 100%.
 """
 
 import errno
+import math
 import re
 from pathlib import Path
 
@@ -120,7 +121,7 @@ def account(
     browser_pid: int,
     desktop_pid: int | None,
 ) -> Result[dict[str, float]]:
-    if elapsed <= 0 or ticks <= 0:
+    if not math.isfinite(elapsed) or elapsed <= 0 or ticks <= 0:
         return Rejected(errno.EINVAL, "invalid CPU interval")
     descendants = _descendants(now, browser_pid)
     groups = dict.fromkeys(

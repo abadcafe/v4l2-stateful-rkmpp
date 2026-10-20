@@ -51,6 +51,7 @@ class Cdp:
         self._connection: ClientConnection = connection
         self._lease: ExitStack = lease
         self._sequence: int = 0
+        self._expired: set[int] = set()
         self._events: list[Notification] = []
 
     @classmethod
@@ -88,6 +89,7 @@ class Cdp:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    self._expired.add(self._sequence)
                     return Rejected(errno.ETIMEDOUT, "CDP " + method)
                 raw = self._connection.recv(timeout=remaining)
                 try:
@@ -103,6 +105,11 @@ class Cdp:
                         Notification(method=envelope.method, params=envelope.params)
                     )
                     continue
+                if envelope.id in self._expired:
+                    # Timed-out commands may finish after the next call starts.
+                    # They cannot satisfy the current command's response.
+                    self._expired.remove(envelope.id)
+                    continue
                 if envelope.id != self._sequence:
                     return Rejected(errno.EPROTO, "unexpected CDP response id")
                 if envelope.error is not None:
@@ -111,6 +118,7 @@ class Cdp:
                     return Rejected(errno.EPROTO, "CDP reply has no result or error")
                 return Ok(envelope.result)
         except TimeoutError:
+            self._expired.add(self._sequence)
             return Rejected(errno.ETIMEDOUT, "CDP " + method)
         except (ConnectionClosed, OSError) as error:
             return Rejected(errno.ECONNRESET, str(error))

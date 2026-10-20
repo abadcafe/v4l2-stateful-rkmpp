@@ -155,3 +155,50 @@ async fn test_advance_applies_ordered_reset_batch_and_returns_all_replies()
   engine.close().await.unwrap();
   hardware.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_advance_cancellation_preserves_executed_commands_and_replies()
+ {
+  use std::future::Future;
+  use std::task::{Context, Waker};
+
+  use crate::protocol::command::Command;
+  use crate::protocol::{Event, Message, Reply, VERSION};
+
+  let hardware = Hardware::start();
+  let client = hardware.client();
+  let mut engine = client.open(()).await.unwrap();
+  let reset = Command::try_from(Message {
+    version: VERSION,
+    kind: Event::Reset as u32,
+    epoch: 7,
+    ..Default::default()
+  })
+  .unwrap();
+  engine.submit(reset, None).unwrap();
+  let mut advancing = Box::pin(engine.advance());
+  assert!(
+    advancing
+      .as_mut()
+      .poll(&mut Context::from_waker(Waker::noop()))
+      .is_pending()
+  );
+  // The FIFO barrier proves execution completed before cancellation;
+  // no sleep or knowledge of executor internals is needed.
+  client.open(()).await.unwrap().close().await.unwrap();
+  drop(advancing);
+  assert_eq!(
+    engine.submit(reset, None).unwrap_err().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+  assert!(!engine.advance().await.unwrap());
+  let reply = engine.take_reply().unwrap();
+  assert_eq!((reply.kind, reply.epoch), (Reply::Stopped as u32, 7));
+  assert!(!engine.advance().await.unwrap());
+  assert!(engine.take_reply().is_none());
+  engine.submit(reset, None).unwrap();
+  assert!(!engine.advance().await.unwrap());
+  assert_eq!(engine.take_reply().unwrap().kind, Reply::Stopped as u32);
+  engine.close().await.unwrap();
+  hardware.close().await.unwrap();
+}

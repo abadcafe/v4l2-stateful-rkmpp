@@ -3,7 +3,7 @@
 //! errno by effect.
 use std::io;
 
-use super::admission::Admission;
+type Admission = super::admission::Admission<()>;
 #[test]
 fn test_classify_transient_local_pressure_and_fatal_errors() {
   for code in [libc::EINTR, libc::EAGAIN] {

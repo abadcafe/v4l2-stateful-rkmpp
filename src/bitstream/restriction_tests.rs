@@ -22,23 +22,32 @@ fn vui(reorder: u32, buffering: u32) -> Vec<u8> {
 }
 #[test]
 fn test_h264_retains_reorder_and_buffering_independently() {
-  let limits = restriction::h264(&mut Bits::from_rbsp(&vui(2, 4)))
-    .unwrap()
-    .unwrap();
+  let limits =
+    restriction::h264(&mut Bits::from_rbsp(&vui(2, 4)), 0..=16)
+      .unwrap()
+      .unwrap();
   assert_eq!(limits.reorder(), 2);
   assert_eq!(limits.capacity(), 4);
 }
 #[test]
 fn test_h264_rejects_inconsistent_or_truncated_restrictions() {
-  assert!(restriction::h264(&mut Bits::from_rbsp(&vui(3, 2))).is_err());
   assert!(
-    restriction::h264(&mut Bits::from_rbsp(&vui(0, 17))).is_err()
+    restriction::h264(&mut Bits::from_rbsp(&vui(3, 2)), 0..=16)
+      .is_err()
   );
-  assert!(restriction::h264(&mut Bits::from_rbsp(&[])).is_err());
+  assert!(
+    restriction::h264(&mut Bits::from_rbsp(&vui(0, 17)), 0..=16)
+      .is_err()
+  );
+  assert!(
+    restriction::h264(&mut Bits::from_rbsp(&[]), 0..=16).is_err()
+  );
 }
 #[test]
 fn test_h264_absent_restriction_uses_sequence_inference() {
   assert!(
-    restriction::h264(&mut Bits::from_rbsp(&[0, 0])).unwrap().is_none()
+    restriction::h264(&mut Bits::from_rbsp(&[0, 0]), 0..=16)
+      .unwrap()
+      .is_none()
   );
 }

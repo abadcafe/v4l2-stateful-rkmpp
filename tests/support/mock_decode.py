@@ -62,6 +62,7 @@ class DecodeError(BaseModel):
 class Decoded(BaseModel):
     frames: tuple[Frame, ...]
     layouts: tuple[tuple[int, int], ...]
+    capture_minimums: tuple[int, ...]
     eos: bool
     drain_frames: tuple[int, ...]
     registrations: tuple[tuple[int, int], ...]
@@ -119,9 +120,12 @@ class _Stream:
         self._layout: Message | None = None
         self._frames: list[Frame] = []
         self._layouts: list[tuple[int, int]] = []
+        self._capture_minimums: list[int] = []
         self._inflight: dict[int, int] = {}
         self._available: dict[int, int] = {}
         self._capture_serial: int = 0
+        self._reset_serial: int = 0
+        self._reset_pending: int | None = None
         self._draining: bool = False
         self._replacing: bool = False
         self._eos: bool = False
@@ -140,6 +144,11 @@ class _Stream:
         self._errors: list[DecodeError] = []
 
     def _event(self, kind: int, index: int = 0, **fields: int) -> Message:
+        if kind == Event.RESET:
+            assert self._reset_pending is None
+            self._reset_serial += 1
+            self._reset_pending = self._reset_serial
+            fields["count"] = self._reset_serial
         return Message(
             version=VERSION,
             kind=kind,
@@ -249,6 +258,7 @@ class _Stream:
             replacing = bool(self._capture)
             self._layout = Message.from_buffer_copy(message)
             self._layouts.append((message.width, message.height))
+            self._capture_minimums.append(message.count)
             self._generation += 1
             if (
                 replacing
@@ -277,6 +287,9 @@ class _Stream:
                 return Ok(None)
             return self._prepare_capture(message.size)
         if message.kind == Reply.STOPPED:
+            if self._reset_pending is None or message.count != self._reset_pending:
+                return Rejected(errno.EPROTO, "stop transaction identity changed")
+            self._reset_pending = None
             if self._restarting:
                 self._restarting = False
                 self._next = 0
@@ -488,6 +501,7 @@ class _Stream:
             Decoded(
                 frames=tuple(self._frames),
                 layouts=tuple(self._layouts),
+                capture_minimums=tuple(self._capture_minimums),
                 eos=self._eos,
                 drain_frames=tuple(self._drain_frames),
                 registrations=tuple(self._registrations),

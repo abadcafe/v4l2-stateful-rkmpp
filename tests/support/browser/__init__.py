@@ -259,8 +259,15 @@ def _open(
     while time.monotonic() < deadline:
         state = tab.value.evaluate("document.readyState", str)
         if isinstance(state, Rejected):
-            return state
-        if state.value == "complete":
+            # Page.navigate can commit between Runtime.evaluate admission and
+            # execution. The replacement document will provide a new context.
+            if state.code != -32000 or state.operation not in (
+                "Inspected target navigated or closed",
+                "Execution context was destroyed.",
+                "Cannot find context with specified id",
+            ):
+                return state
+        elif state.value == "complete":
             return Ok(Browser(lease))
         time.sleep(0.02)
     return Rejected(errno.ETIMEDOUT, "owned browser page did not finish loading")

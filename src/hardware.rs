@@ -4,7 +4,8 @@
 //! entities: Hardware, Client, Engine, Store, Entry, Owner, Job. tests:
 //! hardware_tests and service process acceptance. Requests are bounded;
 //! abandoned engines are reclaimed at every dispatch boundary,
-//! including idle.
+//! including idle. Each engine retains its in-flight turn across
+//! cancellation; a later advance receives that turn exactly once.
 use std::collections::BTreeMap;
 mod dispatch;
 #[cfg(test)]
@@ -46,6 +47,7 @@ pub struct Engine {
   owner: Option<Owner>,
   notify: Notify,
   dispatch: Dispatch,
+  in_flight: Option<oneshot::Receiver<io::Result<dispatch::Completed>>>,
   completion: Option<crate::readiness::Readable>,
 }
 struct Owner {
@@ -112,6 +114,7 @@ impl Client {
       owner: Some(owner),
       notify,
       dispatch: Dispatch::default(),
+      in_flight: None,
       completion: None,
     })
   }
@@ -180,37 +183,50 @@ impl Engine {
     self.notify.clone()
   }
 
-  async fn call<T: Send + 'static>(
-    &self,
-    work: impl FnOnce(&mut Backend) -> io::Result<T> + Send + 'static,
-  ) -> io::Result<T> {
-    let id = self.id;
-    self
-      .client
-      .call(move |store| {
-        work(
-          &mut store.entries.get_mut(&id).ok_or_else(closed)?.backend,
-        )
-      })
-      .await
-  }
-
   pub fn submit(
     &mut self,
     command: Command,
     pool: Option<Pool>,
   ) -> io::Result<()> {
+    if self.in_flight.is_some() {
+      return Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "receive the in-flight hardware turn before submitting work",
+      ));
+    }
     self.dispatch.submit(command, pool)
   }
 
   pub async fn advance(&mut self) -> io::Result<bool> {
-    let mut dispatch = std::mem::take(&mut self.dispatch);
-    let (runnable, dispatch, completion) = self
-      .call(move |backend| {
-        let runnable = dispatch.advance(backend)?;
-        Ok((runnable, dispatch, backend.completion()))
-      })
-      .await?;
+    if self.in_flight.is_none() {
+      // Cancellation while waiting for capacity must leave the queued
+      // batch intact. After reservation, sending and retaining the
+      // receiver contain no suspension point.
+      let permit =
+        self.client.0.reserve().await.map_err(|_| closed())?;
+      let mut dispatch = std::mem::take(&mut self.dispatch);
+      let id = self.id;
+      let (sender, receiver) = oneshot::channel();
+      permit.send(Box::new(move |store| {
+        let result = (|| {
+          let backend =
+            &mut store.entries.get_mut(&id).ok_or_else(closed)?.backend;
+          let runnable = dispatch.advance(backend)?;
+          Ok(dispatch::Completed {
+            runnable,
+            dispatch,
+            completion: backend.completion(),
+          })
+        })();
+        let _ = sender.send(result);
+      }));
+      self.in_flight = Some(receiver);
+    }
+    let received = self.in_flight.as_mut().unwrap().await;
+    self.in_flight = None;
+    let dispatch::Completed { runnable, dispatch, completion } =
+      received.map_err(|_| closed())??;
+    self.dispatch = dispatch;
     use std::os::fd::{AsFd, AsRawFd};
     if self.completion.as_ref().map(|r| r.as_fd().as_raw_fd())
       != completion.as_ref().map(AsRawFd::as_raw_fd)
@@ -219,7 +235,6 @@ impl Engine {
         .map(crate::readiness::Readable::from_lease)
         .transpose()?;
     }
-    self.dispatch = dispatch;
     Ok(runnable)
   }
 

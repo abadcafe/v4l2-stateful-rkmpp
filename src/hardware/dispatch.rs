@@ -1,7 +1,7 @@
 //! module: hardware::dispatch; responsibility: execute one bounded
 //! decoder turn. operations: submit, advance, take_reply;
-//! entities: Dispatch, Operation; tests: dispatch_tests. Command/reply
-//! storage returns with the turn for reuse.
+//! entities: Dispatch, Operation, Completed; tests: dispatch_tests.
+//! Command/reply storage returns with the turn for reuse.
 use std::collections::VecDeque;
 use std::io;
 
@@ -12,6 +12,11 @@ use crate::protocol::command::Command;
 struct Operation {
   command: Command,
   pool: Option<Pool>,
+}
+pub(super) struct Completed {
+  pub runnable: bool,
+  pub dispatch: Dispatch,
+  pub completion: Option<crate::descriptor::Lease>,
 }
 #[derive(Default)]
 pub(super) struct Dispatch {

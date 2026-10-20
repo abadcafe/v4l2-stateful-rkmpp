@@ -63,7 +63,13 @@ def describe(values: Sequence[float]) -> Result[Distribution]:
         position = (len(ordered) - 1) * fraction
         lower = math.floor(position)
         upper = math.ceil(position)
-        return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+        weight = position - lower
+        left, right = ordered[lower], ordered[upper]
+        # Opposite signs can overflow the difference even when both endpoints
+        # and their interpolated quantile are finite.
+        if left < 0 < right:
+            return left * (1 - weight) + right * weight
+        return left + (right - left) * weight
 
     return Ok(
         Distribution(

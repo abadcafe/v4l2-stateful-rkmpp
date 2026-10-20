@@ -12,7 +12,32 @@ import pytest
 
 from tests.support import browser_launch
 from tests.support.browser import Browser
-from tests.support.outcome import Ok, Rejected, Result
+from tests.support.cdp import Cdp
+from tests.support.outcome import Ok, Rejected, Result, accepted
+
+
+def test_open_waits_for_execution_context_after_navigation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evaluate = Cdp.evaluate
+    interrupted = False
+
+    def during_navigation[T](
+        channel: Cdp, expression: str, model: type[T]
+    ) -> Result[T]:
+        nonlocal interrupted
+        if expression == "document.readyState" and not interrupted:
+            interrupted = True
+            return Rejected(-32000, "Inspected target navigated or closed")
+        return evaluate(channel, expression, model)
+
+    monkeypatch.setattr(Cdp, "evaluate", during_navigation)
+    browser = accepted(Browser.open(tmp_path / "browser", (), ()))
+    try:
+        assert interrupted and browser.alive
+        assert accepted(browser.tab.evaluate("document.readyState", str)) == "complete"
+    finally:
+        accepted(browser.close())
 
 
 def test_open_missing_browser_returns_error_without_leaking_server(

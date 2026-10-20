@@ -6,6 +6,7 @@ V4L2 stateful Decoding permits initialization on the same fd after both queues
 are stopped and every buffer is released.
 """
 
+import ctypes
 import errno
 from contextlib import ExitStack
 from pathlib import Path
@@ -14,12 +15,44 @@ import pytest
 
 from tests.support.bridge import Session
 from tests.support.bridge_abi import ACCEPT, VERSION, Message, Reply
+from tests.support.control_abi import Control
+from tests.support.kernel_peer import Peer
 from tests.support.outcome import Rejected, accepted
 from tests.support.queue import Queue, QueueType
 from tests.support.stream import Codec
-from tests.support.syscalls import OwnedFd, ioctl, open_fd
+from tests.support.syscalls import OwnedFd, command, ioctl, open_fd
 from tests.support.video import Video
 from tests.support.video_formats import set_format
+
+
+def test_full_cleanup_restores_capture_minimum_without_setting_format(
+    raw_session: Peer,
+) -> None:
+    layout = Message(
+        version=VERSION,
+        kind=Reply.LAYOUT,
+        epoch=1,
+        count=32,
+        width=64,
+        height=64,
+        coded_width=64,
+        coded_height=64,
+        stride=64,
+        rows=64,
+        size=6144,
+        format=1,
+    )
+    assert accepted(raw_session.service.exchange([layout])).results[0] == 0
+    minimum = Control(id=0x980927)
+    request = command(3, "V", 27, ctypes.sizeof(minimum))
+    _ = accepted(ioctl(raw_session.video.fd, request, minimum))
+    assert minimum.value == 32
+    raw_session.service.close()
+    for kind in (QueueType.OUTPUT, QueueType.CAPTURE):
+        assert accepted(Queue(raw_session.video.fd, kind).request(0)) == 0
+    _ = accepted(ioctl(raw_session.video.fd, request, minimum))
+    assert minimum.value == 18
+    assert accepted(Queue(raw_session.video.fd, QueueType.CAPTURE).request(1)) == 18
 
 
 @pytest.mark.parametrize("capture_first", [False, True])

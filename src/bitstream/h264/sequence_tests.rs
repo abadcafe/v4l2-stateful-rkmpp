@@ -43,6 +43,8 @@ fn sequence(
   poc: u32,
   frame: bool,
   gaps: bool,
+  maximum: u32,
+  buffering: Option<(u32, u32)>,
 ) -> Vec<u8> {
   let mut bits = format!("{profile:08b}{constraints:08b}{:08b}", 30);
   bits.push_str(&ue(7)); // parameter-set identity
@@ -58,7 +60,7 @@ fn sequence(
     // cycle = 0
     _ => {}
   }
-  bits.push_str(&ue(4));
+  bits.push_str(&ue(maximum));
   bits.push(if gaps { '1' } else { '0' });
   bits.push_str(&ue(15));
   bits.push_str(&ue(7));
@@ -70,7 +72,15 @@ fn sequence(
   for crop in [1, 2, 3, 4] {
     bits.push_str(&ue(crop));
   }
-  bits.push_str("01"); // no VUI, RBSP stop
+  if let Some((reorder, capacity)) = buffering {
+    // VUI: no optional metadata/HRD, explicit bitstream restriction.
+    bits.push_str("100000000101111");
+    bits.push_str(&ue(reorder));
+    bits.push_str(&ue(capacity));
+    bits.push('1');
+  } else {
+    bits.push_str("01"); // no VUI, RBSP stop
+  }
   while !bits.len().is_multiple_of(8) {
     bits.push('0');
   }
@@ -91,7 +101,8 @@ fn test_parse_unifies_geometry_reference_and_order_parameters() {
       for frame in [false, true] {
         for gaps in [false, true] {
           let s =
-            parse(&sequence(profile, 0, poc, frame, gaps)).unwrap();
+            parse(&sequence(profile, 0, poc, frame, gaps, 4, None))
+              .unwrap();
           assert_eq!(
             (s.geometry.id, s.geometry.left, s.geometry.top),
             (7, 2, if frame { 6 } else { 12 })
@@ -114,9 +125,81 @@ fn test_parse_unifies_geometry_reference_and_order_parameters() {
   }
 }
 #[test]
-fn test_parse_zero_reorder_constraint_preserves_reference_capacity() {
+fn test_parse_infers_zero_reference_buffering_for_constrained_intra_profile()
+ {
   let s =
-    super::sequence::parse(&sequence(100, 16, 2, true, true)).unwrap();
+    super::sequence::parse(&sequence(100, 16, 2, true, false, 0, None))
+      .unwrap();
   assert_eq!(s.geometry.limits.reorder(), 0);
-  assert_eq!(s.geometry.limits.capacity(), 16);
+  assert_eq!(s.geometry.limits.capacity(), 1);
+  assert!(
+    super::sequence::parse(&sequence(100, 16, 2, true, false, 1, None))
+      .is_err()
+  );
+  let baseline =
+    super::sequence::parse(&sequence(66, 16, 2, true, false, 4, None))
+      .unwrap();
+  assert_eq!(baseline.geometry.limits.reorder(), 16);
+  assert_eq!(baseline.geometry.limits.capacity(), 16);
+}
+
+#[test]
+fn test_parse_signaled_buffering_overrides_profile_inference() {
+  let s = super::sequence::parse(&sequence(
+    100,
+    16,
+    2,
+    true,
+    false,
+    4,
+    Some((0, 4)),
+  ))
+  .unwrap();
+  assert_eq!(s.geometry.limits.reorder(), 0);
+  assert_eq!(s.geometry.limits.capacity(), 4);
+}
+
+#[test]
+fn test_parse_rejects_buffering_below_reference_count_including_zero() {
+  for (references, capacity) in [(4, 2), (1, 0)] {
+    assert!(
+      super::sequence::parse(&sequence(
+        66,
+        0,
+        2,
+        true,
+        false,
+        references,
+        Some((0, capacity)),
+      ))
+      .is_err()
+    );
+  }
+  let no_references = super::sequence::parse(&sequence(
+    66,
+    0,
+    2,
+    true,
+    false,
+    0,
+    Some((0, 0)),
+  ))
+  .unwrap();
+  assert_eq!(no_references.geometry.limits.capacity(), 1);
+}
+
+#[test]
+fn test_parse_enforces_level_dpb_budget_for_references_and_vui() {
+  // Level 1.1: MaxDpbMbs=900, 256x128=128 macroblocks => 7 frames.
+  for (references, buffering, valid) in [
+    (7, None, true),
+    (8, None, false),
+    (0, Some((0, 8)), false),
+    (7, Some((6, 7)), true),
+  ] {
+    let mut bytes =
+      sequence(66, 0, 2, true, false, references, buffering);
+    bytes[2] = 11;
+    assert_eq!(super::sequence::parse(&bytes).is_ok(), valid);
+  }
 }

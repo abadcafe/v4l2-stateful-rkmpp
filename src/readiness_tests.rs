@@ -7,6 +7,14 @@ use std::time::Duration;
 use crate::notify::Notify;
 use crate::readiness::Readable;
 #[tokio::test(flavor = "current_thread")]
+async fn test_new_preserves_registration_errno() {
+  let file = std::fs::File::open("/dev/null").unwrap();
+  let error = Readable::new(file.into()).err().unwrap();
+  assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+  assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn test_wait_preserves_pending_and_subsequent_wakeups() {
   let notify = Notify::new().unwrap();
   let ready =

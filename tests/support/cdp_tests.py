@@ -102,6 +102,37 @@ def test_call_timeout_is_bounded(peer: PeerFactory) -> None:
             completed.set()
 
 
+def test_call_after_timeout_discards_late_reply_and_preserves_notifications(
+    peer: PeerFactory,
+) -> None:
+    def handle(connection: ServerConnection) -> None:
+        first = TypeAdapter(dict[str, JsonValue]).validate_json(connection.recv())
+        second = TypeAdapter(dict[str, JsonValue]).validate_json(connection.recv())
+        connection.send(json.dumps({"id": first["id"], "result": {"late": True}}))
+        connection.send('{"method":"Example.changed","params":{}}')
+        connection.send(json.dumps({"id": second["id"], "result": {"current": True}}))
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        result = cdp.call("Example.slow", timeout=0.02)
+        assert isinstance(result, Rejected) and result.code == errno.ETIMEDOUT
+        assert accepted(cdp.call("Example.next")) == {"current": True}
+        assert [event.method for event in cdp.events()] == ["Example.changed"]
+
+
+def test_call_rejects_duplicate_reply_from_completed_command(peer: PeerFactory) -> None:
+    def handle(connection: ServerConnection) -> None:
+        first = TypeAdapter(dict[str, JsonValue]).validate_json(connection.recv())
+        response = json.dumps({"id": first["id"], "result": {}})
+        connection.send(response)
+        _ = connection.recv()
+        connection.send(response)
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        assert accepted(cdp.call("Example.first")) == {}
+        result = cdp.call("Example.second")
+        assert isinstance(result, Rejected) and result.code == errno.EPROTO
+
+
 def test_call_expired_deadline_does_not_consume_buffered_messages(
     peer: PeerFactory,
 ) -> None:

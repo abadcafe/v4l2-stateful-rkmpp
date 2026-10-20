@@ -73,11 +73,12 @@ fn test_event_drains_and_resets_without_decoder() {
   event.kind = Event::Reset as u32;
   event.epoch = 3;
   event.generation = 7;
+  event.count = 29;
   dispatch(&mut backend, event).unwrap();
   let reply = backend.take_reply().unwrap();
   assert_eq!(
-    (reply.kind, reply.epoch, reply.generation),
-    (Reply::Stopped as u32, 3, 7)
+    (reply.kind, reply.epoch, reply.generation, reply.count),
+    (Reply::Stopped as u32, 3, 7, 29)
   );
   assert!(backend.take_reply().is_none());
 }

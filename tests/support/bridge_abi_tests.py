@@ -43,7 +43,7 @@ def test_wire_defaults_zero_all_reserved_fields() -> None:
     assert bytes(Message()) == bytes(120)
     assert bytes(Batch()) == bytes(3920)
     assert bytes(Pool()) == bytes(288)
-    assert VERSION == 9
+    assert VERSION == 10
 
 
 def test_wire_defaults_isolate_each_message() -> None:

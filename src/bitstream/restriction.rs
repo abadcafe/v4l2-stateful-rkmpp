@@ -1,6 +1,6 @@
 //! module: bitstream::restriction; responsibility: read H264 VUI
-//! reorder limits. operations: h264; entities: none; tests: parsed
-//! codec streams.
+//! reorder limits within the SPS buffering budget. operations: h264;
+//! entities: none; tests: restriction_tests, h264/sequence_tests.
 use std::io;
 
 use super::bits::Bits;
@@ -19,6 +19,7 @@ fn hrd(b: &mut Bits) -> io::Result<()> {
 }
 pub(super) fn h264(
   b: &mut Bits,
+  allowed_buffering: std::ops::RangeInclusive<usize>,
 ) -> io::Result<Option<crate::picture::Limits>> {
   if b.get(1)? != 0 && b.get(8)? == 255 {
     b.skip(32)?;
@@ -60,7 +61,10 @@ pub(super) fn h264(
   }
   let reorder = b.ue()?;
   let buffering = b.ue()?;
-  if reorder > buffering || buffering > 16 {
+  if reorder > buffering
+    || buffering > 16
+    || !allowed_buffering.contains(&(buffering as usize))
+  {
     return Err(io::Error::other("invalid H264 reorder bound"));
   }
   Ok(Some(crate::picture::Limits::new(

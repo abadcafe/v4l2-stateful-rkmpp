@@ -6,6 +6,7 @@ operations: pytest cases; entities: Snapshot, Sample, Report; tests:
 Session teardown must release real daemon FD and thread resources.
 """
 
+import subprocess
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from tests.support.diagnostics import query
 from tests.support.mock_decode import play
 from tests.support.mock_process import Process
 from tests.support.outcome import accepted
+from tests.support.reference import frame_hashes
 from tests.support.stream import Codec
 
 
@@ -32,6 +34,54 @@ class Report(BaseModel):
     pid: int
     baseline: Snapshot
     samples: list[Sample]
+
+
+def test_constrained_intra_infers_capture_budget_without_reference_surfaces(
+    mock_service: Process, tmp_path: Path
+) -> None:
+    # x264 High Intra signals constraint_set3_flag and max_num_ref_frames=0;
+    # its VUI omits bitstream restrictions. E.2.1 infers buffering=0,
+    # leaving only a working output surface before the bridge's minimum.
+    source = tmp_path / "intra.h264"
+    encoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=128x128:rate=30",
+            "-frames:v",
+            "3",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-profile:v",
+            "high",
+            "-level:v",
+            "3.0",
+            "-x264-params",
+            "keyint=1:threads=1",
+            "-f",
+            "h264",
+            str(source),
+        ],
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    assert encoded.returncode == 0, encoded.stderr.decode(errors="replace")
+    # Level 3 has a 16-frame DPB budget at this resolution; confusing
+    # that level limit with inferred intra buffering would request 32.
+    result = accepted(play(mock_service, Codec.H264, source))
+    assert result.eos and not result.errors
+    assert result.capture_minimums == (18,)
+    assert len(result.frames) == 3
+    assert tuple(frame.digest for frame in result.frames) == accepted(
+        frame_hashes(source, 8, 128, 128)
+    )
 
 
 def test_service_twenty_sessions_return_resources_to_baseline(

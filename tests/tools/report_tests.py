@@ -24,6 +24,13 @@ def test_describe_preserves_mean_extremes_and_interpolated_quantiles() -> None:
     assert statistic.p99 == pytest.approx(19.9)
 
 
+def test_describe_opposite_finite_extremes_have_finite_quantiles() -> None:
+    statistic = accepted(describe((-1e308, 1e308)))
+    assert statistic.mean == 0 and statistic.p50 == 0
+    assert statistic.p95 == pytest.approx(9e307)
+    assert statistic.p99 == pytest.approx(9.8e307)
+
+
 @pytest.mark.parametrize("values", [(), (math.nan,), (math.inf,)])
 def test_describe_invalid_samples_return_error(values: tuple[float, ...]) -> None:
     assert isinstance(describe(values), Rejected)

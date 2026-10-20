@@ -1,5 +1,6 @@
 //! module: bitstream::h264::sequence; responsibility: parse H264 SPS
-//! limits and geometry. operations: parse; tests: sequence_tests.
+//! limits and geometry. operations: parse; entities: Sequence;
+//! tests: sequence_tests.
 use std::io;
 
 use crate::bitstream::bits::Bits;
@@ -135,22 +136,39 @@ pub(super) fn parse(data: &[u8]) -> io::Result<Sequence> {
     .checked_mul(map_height)
     .and_then(|n| n.checked_mul(2 - frame))
     .ok_or_else(|| io::Error::other("SPS dimensions overflow"))?;
-  let default_reorder = if constraints & 16 != 0
-    && matches!(profile, 44 | 86 | 100 | 110 | 122 | 244)
-  {
-    0
+  let capacity = (max_mbs / mbs).min(16) as usize;
+  if capacity == 0 || maximum as usize > capacity {
+    return Err(io::Error::other(
+      "H264 references exceed level DPB capacity",
+    ));
+  }
+  let signaled = if b.get(1)? != 0 {
+    // H.264 E.2.1 / A.3.1: validate the signaled value before
+    // normalizing zero to one working display surface. The reference
+    // requirement and level budget belong to this same SPS.
+    crate::bitstream::restriction::h264(b, maximum as usize..=capacity)?
   } else {
-    (max_mbs / mbs).min(16) as usize
+    None
   };
-  let defaults = crate::picture::Limits::new(
-    (max_mbs / mbs).min(16) as usize,
-    default_reorder,
-    None,
-  )?;
-  let limits = if b.get(1)? != 0 {
-    crate::bitstream::restriction::h264(b)?.unwrap_or(defaults)
+  let limits = if let Some(limits) = signaled {
+    limits
   } else {
-    defaults
+    // E.2.1 infers both buffering and reorder, not just reorder.
+    // Keep the zero reference requirement until after validation;
+    // Limits then supplies the one working surface needed for output.
+    let inferred = if constraints & 16 != 0
+      && matches!(profile, 44 | 86 | 100 | 110 | 122 | 244)
+    {
+      0
+    } else {
+      capacity
+    };
+    if maximum as usize > inferred {
+      return Err(io::Error::other(
+        "H264 references exceed inferred buffering",
+      ));
+    }
+    crate::picture::Limits::new(inferred, inferred, None)?
   };
   let chroma = if separate { 0 } else { chroma };
   let x = if matches!(chroma, 1 | 2) { 2 } else { 1 };

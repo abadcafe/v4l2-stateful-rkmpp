@@ -55,6 +55,7 @@ struct rb_session {
   bool before_stop[RB_MAX_BUFFERS];
   u32 input_serial, output_serial[RB_MAX_BUFFERS];
   u32 capture_serial, capture_token[RB_MAX_BUFFERS];
+  u32 reset_serial;
   u32 unpaired_field;
 };
 /* An endpoint belongs to one decoder incarnation, not the lifetime of the
@@ -309,10 +310,14 @@ static void stop(struct vb2_queue *q) {
       s->epoch++;
       s->tail = s->head;
     }
-    push(s, (struct rb_message){
-                .type = RB_RESET,
-                .flags = q->type | (capture_only ? RB_RESET_CAPTURE_ONLY : 0) |
-                         (abort_drain ? RB_RESET_ABORT_DRAIN : 0)});
+    if (s->reset_serial == U32_MAX)
+      fail(s);
+    else
+      push(s, (struct rb_message){
+                  .type = RB_RESET,
+                  .count = ++s->reset_serial,
+                  .flags = q->type | (capture_only ? RB_RESET_CAPTURE_ONLY : 0) |
+                           (abort_drain ? RB_RESET_ABORT_DRAIN : 0)});
     mutex_unlock(&s->lock);
     waited = wait_event_timeout(s->wait,
                                 READ_ONCE(s->stopped) || READ_ONCE(s->failed),
@@ -364,6 +369,15 @@ static int try_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
     rb_format_capture(s->format, &fmt->fmt.pix_mp);
   return 0;
 }
+/* Publish every derived format requirement together, including initialization
+ * after a failed incarnation. Control events retain their normal V4L2 behavior.
+ */
+static void format_changed(struct rb_session *s, bool allocated) {
+  const struct rb_message *layout = rb_format_layout(s->format);
+  v4l2_ctrl_s_ctrl(v4l2_ctrl_find(&s->ctrls, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE),
+                   layout->count);
+  rb_capture_update(s->capture_contract, layout->size, layout->count, allocated);
+}
 static int get_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
   struct rb_session *s = session(p);
   if (!queue_for(s, fmt->type))
@@ -392,10 +406,7 @@ static int set_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
     s->codec = fmt->fmt.pix_mp.pixelformat;
     s->input_size = fmt->fmt.pix_mp.plane_fmt[0].sizeimage;
     rb_format_set(s->format, &fmt->fmt.pix_mp);
-    v4l2_ctrl_s_ctrl(v4l2_ctrl_find(&s->ctrls, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE), 18);
-    rb_capture_update(s->capture_contract, rb_format_layout(s->format)->size,
-                      rb_format_layout(s->format)->count,
-                      false);
+    format_changed(s, false);
   }
   return 0;
 }
@@ -680,6 +691,7 @@ static int reinitialize(struct rb_session *s) {
   s->codec = V4L2_PIX_FMT_H264;
   s->input_size = 1024 * 1024;
   s->sequence = s->output_sequence = s->input_serial = s->capture_serial = 0;
+  s->reset_serial = 0;
   s->unpaired_field = 0;
   s->eos = s->stopping = s->stopped = false;
   s->out_started = s->cap_started = false;
@@ -693,6 +705,7 @@ static int reinitialize(struct rb_session *s) {
   rb_capture_free(s->capture_contract);
   s->format = format;
   s->capture_contract = capture;
+  format_changed(s, false);
   /* REQBUFS(0) cancels vb2 queues, including their error state. */
   s->failed = false;
   wake_up_all(&s->wait);
@@ -822,10 +835,7 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
   case RB_LAYOUT:
     if (rb_format_update(s->format, m))
       return -EINVAL;
-    v4l2_ctrl_s_ctrl(v4l2_ctrl_find(&s->ctrls, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE), m->count);
-    rb_capture_update(s->capture_contract, rb_format_layout(s->format)->size,
-                      rb_format_layout(s->format)->count,
-                      vb2_is_busy(&s->capture));
+    format_changed(s, vb2_is_busy(&s->capture));
     if (rb_capture_pending(s->capture_contract)) {
       s->eos = true;
       if (s->cap_started)
@@ -898,6 +908,8 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
     v4l2_event_queue_fh(&s->fh, &ev);
     return 0;
   case RB_STOPPED:
+    if (!m->count || m->count != s->reset_serial)
+      return -ESTALE;
     s->stopped = true;
     wake_up_all(&s->wait);
     return 0;
@@ -957,6 +969,7 @@ static long exchange(struct rb_session *s, void __user *arg,
   unsigned i;
   struct rb_batch __user *out = arg;
   if (batch->version != RB_VERSION || batch->reply_count > RB_BATCH_MAX ||
+      batch->event_count > RB_BATCH_MAX ||
       batch->reserved)
     return -EINVAL;
   /* Probe copyout before any mutation; a later concurrent unmap fails closed.

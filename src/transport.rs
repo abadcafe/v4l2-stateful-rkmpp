@@ -57,7 +57,7 @@ impl Broker {
     Ok(Self { ready })
   }
 
-  pub async fn accept(&self) -> io::Result<Admission> {
+  pub async fn accept(&self) -> io::Result<Admission<Session>> {
     self.ready.wait().await?;
     const ACCEPT: libc::c_ulong = ((b'R' as libc::c_ulong) << 8) | 0x80;
     let fd =

@@ -51,6 +51,47 @@ def test_damaged_submission_does_not_poison_reused_input(
     ] + [0] * len(good)
 
 
+@pytest.mark.parametrize("established", [False, True])
+@pytest.mark.parametrize("input_count", [1, 8])
+def test_h264_level_dpb_violation_rejects_only_its_submission(
+    mock_service: Process,
+    artifacts: Path,
+    established: bool,
+    input_count: int,
+) -> None:
+    source = artifacts / "h264-yuv420p.h264"
+    good = accepted(load(Codec.H264, source))
+    damaged = bytearray(good[0].data)
+    sps = damaged.find(b"\x00\x00\x01\x67")
+    assert sps >= 0 and damaged[sps + 6] == 11
+    # Keep the original four reference frames and VUI buffering=4,
+    # but signal level 1, whose 396 macroblocks allow only three
+    # 256x128 reference/display frame buffers (H.264 A.3.1, E.2.1).
+    damaged[sps + 6] = 10
+    inputs = (
+        ((good[0],) if established else ())
+        + (Packet(data=bytes(damaged), timestamp=0),)
+        + good
+    )
+    result = accepted(
+        play(
+            mock_service,
+            Codec.H264,
+            source,
+            input_count=input_count,
+            submissions=inputs,
+        )
+    )
+    expected = accepted(frame_hashes(source, 8, 256, 128))
+    assert result.eos and not result.errors
+    assert tuple(frame.digest for frame in result.frames) == (
+        (expected[:1] if established else ()) + expected
+    )
+    assert tuple(bool(done.flags & 2) for done in result.input_completions) == (
+        ((False,) if established else ()) + (True,) + (False,) * len(good)
+    )
+
+
 @pytest.mark.parametrize(
     "codec,damaged",
     [

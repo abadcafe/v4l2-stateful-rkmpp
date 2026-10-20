@@ -3,7 +3,7 @@
 #define V4L2_RKMPP_BRIDGE_UAPI_H
 #include <linux/ioctl.h>
 #include <linux/types.h>
-#define RB_VERSION 9
+#define RB_VERSION 10
 #define RB_BATCH_MAX 16
 #define RB_MAX_BUFFERS 32
 /* field: 0 progressive, 1 interlaced top first, 2 interlaced bottom first,
@@ -68,6 +68,8 @@ enum rb_reply {
  * independent of pool/index reuse. INPUT_DONE and FRAME respectively echo
  * that identity. Old completions cannot acknowledge a newly queued buffer.
  * Counters never wrap: exhaustion poisons the session.
+ * RESET.count is a nonzero stop-transaction identity echoed by STOPPED;
+ * CAPTURE-only stops share their epoch and generation but never this identity.
  * DRAINING.count is the last
  * input belonging to the ending bitstream, including a split end marker. */
 /* PACKET/FRAME flags preserve V4L2_BUF_FLAG_TSTAMP_SRC_MASK verbatim. */

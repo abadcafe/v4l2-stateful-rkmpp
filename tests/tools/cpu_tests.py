@@ -11,6 +11,7 @@ CPU accounting defines one core as 100% and excludes unrelated browsers.
 """
 
 import errno
+import math
 from pathlib import Path
 
 import pytest
@@ -87,7 +88,13 @@ def test_account_ignores_reused_pid_and_new_process_without_baseline() -> None:
 
 
 def test_account_invalid_sampling_interval_is_rejected() -> None:
-    for elapsed, ticks in ((0.0, 100), (-1.0, 100), (1.0, 0)):
+    for elapsed, ticks in (
+        (0.0, 100),
+        (-1.0, 100),
+        (1.0, 0),
+        (math.nan, 100),
+        (math.inf, 100),
+    ):
         result = account({}, {}, elapsed, ticks, 1, 3)
         assert isinstance(result, Rejected) and result.code == errno.EINVAL
 

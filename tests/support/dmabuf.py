@@ -3,26 +3,18 @@
 operations: read_bytes, i420; entities: none; tests: dmabuf_tests and decode pixel cases.
 """
 
-import ctypes
 import errno
 import mmap
 import sys
-from typing import final
 
+from tests.support.dma_sync import finish_read, start_read
 from tests.support.outcome import Ok, Rejected, Result
-from tests.support.syscalls import command, ioctl
-
-
-@final
-class _Sync(ctypes.Structure):
-    flags: int = 0
-    _fields_ = [("flags", ctypes.c_uint64)]
 
 
 def read_bytes(fd: int, length: int, offset: int = 0) -> Result[bytes]:
     if length <= 0 or offset < 0 or length + offset > sys.maxsize:
         return Rejected(errno.EINVAL, "invalid DMA-BUF read extent")
-    start = ioctl(fd, command(1, "b", 0, 8), _Sync(flags=1))
+    start = start_read(fd)
     if isinstance(start, Rejected):
         return start
     result: Result[bytes]
@@ -34,7 +26,7 @@ def read_bytes(fd: int, length: int, offset: int = 0) -> Result[bytes]:
     except OSError as error:
         result = Rejected(error.errno or 0, "mmap DMA-BUF")
     finally:
-        end = ioctl(fd, command(1, "b", 0, 8), _Sync(flags=5))
+        end = finish_read(fd)
     return end if isinstance(end, Rejected) else result
 
 

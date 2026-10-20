@@ -4,14 +4,13 @@
 //! errors.
 use std::io;
 
-use super::Session;
-pub enum Admission {
-  Accepted(Session),
+pub enum Admission<T> {
+  Accepted(T),
   Idle,
   Rejected(io::Error),
   Pressure(io::Error),
 }
-impl Admission {
+impl<T> Admission<T> {
   pub(super) fn classify(error: io::Error) -> io::Result<Self> {
     match error.raw_os_error() {
       Some(libc::EINTR | libc::EAGAIN) => Ok(Self::Idle),

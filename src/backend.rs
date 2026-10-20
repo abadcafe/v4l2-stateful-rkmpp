@@ -275,6 +275,7 @@ impl Backend {
         }
         self.emit(Message {
           kind: Reply::Stopped as u32,
+          count: message.count,
           ..Default::default()
         })
       }

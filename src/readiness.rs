@@ -18,8 +18,12 @@ impl Readable {
     // SAFETY: owned is a stable descriptor retained until
     // deregistration; all reads remain nonblocking and are
     // performed by the descriptor owner.
-    let registered = unsafe { AsyncFd::register(lease) }
-      .map_err(|error| io::Error::other(error.to_string()))?;
+    let registered = unsafe {
+      AsyncFd::register_with_interest(
+        lease,
+        tokio::io::Interest::READABLE,
+      )
+    }?;
     Ok(Self(registered))
   }
 
