@@ -234,3 +234,21 @@ fn test_seek_repeated_restart_keeps_configuration_byte_identical() {
     }
   }
 }
+
+#[test]
+fn test_seek_self_contained_picture_keeps_its_original_input_view() {
+  for (codec, data, first, _) in samples() {
+    let bytes = &data[..first];
+    let mut parser = Parser::new(u32::from_le_bytes(codec)).unwrap();
+    parser.admit(bytes).unwrap();
+    for _ in 0..8 {
+      parser.seek().unwrap();
+      let report = parser.admit(bytes).unwrap();
+      assert_eq!(report.units.len(), 1);
+      assert!(matches!(
+        &report.units[0].payload,
+        Payload::Input(range) if range == &(0..bytes.len())
+      ));
+    }
+  }
+}

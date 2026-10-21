@@ -39,21 +39,21 @@ payload. Original coded submissions retain their complete bytes for MPP.
 | P01 | Wire validation precedes resource transfer or state mutation | version, batch/message reserved, every event including CLOSE, validation before pool registration/state mutation, clean FAILED reply, count, epoch, generation, pool, slot, unsupported message | kernel/test_batch.py, kernel/test_pool.py, service/test_protocol.py, service/test_registration.py |
 | P02 | Registration publishes file ownership only after successful copyout | partial export, bad destination, repeated failure, concurrent fd observation during failed copyout; rollback releases uninstalled reservations | kernel/test_copyout_faults.py, service/test_registration.py |
 | P03 | Bounded queues apply backpressure without losing ownership | full batch, 64 live sessions with the next offer deferred until close, many framed inputs, multi-frame AV1 TU/VP9 superframe, retained CAPTURE | service/test_admission.py, service/test_output_semantics.py, service/test_resources.py |
-| C01 | Exp-Golomb parsing covers its declared integer domain | zero, 30/31/32 leading zeros, legal maximum, overflow, truncation, signed limits | src/syntax/bits_tests.rs |
-| C02 | One H.264 SPS parse supplies geometry and reference semantics | profiles, POC modes, field/frame, gaps, scaling lists, buffering limits | src/syntax/h264_tests.rs, src/bitstream/h264/order_tests.rs |
+| C01 | Exp-Golomb parsing covers its declared integer domain | zero, 30/31/32 leading zeros, legal maximum, overflow, truncation, signed limits | crates/codec-parser/src/syntax/bits_tests.rs |
+| C02 | One H.264 SPS parse supplies geometry and reference semantics | profiles, POC modes, field/frame, gaps, scaling lists, buffering limits | crates/codec-parser/src/syntax/h264_tests.rs, src/bitstream/h264/order_tests.rs |
 | C03 | Exactly one authority decides complementary picture identity | reference/non-reference, same/opposite parity, frame number, IDR, MMCO5 on first/second field, inferred frame_num=0, DPB occupancy, intervening picture | src/bitstream/h264/reference_tests.rs, src/backend/layout_tests.rs |
 | C04 | MMCO operates on picture identity, not parity alone | operations 1–6, frame/paired/unpaired field, same/different pair, reused long index | src/bitstream/h264/reference_tests.rs |
 | C05 | Allowed frame-number gaps execute non-existing reference marking | no gap, multiple gaps, wrap, reference/non-reference, IDR/MMCO5 reset, forbidden gap | src/bitstream/h264/reference_tests.rs, src/bitstream/h264/order_tests.rs |
 | C06 | Presentation follows reference occupancy, output order and discard boundaries | capacity/reorder bounds, direct output, IDR/MMCO5, discard across DRC, hidden picture | src/backend/presentation_tests.rs, service/test_output_semantics.py, service/test_picture_order.py |
-| C07 | HEVC temporal operating point, RPS and output latency are retained | sublayers, highest temporal ID, short/long refs, hidden picture, IRAP/RASL, latency extremes | src/bitstream/hevc_tests.rs, src/syntax/hevc_tests.rs, service/test_output_semantics.py |
+| C07 | HEVC temporal operating point, RPS and output latency are retained | sublayers, highest temporal ID, short/long refs, hidden picture, IRAP/RASL, latency extremes | src/bitstream/hevc_tests.rs, crates/codec-parser/src/syntax/hevc_tests.rs, service/test_output_semantics.py |
 | C08 | Input framing does not change pictures or provenance | client-framed H.264/HEVC AU or metadata, VP8/VP9 frames, AV1 TU; independent task identities within multi-frame submissions, natural EOS continuation | service/test_bitstream.py, service/test_decode.py, service/test_output_semantics.py |
 | C09 | Damaged input reports an error and permits defined recovery | initial damage, established stream, reference loss, recovery point after reserved SEI 128/383, extended headers, truncated payload/trailer, parameter reuse; H.264/HEVC unknown PPS in complete submissions, explicit/natural drain, slot reuse without error misattribution, exact recovered pixels | src/bitstream_tests.rs, src/backend/input_tests.rs, service/test_input_errors.py, service/test_framed_errors.py, service/test_framed_boundaries.py, service/test_bitstream.py, service/test_picture_order.py |
 | C10 | POC is derived from normative syntax without a software decoder | H.264 types 0/1/2, LSB and frame number wrap, nonreference pictures, field deltas, MMCO5, overflow without state commit; HEVC prevTid0 selection, IRAP reset, excluded leading pictures | src/bitstream/h264/poc_tests.rs, src/bitstream/hevc/poc_tests.rs |
-| C11 | Metadata and picture ownership remain bounded and distinct | separate H.264/HEVC configuration and SEI, AV1 sequence restoration, combined packet limit, frame-budget rejection cannot initialize prediction or commit parameters, shared read lease surviving original owner | src/frontend_tests.rs, src/packet_syntax_tests.rs, src/packet_syntax/vp9_tests.rs, src/bitstream_tests.rs, src/mpp/packet_tests.rs, service/test_metadata.py |
+| C11 | Metadata and picture ownership remain bounded and distinct | separate H.264/HEVC configuration and SEI, AV1 sequence restoration, combined packet limit, frame-budget rejection cannot initialize prediction or commit parameters, shared read lease surviving original owner | src/frontend_tests.rs, crates/codec-parser/src/lib_tests.rs, crates/codec-parser/src/vp9_tests.rs, src/bitstream_tests.rs, crates/rkmpp/src/packet_tests.rs, service/test_metadata.py |
 | C12 | Restoring Annex B configuration is byte-idempotent | three/four-byte start codes, trailing framing zeros, 0/1/2/64/4096 padding bytes, 64 H.264/HEVC seeks, all five codecs across 2/8 process-level decode epochs | src/bitstream/codec_tests.rs, src/bitstream_tests.rs, service/test_lifecycle.py |
-| R01 | A returned CAPTURE slot cannot be written until QBUF | decoder frame, GPU copy, bufferless error, reuse including unqueued empty LAST, retained reference read | src/backend/capture_tests.rs, src/mpp/reservation_tests.rs, src/mpp/group_tests.rs, service/test_resources.py |
-| R02 | Decoder and display leases jointly bound memory pressure | registered/unqueued slots, exhaustion/requeue, 18/32 capacity, reset and source change | src/mpp/group_tests.rs, service/test_picture_order.py |
-| R03 | DMA storage outlives every user and mappings remain coherent | MMAP/export, release/fork, CPU/device ownership, fd reuse | kernel/test_buffers.py, src/dma_tests.rs, service/test_resources.py |
+| R01 | A returned CAPTURE slot cannot be written until QBUF | decoder frame, GPU copy, bufferless error, reuse including unqueued empty LAST, retained reference read | src/backend/capture_tests.rs, crates/rkmpp/src/reservation_tests.rs, crates/rkmpp/src/group_tests.rs, service/test_resources.py |
+| R02 | Decoder and display leases jointly bound memory pressure | registered/unqueued slots, exhaustion/requeue, 18/32 capacity, aliased DMA storage rejection before import, reset and source change | crates/rkmpp/src/group_tests.rs, service/test_picture_order.py |
+| R03 | DMA storage outlives every user and mappings remain coherent | MMAP/export, release/fork, CPU/device ownership, fd reuse, owned image metadata source | kernel/test_buffers.py, crates/dma-buf/src/lib_tests.rs, crates/dma-buf/src/image_tests.rs, service/test_resources.py |
 | R04 | GPU completion precedes release and publication | success/error/timeout, import eviction, source/destination alias, short allocation, first write to untouched oversized DMA storage | src/quantize_tests.rs, src/hardware_tests.rs, src/quantize/context_tests.rs |
 | R05 | Conversion preserves visible samples and signaled color | NV12 exact copy, NV15 dither, odd sizes, crop, 8/10-bit, HDR metadata; test pixel extraction borrows synchronized DMA storage and returns owned compact planes | src/quantize_tests.rs, support/dmabuf_tests.py, service/test_bitstream.py, browser/test_playback.py |
 | B01 | Browser uses hardware decoding and displays the actual result | H.264/VP8/VP9/AV1, 8/10-bit, replay/pause/seek, source change, concurrent players | browser/test_playback.py, browser/test_sessions.py |
@@ -61,7 +61,7 @@ payload. Original coded submissions retain their complete bytes for MPP.
 | O01 | Process lifecycle and diagnostics are observable without privileges | startup failure, signals, identity, socket ownership, resource cleanup | service/test_cli.py, service/test_diagnostics.py, service/test_recovery.py |
 | T01 | CPU averages preserve accounting intervals and exclude warmup without inventing subinterval load | unequal durations, crossing warmup, gaps, overlap, nonfinite/empty/reversed intervals; CPU sample distribution distinct from elapsed-time average | tools/performance/report_tests.py, tools/performance/telemetry_sampler_tests.py |
 
-Paths beginning `src/` are relative to the repository; other test paths are
+Paths beginning `src/` or `crates/` are relative to the repository; other test paths are
 relative to `tests/`. Each owner must test normal, rejected and boundary behavior
 through its public interface. A row is not complete merely because a file exists.
 
@@ -97,9 +97,9 @@ must not be confused with new-layout admission after STREAMOFF.
 | CAPTURE / idle | prepare write | no writable target until QBUF | src/backend/capture_tests.rs |
 | CAPTURE / queued | prepare, abort | ownership stays queued; no display completion | src/backend/capture_tests.rs |
 | CAPTURE / queued | prepare, commit | owned display lease and the exact queue token survive until completion; recycle creates a new ownership instance | src/backend/capture_tests.rs |
-| CAPTURE / imported | reuse | pin every imported slot before dropping old leases; release pins individually on QBUF | src/backend/capture_tests.rs, src/mpp/group_tests.rs |
+| CAPTURE / imported | reuse | pin every imported slot before dropping old leases; release pins individually on QBUF | src/backend/capture_tests.rs, crates/rkmpp/src/group_tests.rs |
 | Input / owned submission | damaged framed input | mark matching live origins; completion reports ERROR without attributing it to a reused slot or timestamp | src/backend/input_tests.rs, service/test_input_errors.py |
-| Input / split into tasks | lease release | no writer until every task releases its read lease; no whole-payload copy for ordinary framed input | src/mpp/packet_tests.rs, src/backend/input_tests.rs |
+| Input / split into tasks | lease release | no writer until every task releases its read lease; no whole-payload copy for ordinary framed input | crates/rkmpp/src/packet_tests.rs, src/backend/input_tests.rs |
 | Frontend / framed submission | admission | validate before submitting tasks; metadata-only input completes without borrowing the next picture timestamp; preserve configuration and SEI for MPP | src/frontend_tests.rs, src/bitstream_tests.rs, service/test_input_errors.py, service/test_metadata.py |
 
 ## Architecture contracts
@@ -119,13 +119,13 @@ infers codec reference identities.
 | protocol/command | wire event admission before resource transfer or mutation | TryFrom<Message> → Command, typed kind and immutable wire view | src/protocol/command_tests.rs, service/test_protocol.py |
 | bitstream/report | Annex B semantic results | validated geometry, picture plan, borrowed/owned payload and natural boundary | src/bitstream_tests.rs |
 | frontend | codec-specific admission behind one task interface | admit, seek; all codecs return tasks and a boundary | src/frontend_tests.rs |
-| submission | compressed input identity and storage lifetime | Origin and input-range/prefixed Payload | src/backend/input_tests.rs, src/mpp/packet_tests.rs |
-| packet_syntax | all five codecs’ header state and framed packet bounds | new, validate; rejected input never reaches MPP; recover at keyframe | packet_syntax codec unit tests, service/test_framed_errors.py, service/test_framed_boundaries.py |
+| submission | compressed input identity and storage lifetime | Origin; rkmpp::packet owns input-range/prefixed Payload | src/backend/input_tests.rs, crates/rkmpp/src/packet_tests.rs |
+| codec-parser | all five codecs’ header state and framed packet bounds | new, validate; rejected input never reaches MPP; recover at keyframe | crates/codec-parser/src/*_tests.rs, service/test_framed_errors.py, service/test_framed_boundaries.py |
 | backend/input | registered input leases and submission identity | prepare → Origin, damage → live match, complete → error status | src/backend/input_tests.rs, service/test_input_errors.py |
 | bitstream/sei | SEI framing and RBSP termination independently of payload meaning | next → bounded message or end/error | src/bitstream/sei_tests.rs, service/test_picture_order.py |
-| syntax/h264 and syntax/hevc | SPS syntax shared by geometry and reference interpretation | parse → Sequence | C02, C07 |
+| codec-parser::syntax/h264 and codec-parser::syntax/hevc | SPS syntax shared by geometry and reference interpretation | parse → Sequence | C02, C07 |
 | bitstream/h264/reference | complementary identity, MMCO, missing references, sliding window | apply(Picture) → State | C03–C05 |
-| picture/limits | decoded-picture storage/reorder/latency bounds | new, capacity, reorder, latency | src/picture/limits_tests.rs |
+| codec-parser::limits | decoded-picture storage/reorder/latency bounds | new, capacity, reorder, latency | crates/codec-parser/src/limits_tests.rs |
 | picture/plan | immutable semantic handoff | Plan construction, observation, checked pair completion | src/picture/plan_tests.rs |
 | backend/layout | serial-to-picture provenance and explicit continuation association | push, peek, complete, finish, take | src/backend/layout_tests.rs |
 | backend/presentation | reference occupancy and output scheduling | prepare, picture, take, drain, discard | C06–C07 |
@@ -134,8 +134,8 @@ infers codec reference identities.
 | backend/output/format | validated decoded-to-CAPTURE format and change detection | new, changed, message | K05, R05 |
 | backend/output/negotiation | layout acknowledgement and pool activation | announce, start, stop, commit | K06, K08 |
 | backend/capture | per-slot state and display/write leases | prepare_write → borrowing Target, commit/drop, recycle | R01–R02 |
-| mpp/decoder | synchronous execution and staged-input progress | packet → Blocked / Progress / Consumed; frame, idle, reset | src/mpp/decoder_tests.rs, browser/test_playback.py |
-| mpp/group and mpp/reservation | SDK group retention and buffer refcounts | import, pin, reserve; RAII release | R01–R03 |
+| rkmpp::decoder | synchronous execution and staged-input progress | packet → Blocked / Progress / Consumed; frame, idle, reset | crates/rkmpp/src/decoder_tests.rs, browser/test_playback.py |
+| rkmpp::group and rkmpp::reservation | SDK group retention and buffer refcounts | import, pin, reserve; RAII release | R01–R03 |
 | hardware and quantize | owned hardware execution and GPU visibility | bounded async requests → completed hardware operation | R04–R05 |
 
 ```mermaid
@@ -192,11 +192,11 @@ acceptance, and a passing playback cannot substitute for invalid-state testing.
    Every transition to active CAPTURE performs the same admission check.
 7. No error handler silently converts an unsupported legal syntax value into
    successful end-of-stream. Damaged-input recovery must remain observable.
-8. A submission identity is independent of timestamp and slot index. Parser
-   reports retain all overlapping origins even after those inputs are completed.
-   Delayed damage uses an empty ERROR CAPTURE when no matching input is still
-   owned. Its backlog is bounded; exhaustion or drain without a usable error
-   CAPTURE queue fails the session instead of silently dropping errors.
+8. A submission identity is independent of timestamp and slot index. Each
+   client-framed input is admitted synchronously before its tasks reach MPP.
+   Rejected admission marks that live input ERROR; decoded bufferless error
+   pictures use their task identity and an empty ERROR CAPTURE completion.
+   Neither path may attribute damage to a reused slot or another timestamp.
 9. Failure invalidates outstanding kernel reply ownership before poisoning both
    queues. No later reply may publish a layout, frame, completion or EOS, even
    in the batch containing FAILED. Only stopping both queues and releasing all buffers permits a new incarnation. Its endpoint, format and ownership are fresh; stale endpoints cannot read, write, register or poison it.

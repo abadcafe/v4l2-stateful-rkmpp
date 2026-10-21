@@ -1,12 +1,13 @@
 //! module: rkmpp::frame; responsibility: own decoded frame leases and
 //! borrow their images. operations: from_raw, info, plane, pool_index;
-//! entities: Frame, FrameInfo; tests: frame_tests, tests/service.
+//! entities: Frame, FrameInfo, RawFrame, FrameBuffer, Storage; tests:
+//! frame_tests, tests/service.
 use std::ffi::{c_char, c_void};
 use std::io;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::ptr::NonNull;
 
-use dma_buf::image::Plane;
+use dma_buf::image::{Plane, PlaneCache};
 #[link(name = "rockchip_mpp")]
 unsafe extern "C" {
   fn mpp_frame_deinit(frame: *mut *mut c_void) -> i32;
@@ -39,9 +40,37 @@ unsafe extern "C" {
 }
 #[derive(Debug)]
 pub struct Frame {
-  handle: NonNull<c_void>,
+  storage: Storage,
   info: FrameInfo,
-  metadata: dma_buf::image::PlaneCache,
+}
+#[derive(Debug)]
+struct RawFrame(NonNull<c_void>);
+#[derive(Debug)]
+struct FrameBuffer {
+  frame: RawFrame,
+  fd: i32,
+}
+impl AsFd for FrameBuffer {
+  fn as_fd(&self) -> BorrowedFd<'_> {
+    // SAFETY: construction validates fd; this owner retains the
+    // immutable MppFrame and its buffer until every borrowed plane
+    // is released.
+    unsafe { BorrowedFd::borrow_raw(self.fd) }
+  }
+}
+#[derive(Debug)]
+enum Storage {
+  Empty(RawFrame),
+  Invalid(RawFrame),
+  Image(PlaneCache<FrameBuffer>),
+}
+impl Storage {
+  fn handle(&self) -> *mut c_void {
+    match self {
+      Self::Empty(frame) | Self::Invalid(frame) => frame.0.as_ptr(),
+      Self::Image(image) => image.source().frame.0.as_ptr(),
+    }
+  }
 }
 #[derive(Clone, Copy, Debug)]
 pub struct FrameInfo {
@@ -67,11 +96,27 @@ impl Frame {
   /// A non-null handle transfers one initialized MppFrame reference;
   /// no other owner may mutate or deinitialize it after this call.
   pub(super) unsafe fn from_raw(handle: *mut c_void) -> Option<Self> {
-    NonNull::new(handle).map(|handle| Self {
-      info: unsafe { Self::describe(handle.as_ptr()) },
-      metadata: dma_buf::image::PlaneCache::default(),
-      handle,
-    })
+    let frame = RawFrame(NonNull::new(handle)?);
+    // SAFETY: the transferred frame is initialized and exclusively
+    // owned.
+    let info = unsafe { Self::describe(handle) };
+    let buffer = unsafe { mpp_frame_get_buffer(handle) };
+    let storage = if buffer.is_null() {
+      Storage::Empty(frame)
+    } else {
+      let fd = unsafe {
+        mpp_buffer_get_fd_with_caller(
+          buffer,
+          c"v4l2-stateful-rkmpp".as_ptr(),
+        )
+      };
+      if fd < 0 {
+        Storage::Invalid(frame)
+      } else {
+        Storage::Image(PlaneCache::new(FrameBuffer { frame, fd }))
+      }
+    };
+    Some(Self { storage, info })
   }
 
   pub fn info(&self) -> FrameInfo {
@@ -103,32 +148,19 @@ impl Frame {
   }
 
   pub fn plane(&self) -> io::Result<Option<Plane<'_>>> {
-    let buffer = unsafe { mpp_frame_get_buffer(self.handle.as_ptr()) };
-    if buffer.is_null() {
-      return Ok(None);
+    match &self.storage {
+      Storage::Empty(_) => Ok(None),
+      Storage::Invalid(_) => {
+        Err(io::Error::other("MPP frame has an invalid DMA-BUF"))
+      }
+      Storage::Image(image) => {
+        image.plane(self.info.stride, self.info.rows).map(Some)
+      }
     }
-    let fd = unsafe {
-      mpp_buffer_get_fd_with_caller(
-        buffer,
-        c"v4l2-stateful-rkmpp".as_ptr(),
-      )
-    };
-    if fd < 0 {
-      return Err(io::Error::other("MPP frame has an invalid DMA-BUF"));
-    }
-    // SAFETY: the buffer and its fd remain owned by this frame until
-    // the borrow ends.
-    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-    Ok(Some(Plane::registered(
-      fd,
-      self.info.stride,
-      self.info.rows,
-      &self.metadata,
-    )))
   }
 
   pub fn pool_index(&self) -> Option<usize> {
-    let buffer = unsafe { mpp_frame_get_buffer(self.handle.as_ptr()) };
+    let buffer = unsafe { mpp_frame_get_buffer(self.storage.handle()) };
     if buffer.is_null() {
       return None;
     }
@@ -141,9 +173,9 @@ impl Frame {
     usize::try_from(index).ok()
   }
 }
-impl Drop for Frame {
+impl Drop for RawFrame {
   fn drop(&mut self) {
-    let mut handle = self.handle.as_ptr();
+    let mut handle = self.0.as_ptr();
     unsafe {
       mpp_frame_deinit(&mut handle);
     }

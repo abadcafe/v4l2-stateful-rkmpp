@@ -85,8 +85,28 @@ impl Parser {
       } else {
         Vec::new()
       };
+      // Restore only parameters absent from this AU's metadata. A
+      // complete resume point already supplies the decoder
+      // configuration: prepending it again would force an
+      // otherwise borrowed picture into an owned whole-packet
+      // assembly.
+      let configuration = if configuration.is_empty() {
+        configuration.as_slice()
+      } else {
+        let present: std::collections::BTreeSet<_> = codec::nals(
+          &picture_bytes[..unit.prefix.min(picture_bytes.len())],
+        )
+        .collect();
+        if codec::nals(&configuration)
+          .all(|parameter| present.contains(parameter))
+        {
+          &[]
+        } else {
+          configuration.as_slice()
+        }
+      };
       let payload = self.metadata.compose(
-        &configuration,
+        configuration,
         picture_bytes,
         0..picture_bytes.len(),
       )?;

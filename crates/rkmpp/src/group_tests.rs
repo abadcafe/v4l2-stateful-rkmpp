@@ -93,6 +93,52 @@ fn test_partial_capture_registration_reserves_budget_for_unqueued_slots()
 }
 
 #[test]
+fn test_commit_rejects_aliased_storage_before_importing_any_slot() {
+  let original = Buffer::allocate(4096).unwrap();
+  let alias = Buffer::from_owned(
+    original.as_fd().try_clone_to_owned().unwrap(),
+    4096,
+  )
+  .unwrap();
+  let mut group = Group::new(false).unwrap();
+  let error = group
+    .commit(&[(0, original.clone()), (1, alias.clone())], 2)
+    .unwrap_err();
+  assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+  assert!(!group.available());
+  group.commit(&[(0, original)], 2).unwrap();
+  let held = group.reserve_capture(4096).unwrap().unwrap();
+  let error = group.commit(&[(1, alias)], 2).unwrap_err();
+  assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+  assert!(!group.available());
+  group.commit(&[(1, Buffer::allocate(4096).unwrap())], 2).unwrap();
+  assert_eq!(
+    group.reserve_capture(4096).unwrap().unwrap().index().unwrap(),
+    1
+  );
+  drop(held);
+}
+
+#[test]
+fn test_capture_operations_reject_internal_decoder_storage() {
+  let mut group = Group::new(true).unwrap();
+  let error = group
+    .commit(&[(0, Buffer::allocate(4096).unwrap())], 1)
+    .unwrap_err();
+  assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+  assert_eq!(
+    group.reserve_capture(4096).err().unwrap().kind(),
+    std::io::ErrorKind::InvalidInput
+  );
+  assert_eq!(
+    group.pin_capture().err().unwrap().kind(),
+    std::io::ErrorKind::InvalidInput
+  );
+  group.retire().unwrap();
+  assert!(!group.in_use());
+}
+
+#[test]
 fn test_pin_capture_excludes_all_imported_slots_until_individual_requeue()
  {
   let mut group = Group::new(false).unwrap();

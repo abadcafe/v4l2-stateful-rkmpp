@@ -1,6 +1,7 @@
 //! module: rkmpp::group; responsibility: own a decoder output
 //! allocation group. operations: new, commit, handle, retire, in_use,
-//! reserve_capture; entities: Group; tests: group_tests,
+//! reserve_capture; entities: Group, Allocation, Capture, Registered,
+//! BufferInfo; tests: group_tests,
 //! tests/service/test_resources.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_void};
@@ -55,11 +56,25 @@ unsafe extern "C" {
 }
 pub(super) struct Group {
   handle: NonNull<c_void>,
-  external: bool,
-  buffers: Vec<Buffer>,
-  capture: BTreeSet<usize>,
-  handles: BTreeMap<usize, NonNull<c_void>>,
-  capture_capacity: usize,
+  allocation: Allocation,
+}
+enum Allocation {
+  Internal,
+  Capture(Capture),
+}
+struct Capture {
+  buffers: BTreeMap<usize, Registered>,
+  capacity: usize,
+}
+struct Registered {
+  buffer: Buffer,
+  handle: Option<NonNull<c_void>>,
+}
+fn internal_capture() -> io::Error {
+  io::Error::new(
+    io::ErrorKind::InvalidInput,
+    "CAPTURE operation requires an external allocation group",
+  )
 }
 impl Group {
   pub(super) fn new(ten_bit: bool) -> io::Result<Self> {
@@ -81,11 +96,14 @@ impl Group {
     let group = Self {
       handle: NonNull::new(raw)
         .ok_or_else(|| io::Error::other("null MPP group"))?,
-      buffers: Vec::new(),
-      capture: BTreeSet::new(),
-      handles: BTreeMap::new(),
-      capture_capacity: 0,
-      external: !ten_bit,
+      allocation: if ten_bit {
+        Allocation::Internal
+      } else {
+        Allocation::Capture(Capture {
+          buffers: BTreeMap::new(),
+          capacity: 0,
+        })
+      },
     };
     if ten_bit
       && unsafe { mpp_buffer_group_limit_config(raw, 0, 32) } != 0
@@ -100,30 +118,45 @@ impl Group {
     buffers: &[(usize, Buffer)],
     capacity: usize,
   ) -> io::Result<()> {
+    let Allocation::Capture(capture) = &mut self.allocation else {
+      return Err(internal_capture());
+    };
     let indices: BTreeSet<_> =
       buffers.iter().map(|(index, _)| *index).collect();
     if !(1..=32).contains(&capacity)
-      || (self.capture_capacity != 0
-        && self.capture_capacity != capacity)
+      || (capture.capacity != 0 && capture.capacity != capacity)
       || indices.len() != buffers.len()
-      || indices
-        .iter()
-        .any(|index| *index >= capacity || self.capture.contains(index))
+      || indices.iter().any(|index| {
+        *index >= capacity || capture.buffers.contains_key(index)
+      })
+      || buffers.iter().enumerate().any(|(position, (_, buffer))| {
+        capture
+          .buffers
+          .values()
+          .any(|old| buffer.same_storage(&old.buffer))
+          || buffers[..position]
+            .iter()
+            .any(|(_, old)| buffer.same_storage(old))
+      })
     {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "invalid capture registration",
       ));
     }
-    self.capture_capacity = capacity;
+    capture.capacity = capacity;
     for (index, buffer) in buffers {
-      self.import(*index, buffer.clone())?;
-      self.capture.insert(*index);
+      let imported = Self::import(self.handle, *index, buffer.clone())?;
+      capture.buffers.insert(*index, imported);
     }
     Ok(())
   }
 
-  fn import(&mut self, index: usize, buffer: Buffer) -> io::Result<()> {
+  fn import(
+    group: NonNull<c_void>,
+    index: usize,
+    buffer: Buffer,
+  ) -> io::Result<Registered> {
     let mut info = BufferInfo {
       kind: 3,
       size: buffer.size(),
@@ -136,7 +169,7 @@ impl Group {
     let mut raw = std::ptr::null_mut();
     let status = unsafe {
       mpp_buffer_import_with_tag(
-        self.handle.as_ptr(),
+        group.as_ptr(),
         &mut info,
         &mut raw,
         c"v4l2-stateful-rkmpp".as_ptr(),
@@ -150,12 +183,10 @@ impl Group {
     }
     let raw = NonNull::new(raw)
       .ok_or_else(|| io::Error::other("MPP imported a null buffer"))?;
-    self.handles.insert(index, raw);
     // The group owns the unused buffer after releasing the import
     // reference.
     drop(unsafe { Reservation::imported(raw) });
-    self.buffers.push(buffer);
-    Ok(())
+    Ok(Registered { buffer, handle: Some(raw) })
   }
 
   /// Reserve only registered client storage. Exhaustion is
@@ -165,6 +196,7 @@ impl Group {
     &self,
     size: usize,
   ) -> io::Result<Option<Reservation>> {
+    self.capture()?;
     if !self.available() {
       return Ok(None);
     }
@@ -192,15 +224,16 @@ impl Group {
 
   pub(super) fn pin_capture(&self) -> io::Result<Vec<Reservation>> {
     self
-      .capture
-      .iter()
-      .map(|index| {
-        let handle = self.handles.get(index).ok_or_else(|| {
+      .capture()?
+      .buffers
+      .values()
+      .map(|registered| {
+        let handle = registered.handle.ok_or_else(|| {
           io::Error::other("retired capture registration")
         })?;
         // SAFETY: the live group retains every registered buffer, even
         // at refcount zero.
-        unsafe { Reservation::retain(*handle) }
+        unsafe { Reservation::retain(handle) }
       })
       .collect()
   }
@@ -210,7 +243,14 @@ impl Group {
   }
 
   pub(super) fn external(&self) -> bool {
-    self.external
+    matches!(self.allocation, Allocation::Capture(_))
+  }
+
+  fn capture(&self) -> io::Result<&Capture> {
+    match &self.allocation {
+      Allocation::Capture(capture) => Ok(capture),
+      Allocation::Internal => Err(internal_capture()),
+    }
   }
 
   pub(super) fn handle(&self) -> *mut c_void {
@@ -228,7 +268,11 @@ impl Group {
         "MPP buffer group clear: {status}"
       )));
     }
-    self.handles.clear();
+    if let Allocation::Capture(capture) = &mut self.allocation {
+      for registered in capture.buffers.values_mut() {
+        registered.handle = None;
+      }
+    }
     Ok(())
   }
 

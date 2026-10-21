@@ -5,7 +5,7 @@
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 
 use crate::Buffer;
-use crate::image::{Image, Plane};
+use crate::image::{Image, Plane, PlaneCache};
 
 #[test]
 fn test_new_retains_buffer_and_borrows_layout_after_original_owner_is_dropped()
@@ -36,4 +36,26 @@ fn test_from_buffer_borrows_registered_storage_and_layout() {
   assert_eq!(plane.fd().as_raw_fd(), buffer.as_fd().as_raw_fd());
   assert_eq!((plane.stride(), plane.rows()), (64, 32));
   assert_eq!(plane.metadata().unwrap().st_size, 4096);
+}
+
+#[test]
+fn test_plane_cache_owns_each_metadata_source_without_descriptor_duplication()
+ {
+  let first = Buffer::allocate(4096).unwrap();
+  let second = Buffer::allocate(8192).unwrap();
+  let first_fd = first.as_fd().as_raw_fd();
+  let second_fd = second.as_fd().as_raw_fd();
+  let first = PlaneCache::new(first);
+  let second = PlaneCache::new(second);
+  for _ in 0..3 {
+    let first_plane = first.plane(64, 32).unwrap();
+    let second_plane = second.plane(128, 32).unwrap();
+    assert_eq!(first_plane.fd().as_raw_fd(), first_fd);
+    assert_eq!(second_plane.fd().as_raw_fd(), second_fd);
+    let first_metadata = first_plane.metadata().unwrap();
+    let second_metadata = second_plane.metadata().unwrap();
+    assert_eq!(first_metadata.size(), 4096);
+    assert_eq!(second_metadata.size(), 8192);
+    assert_ne!(first_metadata.identity(), second_metadata.identity());
+  }
 }
