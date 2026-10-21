@@ -18,9 +18,7 @@ from tests.support.stream import Codec
 def test_play_invalid_repetition_count_rejects_before_session_open(
     executable: Path, tmp_path: Path, repetitions: int
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         result = play(process, Codec.H264, tmp_path / "missing", repetitions)
         assert isinstance(result, Rejected) and result.code == errno.EINVAL
@@ -31,9 +29,7 @@ def test_play_missing_input_returns_filesystem_error(
     executable: Path,
     tmp_path: Path,
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         result = play(process, Codec.H264, tmp_path / "missing")
         assert isinstance(result, Rejected) and result.code == errno.ENOENT

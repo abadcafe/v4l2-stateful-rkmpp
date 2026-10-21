@@ -6,12 +6,13 @@ use std::collections::VecDeque;
 use std::io;
 use std::num::NonZeroU32;
 
+use rkmpp::{Decoder, Packet};
+
 use crate::frontend::Frontend;
-use crate::mpp::{Decoder, Packet};
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
-use crate::protocol::command::Command;
-use crate::protocol::{Event, Message, Reply, VERSION};
+use crate::protocol::command::{Action, Command, Stop};
+use crate::protocol::{Message, Reply, VERSION};
 use crate::submission::Origin;
 mod presentation;
 #[cfg(test)]
@@ -48,7 +49,6 @@ enum Queued {
   Task {
     packet: Packet,
     serial: u64,
-    plan: crate::picture::Plan,
   },
   Release(usize, NonZeroU32),
   Eos(Option<u32>),
@@ -60,16 +60,16 @@ use flow::{Completion, End, Flow};
 #[derive(Default)]
 struct State {
   epoch: u64,
-  codec: u32,
+  codec: Option<crate::codec::Codec>,
   generation: u32,
   flow: Flow,
 }
 pub struct Backend {
+  factory: crate::quantize::Factory,
   notify: Notify,
   decoder: Option<Decoder>,
   frontend: Option<Frontend>,
   layouts: Layouts,
-  completions: VecDeque<(usize, Option<Message>)>,
   inputs: InputPool,
   output: Output,
   packets: VecDeque<Queued>,
@@ -81,15 +81,15 @@ pub struct Backend {
   state: State,
 }
 impl Backend {
-  pub fn new() -> io::Result<Self> {
+  pub fn new(factory: crate::quantize::Factory) -> io::Result<Self> {
     let notify = Notify::new()?;
     Ok(Self {
-      output: Output::new(),
+      output: Output::new(factory.clone()),
+      factory,
       notify,
       decoder: None,
       frontend: None,
       layouts: Layouts::default(),
-      completions: VecDeque::new(),
       inputs: InputPool::default(),
       packets: VecDeque::with_capacity(64),
       prepared_tasks: Vec::with_capacity(4),
@@ -106,40 +106,20 @@ impl Backend {
   }
 
   fn emit(&mut self, mut message: Message) -> io::Result<()> {
-    if message.kind == Reply::InputDone as u32 {
-      let entry = self
-        .completions
-        .iter_mut()
-        .find(|(index, _)| *index == message.index as usize)
-        .ok_or_else(|| {
-          io::Error::other("completion without queued input")
-        })?;
-      if entry.1.replace(message).is_some() {
-        return Err(io::Error::other("duplicate input completion"));
-      }
-      while self
-        .completions
-        .front()
-        .is_some_and(|(_, done)| done.is_some())
-      {
-        let (index, done) = self.completions.pop_front().unwrap();
-        let damaged = self.inputs.complete(index)?;
-        let mut done = done.unwrap();
-        if damaged {
-          done.flags |= Message::FRAME_ERROR;
-        }
-        done.pool_id = self.inputs.id();
-        done.version = VERSION;
-        done.epoch = self.state.epoch;
-        done.generation = self.state.generation;
-        self.replies.push_back(done);
-      }
-      return Ok(());
-    }
     if self.replies.len() == 64 {
       return Err(io::Error::other("backend reply queue is full"));
     }
-    message.pool_id = self.output.id();
+    message.pool_id = if message.kind == Reply::InputDone as u32 {
+      // Release is executed only at the head of the input queue, after
+      // all of this input's synchronous decode tasks. InputPool owns
+      // the lease; no second completion/order ledger is needed.
+      if self.inputs.complete(message.index as usize)? {
+        message.flags |= Message::FRAME_ERROR;
+      }
+      self.inputs.id()
+    } else {
+      self.output.id()
+    };
     message.version = VERSION;
     message.epoch = self.state.epoch;
     message.generation = self.state.generation;
@@ -150,7 +130,7 @@ impl Backend {
   fn reset(&mut self) -> io::Result<()> {
     self.pending = None;
     self.presentation = Presentation::default();
-    self.output = Output::new();
+    self.output = Output::new(self.factory.clone());
     let result = if let Some(decoder) = self.decoder.take() {
       decoder.close()
     } else {
@@ -160,7 +140,6 @@ impl Backend {
       parser.seek()?;
     }
     self.layouts = Layouts::default();
-    self.completions.clear();
     self.packets.clear();
     self.prepared_tasks.clear();
     self.active_task = None;
@@ -187,73 +166,78 @@ impl Backend {
 
   pub fn register(&mut self, pool: Pool) -> io::Result<()> {
     let (kind, id, buffers) = pool.into_parts();
-    if kind == Direction::Output {
-      if !self.packets.is_empty() || self.active_task.is_some() {
-        return Err(io::Error::other(
-          "input pool replacement with queued packets",
-        ));
+    match kind {
+      Direction::Output => {
+        if !self.packets.is_empty() || self.active_task.is_some() {
+          return Err(io::Error::other(
+            "input pool replacement with queued packets",
+          ));
+        }
+        self.inputs = InputPool::new(id, buffers)?;
       }
-      self.inputs = InputPool::new(id, buffers)?;
-    } else if kind == Direction::Capture {
-      self.output.register(id, buffers, self.decoder.as_ref())?;
-    } else {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "unknown pool direction",
-      ));
+      Direction::Capture => {
+        self.output.register(id, buffers, self.decoder.as_ref())?;
+      }
     }
     Ok(())
   }
 
   pub fn event(&mut self, command: Command) -> io::Result<()> {
-    let message = command.message();
-    self.state.epoch = message.epoch;
-    self.state.generation = message.generation;
-    match command.kind() {
-      Event::Packet => {
-        let token = queue_token(message.count)?;
-        let source =
-          crate::timestamp::Source::try_from(message.flags & 0x70000)?;
-        if message.pool_id == 0 || message.pool_id != self.inputs.id() {
+    self.state.epoch = command.route.epoch;
+    self.state.generation = command.route.generation;
+    match command.action {
+      Action::Packet {
+        pool,
+        index,
+        token,
+        extent,
+        timestamp,
+        codec,
+        source,
+      } => {
+        if pool.get() != self.inputs.id() {
           return Err(io::Error::other("invalid packet pool"));
         }
+        if self.decoder.is_some() && self.state.codec != Some(codec) {
+          return Err(io::Error::other(
+            "compressed format changed without reset",
+          ));
+        }
         if self.decoder.is_none() {
-          if self.frontend.is_none()
-            || self.state.codec != message.codec
+          if self.frontend.is_none() || self.state.codec != Some(codec)
           {
-            self.frontend = Some(Frontend::new(message.codec)?);
+            self.frontend = Some(Frontend::new(codec.fourcc())?);
           }
-          self.state.codec = message.codec;
-          self.decoder =
-            Some(Decoder::new(message.codec, self.notify.clone())?);
+          self.state.codec = Some(codec);
+          self.decoder = Some(Decoder::new(codec.fourcc(), {
+            let notify = self.notify.clone();
+            move || notify.signal()
+          })?);
         }
         let origin = self.inputs.prepare(
-          message.index as usize,
-          message.data_offset as usize,
-          message.bytesused as usize,
+          index.get(),
+          extent.offset(),
+          extent.length(),
         )?;
-        self.completions.push_back((message.index as usize, None));
         self.packets.push_back(Queued::Analyze {
-          index: message.index as usize,
-          timestamp: message.timestamp,
+          index: index.get(),
+          timestamp,
           source,
           token,
           origin,
         });
         Ok(())
       }
-      Event::Capture => self.output.start(
-        message.count as usize,
-        message.flags & Message::CAPTURE_REUSE != 0,
+      Action::Capture { count, reuse, .. } => {
+        self.output.start(count.get(), reuse, self.decoder.as_mut())
+      }
+      Action::Recycle { pool, index, token } => self.output.recycle(
+        pool.get(),
+        index.get(),
+        token,
         self.decoder.as_mut(),
       ),
-      Event::Recycle => self.output.recycle(
-        message.pool_id,
-        message.index as usize,
-        queue_token(message.count)?,
-        self.decoder.as_mut(),
-      ),
-      Event::Drain => {
+      Action::Drain => {
         if self.decoder.is_none() {
           return self.emit(Message {
             kind: Reply::Eos as u32,
@@ -263,9 +247,9 @@ impl Backend {
         self.packets.push_back(Queued::Eos(None));
         Ok(())
       }
-      Event::Reset => {
-        if message.flags & Message::RESET_CAPTURE_ONLY != 0 {
-          if message.flags & Message::RESET_ABORT_DRAIN != 0 {
+      Action::Reset { token, scope } => {
+        if let Stop::Capture { abort_drain } = scope {
+          if abort_drain {
             self.abort_drain()?;
           }
           self.output.stop(self.decoder.as_mut())?;
@@ -275,17 +259,17 @@ impl Backend {
         }
         self.emit(Message {
           kind: Reply::Stopped as u32,
-          count: message.count,
+          count: token.get(),
           ..Default::default()
         })
       }
-      Event::Resume => {
+      Action::Resume => {
         if self.state.flow.resume()? {
           self.resume_natural()?;
         }
         Ok(())
       }
-      Event::Close => Ok(()),
+      Action::Close => Ok(()),
     }
   }
 
@@ -327,6 +311,7 @@ impl Backend {
       self.inputs.bytes(index)?,
       timestamp,
       source,
+      self.layouts.budget(),
     );
     let admission = match admission {
       Ok(admission) => admission,
@@ -340,14 +325,10 @@ impl Backend {
     };
     debug_assert!(self.prepared_tasks.is_empty());
     for task in admission.tasks {
-      let serial = self.layouts.push(&task.descriptor)?;
+      let serial = self.layouts.push(task.descriptor)?;
       let packet =
         self.inputs.task(index, task.payload, serial, source)?;
-      self.prepared_tasks.push(Queued::Task {
-        packet,
-        serial,
-        plan: task.descriptor.plan,
-      });
+      self.prepared_tasks.push(Queued::Task { packet, serial });
     }
     self.prepared_tasks.push(Queued::Release(index, token));
     if admission.end {
@@ -375,8 +356,8 @@ impl Backend {
         }
         Queued::Task { packet, .. } => {
           let state = self.decoder.as_mut().unwrap().packet(packet)?;
-          progress |= state != crate::mpp::Submission::Blocked;
-          state == crate::mpp::Submission::Consumed
+          progress |= state != rkmpp::Submission::Blocked;
+          state == rkmpp::Submission::Consumed
         }
         Queued::Eos(_) => self.decoder.as_ref().unwrap().idle(),
       };
@@ -436,10 +417,11 @@ impl Backend {
       progress = true;
     }
     if self.state.flow.running()
-      && let Some(Queued::Task { plan, .. }) = self.packets.front()
+      && let Some(Queued::Task { serial, .. }) = self.packets.front()
       && self.decoder.as_ref().unwrap().idle()
     {
-      progress |= self.presentation.prepare(plan);
+      progress |=
+        self.presentation.prepare(self.layouts.plan(*serial)?);
     }
     if self.replies.len() > 58 {
       return Ok(progress);
@@ -449,11 +431,11 @@ impl Backend {
         let mut info = frame.info();
         {
           if info.info_change {
-            if self.layouts.discard_prior(info.timestamp)? {
+            if self.layouts.discard_prior(info.pts as u64)? {
               self.presentation.discard();
             }
             let requirements = self.layouts.peek(
-              info.timestamp,
+              info.pts as u64,
               info.width,
               info.height,
             )?;
@@ -507,10 +489,10 @@ impl Backend {
       }
     }
     let Some(frame) = self.pending.take() else {
-      // Publish all available pictures before admitting more decode
-      // work. A conversion owns its destination until completion;
-      // it is not permission to consume another client surface.
-      if !progress && self.output.idle() {
+      // A conversion retains its source and destination. Decode can
+      // fill one pending picture concurrently; pending backpressure
+      // then prevents admission of further work.
+      if !progress {
         progress |= self.advance_input()?;
       }
       if !progress
@@ -552,17 +534,15 @@ impl Backend {
 }
 impl Drop for Backend {
   fn drop(&mut self) {
-    if let Err(error) = self.reset() {
+    // Destruction retires GPU/display leases before the decoder. A seek
+    // transaction would recreate a parser that has no future consumer.
+    self.pending = None;
+    self.presentation = Presentation::default();
+    self.output = Output::new(self.factory.clone());
+    if let Some(decoder) = self.decoder.take()
+      && let Err(error) = decoder.close()
+    {
       eprintln!("decoder teardown: {error}");
     }
   }
-}
-
-fn queue_token(value: u32) -> io::Result<NonZeroU32> {
-  NonZeroU32::new(value).ok_or_else(|| {
-    io::Error::new(
-      io::ErrorKind::InvalidData,
-      "zero queue submission identity",
-    )
-  })
 }

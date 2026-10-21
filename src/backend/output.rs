@@ -7,12 +7,13 @@
 use std::io;
 use std::num::NonZeroU32;
 
+use dma_buf::Buffer;
+use dma_buf::image::Depth;
+use rkmpp::{Decoder, FrameInfo};
+
 use super::capture::{CapturePool, CopyReason, Presentation};
 use super::frame::FrameInput;
 use super::layout::Requirements;
-use crate::dma::Buffer;
-use crate::image::Depth;
-use crate::mpp::{Decoder, FrameInfo};
 use crate::protocol::{Message, Reply};
 use crate::quantize::Quantizer;
 mod format;
@@ -31,6 +32,7 @@ struct Conversion {
   reason: Option<CopyReason>,
 }
 pub(super) struct Output {
+  factory: crate::quantize::Factory,
   capture: CapturePool,
   format: Option<Format>,
   negotiation: Negotiation,
@@ -47,8 +49,9 @@ pub(super) enum Status {
   Stopped,
 }
 impl Output {
-  pub(super) fn new() -> Self {
+  pub(super) fn new(factory: crate::quantize::Factory) -> Self {
     Self {
+      factory,
       capture: CapturePool::default(),
       format: None,
       negotiation: Negotiation::default(),
@@ -235,11 +238,14 @@ impl Output {
       index: index as u32,
       count: token.get(),
       bytesused,
-      timestamp: info.timestamp,
-      field: info.field,
+      timestamp: info.pts as u64,
+      field: crate::backend::frame::field(info)?,
       flags: (if info.failed { Message::FRAME_ERROR } else { 0 })
-        | crate::timestamp::Source::try_from(info.timestamp_source)?
-          as u32,
+        | crate::timestamp::Source::try_from(
+          u32::try_from(info.dts).map_err(|_| {
+            io::Error::other("invalid MPP timestamp source")
+          })?,
+        )? as u32,
       ..Default::default()
     })
   }
@@ -344,7 +350,7 @@ impl Output {
         return Ok((Some(frame), None));
       };
       if self.quantizer.is_none() {
-        self.quantizer = Some(Quantizer::new()?);
+        self.quantizer = Some(Quantizer::new(&self.factory)?);
       }
       self.quantizer.as_mut().unwrap().submit(
         if ten { Depth::Ten } else { Depth::Eight },

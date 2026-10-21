@@ -7,18 +7,19 @@ tests: rejected offers preserve live sessions, pressure backs off, fatal errors 
 import errno
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from rkmpp_bridge_uapi import EXCHANGE, Batch
 
-from tests.support.bridge_abi import EXCHANGE, Batch
 from tests.support.mock_process import Process
 from tests.support.mock_wire import Reply, Request
-from tests.support.outcome import accepted
+from tests.support.outcome import accepted, present
 
 
 def idle(request: Request) -> Reply:
     assert request.command == EXCHANGE
-    return Reply(body=bytes(Batch.from_buffer_copy(request.body)))
+    return Reply(body=bytes(present(Batch.decode(request.body))))
 
 
 @pytest.mark.parametrize(
@@ -32,7 +33,7 @@ def test_rejected_offer_preserves_existing_session_and_accepts_next(
     def handle(request: Request) -> Reply:
         assert request.command == EXCHANGE
         observed.set()
-        return Reply(body=bytes(Batch.from_buffer_copy(request.body)))
+        return Reply(body=bytes(present(Batch.decode(request.body))))
 
     first = accepted(mock_service.session(handle))
     assert observed.wait(5)
@@ -66,7 +67,7 @@ def test_sessions_do_not_create_native_threads(mock_service: Process) -> None:
     def handle(request: Request) -> Reply:
         assert request.command == EXCHANGE
         observed.set()
-        return Reply(body=bytes(Batch.from_buffer_copy(request.body)))
+        return Reply(body=bytes(present(Batch.decode(request.body))))
 
     first = accepted(mock_service.session(handle))
     assert observed.wait(5)
@@ -81,4 +82,22 @@ def test_sessions_do_not_create_native_threads(mock_service: Process) -> None:
     accepted(first.wake())
     assert observed.wait(5)
     accepted(second.wake())
+    assert mock_service.process.poll() is None
+
+
+def test_session_admission_waits_for_capacity_and_resumes_after_close(
+    mock_service: Process,
+) -> None:
+    # Bound the whole session lifetime, including tasks waiting for an
+    # executor lane. A bounded lane queue alone cannot limit these owners.
+    peers = [accepted(mock_service.session(idle)) for _ in range(64)]
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(mock_service.session, idle)
+        try:
+            time.sleep(0.2)
+            assert not pending.done(), "session admission exceeded its capacity"
+        finally:
+            peers[0].close()
+        next_peer = accepted(pending.result(timeout=5))
+        accepted(next_peer.wake())
     assert mock_service.process.poll() is None

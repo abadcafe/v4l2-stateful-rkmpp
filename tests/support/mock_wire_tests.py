@@ -6,8 +6,8 @@ operations: pytest cases; entities: none; tests: request/reply/wake boundaries.
 import struct
 
 import pytest
+from rkmpp_bridge_uapi import ACCEPT, REGISTER_POOL
 
-from tests.support.bridge_abi import ACCEPT, REGISTER_POOL
 from tests.support.mock_wire import Patch, Reply, read_request, reply, request, wake
 from tests.support.outcome import Rejected, accepted
 

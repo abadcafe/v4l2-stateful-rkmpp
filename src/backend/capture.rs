@@ -7,9 +7,9 @@ use std::io;
 use std::num::NonZeroU32;
 use std::os::fd::{AsFd, AsRawFd};
 
-use crate::dma::Buffer;
-use crate::image::Plane;
-use crate::mpp::{Decoder, Frame, Reservation};
+use dma_buf::Buffer;
+use dma_buf::image::Plane;
+use rkmpp::{Decoder, Frame, Reservation};
 enum Lease {
   Decoded(Frame),
   Reserved(Reservation),
@@ -141,7 +141,7 @@ impl CapturePool {
       } else {
         let src = plane.metadata()?;
         let dst = slot.buffer.metadata();
-        src.st_dev == dst.st_dev && src.st_ino == dst.st_ino
+        src.identity() == dst.identity()
       };
     if !same {
       return Ok(Presentation::Convert(frame, CopyReason::Foreign));

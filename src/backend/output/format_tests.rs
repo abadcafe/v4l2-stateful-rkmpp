@@ -1,8 +1,9 @@
 //! Public decoded-to-CAPTURE format contract, independent of the
 //! parser.
+use rkmpp::FrameInfo;
+
 use super::format::Format;
 use crate::backend::layout::Requirements;
-use crate::mpp::FrameInfo;
 
 fn frame() -> FrameInfo {
   FrameInfo {
@@ -12,9 +13,9 @@ fn frame() -> FrameInfo {
     rows: 128,
     size: 49152,
     format: 0,
-    timestamp: 0,
-    timestamp_source: 0,
-    field: 0,
+    pts: 0,
+    dts: 0,
+    mode: 0,
     eos: false,
     info_change: false,
     failed: false,
@@ -64,7 +65,7 @@ fn test_new_rejects_invalid_storage_and_unrepresentable_geometry() {
     FrameInfo { rows: 129, ..frame() },
     FrameInfo { size: 49151, ..frame() },
     FrameInfo { size: usize::MAX, ..frame() },
-    FrameInfo { field: 6, ..frame() },
+    FrameInfo { mode: 4, ..frame() },
     FrameInfo { format: 2, ..frame() },
   ] {
     assert!(Format::new(info, requirements()).is_err(), "{info:?}");
@@ -89,12 +90,12 @@ fn test_changed_tracks_storage_and_color_but_not_frame_provenance() {
     FrameInfo { transfer: 16, ..frame() },
     FrameInfo { primaries: 9, ..frame() },
     FrameInfo { range: 2, ..frame() },
-    FrameInfo { field: 1, ..frame() },
+    FrameInfo { mode: 7, ..frame() },
   ] {
     assert!(format.changed(info, requirements()), "{info:?}");
   }
   assert!(!format.changed(
-    FrameInfo { timestamp: 100, eos: true, failed: true, ..frame() },
+    FrameInfo { pts: 100, eos: true, failed: true, ..frame() },
     requirements()
   ));
   assert!(
@@ -108,14 +109,14 @@ fn test_changed_compares_field_arrangement_not_picture_parity() {
   let arrangements = [0, 1, 2, 3, 3, 5];
   for (first, arrangement) in arrangements.iter().enumerate() {
     let format = Format::new(
-      FrameInfo { field: first as u32, ..frame() },
+      FrameInfo { mode: [0, 7, 11, 1, 2, 3][first], ..frame() },
       requirements(),
     )
     .unwrap();
     for (next, expected) in arrangements.iter().enumerate() {
       assert_eq!(
         format.changed(
-          FrameInfo { field: next as u32, ..frame() },
+          FrameInfo { mode: [0, 7, 11, 1, 2, 3][next], ..frame() },
           requirements()
         ),
         arrangement != expected,
@@ -133,7 +134,7 @@ fn test_new_announces_external_reference_and_display_storage_budget() {
     32
   );
   let ten = FrameInfo { format: 1, ..frame() };
-  assert_eq!(Format::new(ten, geometry).unwrap().message().count, 18);
+  assert_eq!(Format::new(ten, geometry).unwrap().message().count, 2);
   assert!(
     Format::new(frame(), requirements())
       .unwrap()

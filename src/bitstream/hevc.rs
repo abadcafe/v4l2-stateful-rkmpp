@@ -1,20 +1,11 @@
 //! module: bitstream::hevc; responsibility: HEVC picture output
-//! eligibility. operations: Hevc implementing Syntax; entities: Hevc,
-//! Pps; tests: hevc_tests, service output semantics.
-use std::collections::BTreeMap;
+//! eligibility. operations: Hevc implementing Syntax; entities: Hevc;
+//! tests: hevc_tests, service output semantics.
 use std::io;
 
-use super::bits::Bits;
-use super::codec::{Picture, Syntax, nals};
+use super::codec::{Picture, Syntax};
 use super::hevc_rps::{Memory, Target};
-use super::parameters::Parameters;
-struct Pps {
-  sequence: u32,
-}
 pub(super) struct Hevc {
-  sets: Parameters,
-  sequences: BTreeMap<u32, Sequence>,
-  pictures: BTreeMap<u32, Pps>,
   references: Memory,
   seeking: bool,
   suppress_rasl: bool,
@@ -24,9 +15,6 @@ pub(super) struct Hevc {
 impl Default for Hevc {
   fn default() -> Self {
     Self {
-      sets: Parameters::default(),
-      sequences: BTreeMap::new(),
-      pictures: BTreeMap::new(),
       references: Memory::default(),
       seeking: true,
       suppress_rasl: false,
@@ -36,8 +24,12 @@ impl Default for Hevc {
   }
 }
 impl Syntax for Hevc {
-  fn configuration(&self) -> Vec<u8> {
-    self.sets.configuration()
+  fn seek(&mut self) {
+    self.references.reset();
+    self.seeking = true;
+    self.suppress_rasl = false;
+    self.highest = None;
+    self.poc = poc::Counter::default();
   }
 
   fn boundary(&mut self) {
@@ -46,56 +38,16 @@ impl Syntax for Hevc {
 
   fn inspect(
     &mut self,
-    bytes: &[u8],
-    header: Option<&crate::packet_syntax::header::Header>,
+    _bytes: &[u8],
+    header: Option<&codec_parser::header::Header>,
   ) -> io::Result<Option<Picture>> {
-    for nal in nals(bytes) {
-      if nal.len() < 2 {
-        continue;
-      }
-      let kind = (nal[0] >> 1) & 63;
-      let mut b = Bits::new(&nal[2..]);
-      match kind {
-        32 => {
-          let id = b.get(4)?;
-          self.sets.insert(kind, id, nal)?;
-        }
-        33 => {
-          let seq = parse(&nal[2..])?;
-          self.sets.insert(kind, seq.geometry.id, nal)?;
-          self.sequences.insert(seq.geometry.id, seq);
-        }
-        34 => {
-          let id = b.ue()?;
-          let sequence = b.ue()?;
-          b.skip(1)?;
-          b.skip(4)?;
-          if id > 63 || sequence > 15 {
-            return Err(io::Error::other(
-              "invalid HEVC parameter reference",
-            ));
-          }
-          self.sets.insert(kind, id, nal)?;
-          self.pictures.insert(id, Pps { sequence });
-        }
-        _ => {}
-      }
-    }
-    let Some(crate::packet_syntax::header::Header::Hevc(header)) =
-      header
+    let Some(codec_parser::header::Header::Hevc(header)) = header
     else {
       return Ok(None);
     };
     let kind = header.kind;
     let irap = (16..=23).contains(&kind);
-    let pps = self
-      .pictures
-      .get(&header.pps)
-      .ok_or_else(|| io::Error::other("unknown HEVC PPS"))?;
-    let seq = self
-      .sequences
-      .get(&pps.sequence)
-      .ok_or_else(|| io::Error::other("unknown HEVC SPS"))?;
+    let seq = &header.sequence;
     if (self.seeking && !irap)
       || (matches!(kind, 8 | 9) && self.suppress_rasl)
     {
@@ -169,10 +121,6 @@ impl Syntax for Hevc {
   }
 }
 
-mod sequence;
-#[cfg(test)]
-mod sequence_tests;
-use sequence::{Sequence, parse};
 mod poc;
 #[cfg(test)]
 mod poc_tests;

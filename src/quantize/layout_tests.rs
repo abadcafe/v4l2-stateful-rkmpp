@@ -6,8 +6,9 @@
 //! test_new_layout_rejects_empty_oversized_misaligned_and_undersized_views
 use std::os::fd::AsFd;
 
+use dma_buf::image::{Depth, Plane};
+
 use super::layout::Layout;
-use crate::image::{Depth, Plane};
 
 #[test]
 fn test_new_layout_exposes_checked_shader_parameters_and_required_sizes()

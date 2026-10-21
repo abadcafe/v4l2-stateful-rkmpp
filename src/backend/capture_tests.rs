@@ -3,14 +3,13 @@
 //! is independently observable.
 use std::num::NonZeroU32;
 
+use dma_buf::Buffer;
+use rkmpp::Decoder;
+
 use super::capture::CapturePool;
-use crate::dma::Buffer;
-use crate::mpp::Decoder;
-use crate::notify::Notify;
 fn decoder() -> Decoder {
   let mut decoder =
-    Decoder::new(u32::from_le_bytes(*b"H264"), Notify::new().unwrap())
-      .unwrap();
+    Decoder::new(u32::from_le_bytes(*b"H264"), || Ok(())).unwrap();
   decoder.configure_output(false).unwrap();
   decoder
 }

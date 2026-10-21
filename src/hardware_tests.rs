@@ -4,8 +4,7 @@
 use crate::hardware::Hardware;
 #[tokio::test(flavor = "current_thread")]
 async fn test_open_independent_sessions_close_before_executor() {
-  let hardware = Hardware::start();
-  let client = hardware.client();
+  let (hardware, client) = Hardware::start().unwrap();
   let mut first = client.open(()).await.unwrap();
   let second = client.open(()).await.unwrap();
   assert!(!first.advance().await.unwrap());
@@ -17,15 +16,15 @@ async fn test_open_independent_sessions_close_before_executor() {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn test_close_reclaims_abandoned_sessions() {
-  let hardware = Hardware::start();
-  let engine = hardware.client().open(()).await.unwrap();
+  let (hardware, client) = Hardware::start().unwrap();
+  let engine = client.clone().open(()).await.unwrap();
   drop(engine);
   hardware.close().await.unwrap();
 }
 #[tokio::test(flavor = "current_thread")]
 async fn test_close_invalidates_outstanding_engine() {
-  let hardware = Hardware::start();
-  let mut engine = hardware.client().open(()).await.unwrap();
+  let (hardware, client) = Hardware::start().unwrap();
+  let mut engine = client.clone().open(()).await.unwrap();
   hardware.close().await.unwrap();
   assert!(engine.advance().await.is_err());
   assert!(engine.close().await.is_err());
@@ -33,8 +32,7 @@ async fn test_close_invalidates_outstanding_engine() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_drop_executor_closes_clients_with_live_engines() {
-  let hardware = Hardware::start();
-  let client = hardware.client();
+  let (hardware, client) = Hardware::start().unwrap();
   let mut engine = client.open(()).await.unwrap();
   drop(hardware);
   tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -49,8 +47,7 @@ async fn test_drop_executor_closes_clients_with_live_engines() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_cancel_queued_opens_preserves_executor_admission() {
-  let hardware = Hardware::start();
-  let client = hardware.client();
+  let (hardware, client) = Hardware::start().unwrap();
   let mut tasks = tokio::task::JoinSet::new();
   for _ in 0..128 {
     let client = client.clone();
@@ -77,9 +74,9 @@ async fn test_close_releases_channel_lease_only_after_hardware_teardown()
     }
   }
   let released = Arc::new(AtomicBool::new(false));
-  let hardware = Hardware::start();
+  let (hardware, client) = Hardware::start().unwrap();
   let engine =
-    hardware.client().open(Lease(released.clone())).await.unwrap();
+    client.clone().open(Lease(released.clone())).await.unwrap();
   assert!(!released.load(Ordering::Acquire));
   engine.close().await.unwrap();
   assert!(released.load(Ordering::Acquire));
@@ -87,8 +84,7 @@ async fn test_close_releases_channel_lease_only_after_hardware_teardown()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn test_cancel_completed_open_reclaims_lease_while_executor_is_idle()
- {
+async fn test_cancel_open_reclaims_lease_while_executor_is_idle() {
   use std::future::Future;
   use std::sync::Arc;
   use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,21 +96,19 @@ async fn test_cancel_completed_open_reclaims_lease_while_executor_is_idle()
     }
   }
   let released = Arc::new(AtomicBool::new(false));
-  let hardware = Hardware::start();
-  let client = hardware.client();
+  let (hardware, client) = Hardware::start().unwrap();
   let mut opening = Box::pin(client.open(Lease(released.clone())));
-  assert!(
-    opening
-      .as_mut()
-      .poll(&mut Context::from_waker(Waker::noop()))
-      .is_pending()
-  );
-  // A later request/close is a public FIFO barrier: the first open has
-  // finished, but its future deliberately has not received the newly
-  // created engine.
-  client.open(()).await.unwrap().close().await.unwrap();
-  assert!(!released.load(Ordering::Acquire));
+  // The native worker can finish before the first poll returns. Both
+  // outcomes must retain the session until its async owner is dropped.
+  let completed = match opening
+    .as_mut()
+    .poll(&mut Context::from_waker(Waker::noop()))
+  {
+    std::task::Poll::Ready(result) => Some(result.unwrap()),
+    std::task::Poll::Pending => None,
+  };
   drop(opening);
+  drop(completed);
   tokio::time::timeout(std::time::Duration::from_secs(1), async {
     while !released.load(Ordering::Acquire) {
       tokio::task::yield_now().await;
@@ -130,14 +124,15 @@ async fn test_advance_applies_ordered_reset_batch_and_returns_all_replies()
  {
   use crate::protocol::command::Command;
   use crate::protocol::{Event, Message, Reply, VERSION};
-  let hardware = Hardware::start();
-  let mut engine = hardware.client().open(()).await.unwrap();
+  let (hardware, client) = Hardware::start().unwrap();
+  let mut engine = client.clone().open(()).await.unwrap();
   for epoch in 1..=16 {
     engine
       .submit(
         Command::try_from(Message {
           version: VERSION,
           kind: Event::Reset as u32,
+          count: 1,
           epoch,
           ..Default::default()
         })
@@ -165,33 +160,38 @@ async fn test_advance_cancellation_preserves_executed_commands_and_replies()
   use crate::protocol::command::Command;
   use crate::protocol::{Event, Message, Reply, VERSION};
 
-  let hardware = Hardware::start();
-  let client = hardware.client();
+  let (hardware, client) = Hardware::start().unwrap();
   let mut engine = client.open(()).await.unwrap();
   let reset = Command::try_from(Message {
     version: VERSION,
     kind: Event::Reset as u32,
+    count: 1,
     epoch: 7,
     ..Default::default()
   })
   .unwrap();
   engine.submit(reset, None).unwrap();
   let mut advancing = Box::pin(engine.advance());
-  assert!(
-    advancing
-      .as_mut()
-      .poll(&mut Context::from_waker(Waker::noop()))
-      .is_pending()
-  );
-  // The FIFO barrier proves execution completed before cancellation;
-  // no sleep or knowledge of executor internals is needed.
-  client.open(()).await.unwrap().close().await.unwrap();
+  let completed = match advancing
+    .as_mut()
+    .poll(&mut Context::from_waker(Waker::noop()))
+  {
+    std::task::Poll::Ready(result) => {
+      assert!(!result.unwrap());
+      true
+    }
+    std::task::Poll::Pending => false,
+  };
+  // Whether the native lane already completed or is still queued,
+  // cancelling the wait must preserve exactly one transaction.
   drop(advancing);
-  assert_eq!(
-    engine.submit(reset, None).unwrap_err().kind(),
-    std::io::ErrorKind::WouldBlock
-  );
-  assert!(!engine.advance().await.unwrap());
+  if !completed {
+    assert_eq!(
+      engine.submit(reset, None).unwrap_err().kind(),
+      std::io::ErrorKind::WouldBlock
+    );
+    assert!(!engine.advance().await.unwrap());
+  }
   let reply = engine.take_reply().unwrap();
   assert_eq!((reply.kind, reply.epoch), (Reply::Stopped as u32, 7));
   assert!(!engine.advance().await.unwrap());

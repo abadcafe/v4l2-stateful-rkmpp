@@ -5,9 +5,10 @@
 //! tests.
 use std::io;
 
+use rkmpp::FrameInfo;
+
 use crate::backend::color::Color;
 use crate::backend::layout::Requirements;
-use crate::mpp::FrameInfo;
 use crate::protocol::{Message, Reply};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FieldArrangement {
@@ -45,7 +46,8 @@ impl Format {
     info: FrameInfo,
     requirements: Requirements,
   ) -> io::Result<Self> {
-    let arrangement = FieldArrangement::try_from(info.field)?;
+    let arrangement =
+      FieldArrangement::try_from(crate::backend::frame::field(info)?)?;
     if !(18..=32).contains(&requirements.minimum) {
       return Err(io::Error::other("invalid CAPTURE minimum"));
     }
@@ -123,7 +125,11 @@ impl Format {
     }
     let message = Message {
       kind: Reply::Layout as u32,
-      count: if ten { 18 } else { requirements.minimum },
+      count: if ten {
+        crate::protocol::MIN_CAPTURE
+      } else {
+        requirements.minimum
+      },
       width: info.width,
       height: info.height,
       coded_width,
@@ -136,7 +142,7 @@ impl Format {
         io::Error::other("frame buffer exceeds protocol size")
       })?,
       format: 1,
-      field: info.field,
+      field: crate::backend::frame::field(info)?,
       colorspace: color.primaries(),
       ycbcr_enc: color.matrix(),
       xfer_func: color.transfer(),
@@ -164,7 +170,9 @@ impl Format {
     requirements: Requirements,
   ) -> bool {
     self.requirements != requirements
-      || FieldArrangement::try_from(info.field).ok()
+      || crate::backend::frame::field(info)
+        .and_then(FieldArrangement::try_from)
+        .ok()
         != Some(self.arrangement)
       || !same_output(self.info, info)
   }

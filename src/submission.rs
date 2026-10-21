@@ -10,14 +10,7 @@ impl Origin {
     Self(value)
   }
 }
-#[derive(Debug)]
-pub enum Payload {
-  Input(std::ops::Range<usize>),
-  Prefixed { prefix: Vec<u8>, range: std::ops::Range<usize> },
-}
-
-/// Maximum compressed task size, including retained metadata.
-pub(crate) const MAX_PACKET_SIZE: usize = 16 * 1024 * 1024;
+use rkmpp::{MAX_PACKET_SIZE, Payload};
 
 /// Unsubmitted metadata. Bounds are checked before allocation or
 /// mutation; the admission owner discards this prefix when its

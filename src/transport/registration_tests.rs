@@ -33,7 +33,7 @@ fn returned(count: usize) -> Pool {
   }
   for descriptor in &mut pool.buffers[..count] {
     let file = std::fs::File::from(
-      crate::dma::Buffer::allocate(4096)
+      dma_buf::Buffer::allocate(4096)
         .unwrap()
         .as_fd()
         .try_clone_to_owned()

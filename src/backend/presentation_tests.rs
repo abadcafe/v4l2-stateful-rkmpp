@@ -1,7 +1,9 @@
 //! module: presentation_tests; responsibility: normative output
 //! scheduling.
+use codec_parser::Limits;
+
 use super::presentation::Presentation;
-use crate::picture::{Boundary, Id, Limits, Output, Part, Plan};
+use crate::picture::{Boundary, Id, Output, Part, Plan};
 #[derive(Clone)]
 struct Spec {
   id: u64,

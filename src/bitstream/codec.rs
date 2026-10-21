@@ -4,7 +4,7 @@
 //! bitstream_tests.
 use std::io;
 
-use super::geometry::Geometry;
+use codec_parser::syntax::geometry::Geometry;
 pub(super) struct Picture {
   pub geometry: Geometry,
   pub order: i32,
@@ -18,12 +18,14 @@ pub(super) struct Picture {
   pub reference: bool,
 }
 pub(super) trait Syntax {
-  fn configuration(&self) -> Vec<u8>;
+  /// Clear prediction state while retaining the picture identity
+  /// sequence.
+  fn seek(&mut self);
   fn boundary(&mut self);
   fn inspect(
     &mut self,
     bytes: &[u8],
-    header: Option<&crate::packet_syntax::header::Header>,
+    header: Option<&codec_parser::header::Header>,
   ) -> io::Result<Option<Picture>>;
 }
 pub(super) fn nals(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {

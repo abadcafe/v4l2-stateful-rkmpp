@@ -5,12 +5,13 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, BorrowedFd, IntoRawFd};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use ash::vk;
 
 use super::device::Device;
 struct Imported {
-  gpu: Rc<Device>,
+  gpu: Arc<Device>,
   buffer: vk::Buffer,
   memory: vk::DeviceMemory,
   identity: (u64, u64),
@@ -18,11 +19,11 @@ struct Imported {
 }
 impl Imported {
   fn new(
-    gpu: Rc<Device>,
+    gpu: Arc<Device>,
     fd: BorrowedFd<'_>,
-    stat: &crate::dma::system::Metadata,
+    stat: &dma_buf::Metadata,
   ) -> io::Result<Self> {
-    if stat.st_size <= 0 {
+    if stat.size() <= 0 {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "empty DMA-BUF import",
@@ -32,8 +33,8 @@ impl Imported {
       gpu,
       buffer: vk::Buffer::null(),
       memory: vk::DeviceMemory::null(),
-      identity: (stat.st_dev, stat.st_ino),
-      size: stat.st_size as u64,
+      identity: stat.identity(),
+      size: stat.size() as u64,
     };
     // SAFETY: every Vulkan resource below is owned by imported;
     // descriptor chains borrow local storage only until their call
@@ -121,14 +122,14 @@ struct Entry {
   age: u64,
 }
 pub(super) struct Cache {
-  gpu: Rc<Device>,
+  gpu: Arc<Device>,
   entries: Vec<Entry>,
   clock: u64,
   capacity: usize,
 }
 impl Cache {
   pub(super) fn new(
-    gpu: Rc<Device>,
+    gpu: Arc<Device>,
     capacity: NonZeroUsize,
   ) -> io::Result<Self> {
     if capacity.get() < 2 {
@@ -147,14 +148,12 @@ impl Cache {
 
   pub(super) fn pair(
     &mut self,
-    source: crate::image::Plane<'_>,
-    destination: crate::image::Plane<'_>,
+    source: dma_buf::image::Plane<'_>,
+    destination: dma_buf::image::Plane<'_>,
   ) -> io::Result<Pair> {
     let source_stat = source.metadata()?;
     let destination_stat = destination.metadata()?;
-    if (source_stat.st_dev, source_stat.st_ino)
-      == (destination_stat.st_dev, destination_stat.st_ino)
-    {
+    if source_stat.identity() == destination_stat.identity() {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "conversion images alias the same DMA-BUF",
@@ -172,11 +171,11 @@ impl Cache {
   fn get(
     &mut self,
     fd: BorrowedFd<'_>,
-    stat: &crate::dma::system::Metadata,
+    stat: &dma_buf::Metadata,
     avoid: Option<usize>,
   ) -> io::Result<usize> {
     self.clock = self.clock.wrapping_add(1);
-    let identity = (stat.st_dev, stat.st_ino);
+    let identity = stat.identity();
     if let Some(index) =
       self.entries.iter().position(|e| e.import.identity == identity)
     {

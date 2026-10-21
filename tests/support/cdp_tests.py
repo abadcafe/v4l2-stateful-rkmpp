@@ -73,6 +73,23 @@ def test_call_remote_failure_is_rejected(peer: PeerFactory) -> None:
 
 
 @pytest.mark.parametrize(
+    "timeout", [0.0, -1.0, float("nan"), float("inf"), -float("inf")]
+)
+def test_call_invalid_deadline_rejects_before_sending(
+    peer: PeerFactory, timeout: float
+) -> None:
+    def handle(connection: ServerConnection) -> None:
+        message = TypeAdapter(dict[str, JsonValue]).validate_json(connection.recv())
+        assert message["method"] == "Example.valid" and message["id"] == 1
+        connection.send(json.dumps({"id": 1, "result": {}}))
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        result = cdp.call("Example.invalid", timeout=timeout)
+        assert isinstance(result, Rejected) and result.code == errno.EINVAL
+        assert accepted(cdp.call("Example.valid")) == {}
+
+
+@pytest.mark.parametrize(
     "payload", ["not-json", '{"id":99,"result":{}}', '{"result":{}}']
 )
 def test_call_invalid_wire_response_is_rejected(

@@ -23,7 +23,7 @@ from tests.support.video import Video
     [
         (QueueType.OUTPUT, 1, 1),
         (QueueType.OUTPUT, 33, 32),
-        (QueueType.CAPTURE, 1, 18),
+        (QueueType.CAPTURE, 1, 2),
         (QueueType.CAPTURE, 33, 32),
     ],
 )
@@ -97,7 +97,7 @@ def test_map_and_export_share_storage_and_queue_offsets_never_alias(
         Queue(video.fd, QueueType.CAPTURE),
     )
     assert accepted(output.request(2)) == 2
-    assert accepted(capture.request(1)) == 18
+    assert accepted(capture.request(1)) == 2
     first, second = accepted(output.query(0)), accepted(capture.query(0))
     assert first.offsets[0] != second.offsets[0]
     with accepted(output.map(0)) as a, accepted(capture.map(0)) as b:

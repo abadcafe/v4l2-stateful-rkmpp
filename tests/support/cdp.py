@@ -6,6 +6,7 @@ Payload; tests: cdp_tests (success, errors, timeout, event order).
 
 import errno
 import json
+import math
 import time
 from contextlib import ExitStack
 from types import TracebackType
@@ -77,7 +78,8 @@ class Cdp:
     def call(
         self, method: str, params: Payload | None = None, *, timeout: float = 10
     ) -> Result[Payload]:
-        assert timeout > 0
+        if not math.isfinite(timeout) or timeout <= 0:
+            return Rejected(errno.EINVAL, "invalid CDP deadline")
         self._sequence += 1
         deadline = time.monotonic() + timeout
         try:

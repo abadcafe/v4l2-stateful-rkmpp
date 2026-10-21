@@ -4,12 +4,15 @@ operations: Peer open/close/video/service; entities: Peer;
 tests: kernel_peer_tests. The Python caller supplies all service-side replies.
 """
 
+import errno
+import select
 from contextlib import ExitStack
 from pathlib import Path
 from types import TracebackType
 
+from rkmpp_bridge_uapi import ACCEPT
+
 from tests.support.bridge import Session
-from tests.support.bridge_abi import ACCEPT
 from tests.support.outcome import Ok, Rejected, Result
 from tests.support.syscalls import OwnedFd, ioctl, open_fd
 from tests.support.video import Video
@@ -28,6 +31,14 @@ class Peer:
         if isinstance(broker, Rejected):
             return broker
         _ = owned.enter_context(broker.value)
+        pending = select.poll()
+        pending.register(broker.value.fd, select.POLLIN)
+        if pending.poll(0):
+            owned.close()
+            return Rejected(
+                errno.EBUSY,
+                "Another video client is waiting for an endpoint; kernel peers require exclusive use of the video node.",
+            )
         video = Video.open(video_path)
         if isinstance(video, Rejected):
             owned.close()
@@ -39,6 +50,12 @@ class Peer:
             return service
         endpoint = Session(OwnedFd(service.value))
         _ = owned.callback(endpoint.close)
+        if pending.poll(0):
+            owned.close()
+            return Rejected(
+                errno.EBUSY,
+                "Another video client appeared while opening the paired kernel session.",
+            )
         return Ok(cls(video.value, endpoint, owned))
 
     def close(self) -> None:

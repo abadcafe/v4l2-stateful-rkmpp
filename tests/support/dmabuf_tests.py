@@ -95,3 +95,32 @@ def test_i420_rejects_invalid_or_chroma_unaligned_geometry(
     with accepted(Buffer.allocate(4096)) as buffer:
         result = i420(buffer.fd, width, height, stride, rows, left=left, top=top)
         assert isinstance(result, Rejected) and result.code == errno.EINVAL
+
+
+@pytest.mark.parametrize(
+    "width,height,left,top,stride,rows",
+    [(1, 1, 0, 0, 4, 2), (3, 3, 2, 2, 8, 6), (7, 5, 0, 0, 8, 6)],
+)
+def test_i420_odd_crop_preserves_planar_order_and_owns_returned_pixels(
+    width: int, height: int, left: int, top: int, stride: int, rows: int
+) -> None:
+    raw = bytes((index * 13 + 7) % 256 for index in range(4096))
+    expected = bytes(
+        raw[(top + row) * stride + left + column]
+        for row in range(height)
+        for column in range(width)
+    ) + b"".join(
+        bytes(
+            raw[(rows + top // 2 + row) * stride + left + 2 * column + plane]
+            for row in range((height + 1) // 2)
+            for column in range((width + 1) // 2)
+        )
+        for plane in (0, 1)
+    )
+    with accepted(Buffer.allocate(4096)) as buffer:
+        accepted(buffer.write(raw))
+        pixels = accepted(
+            i420(buffer.fd, width, height, stride, rows, left=left, top=top)
+        )
+        accepted(buffer.write(bytes(4096)))
+    assert pixels == expected

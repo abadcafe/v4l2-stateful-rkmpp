@@ -46,6 +46,10 @@ static struct dma_buf *rb_export(struct vb2_buffer *vb, void *ptr,
   get_dma_buf(m->buf);
   return m->buf;
 }
+struct file *rb_memory_export(struct vb2_buffer *buffer) {
+  struct rb_memory *m = buffer->planes[0].mem_priv;
+  return get_file(m->buf->file);
+}
 static int rb_mmap(void *ptr, struct vm_area_struct *vma) {
   struct rb_memory *m = ptr;
   int r = dma_buf_mmap(m->buf, vma, 0);

@@ -4,7 +4,7 @@
 //! layout_tests.
 use std::io;
 
-use crate::image::{Depth, Plane};
+use dma_buf::image::{Depth, Plane};
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Layout {
   parameters: [u32; 7],

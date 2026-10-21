@@ -9,12 +9,10 @@ use crate::diagnostics::Endpoint;
 use crate::hardware::Hardware;
 use crate::shutdown::Signals;
 use crate::transport::{Admission, Broker};
-mod driver;
-#[cfg(test)]
-mod driver_tests;
 mod scheduler;
 #[cfg(test)]
 mod scheduler_tests;
+const MAX_SESSIONS: usize = 64;
 pub async fn serve(
   path: &Path,
   diagnostics: &Path,
@@ -22,25 +20,28 @@ pub async fn serve(
   tokio::task::LocalSet::new().run_until(run(path, diagnostics)).await
 }
 async fn run(path: &Path, diagnostics: &Path) -> Result<(), String> {
-  let broker = Broker::open(path)
-    .map_err(|e| format!("open control {}: {e}", path.display()))?;
   let signals = Signals::install()
     .map_err(|e| format!("install termination signals: {e}"))?;
   let shutdown = signals.shutdown();
+  let mut broker = Broker::open(path)
+    .map_err(|e| format!("open control {}: {e}", path.display()))?;
+  let control =
+    broker.as_fd().try_clone_to_owned().map_err(|e| e.to_string())?;
   let mut endpoint =
-    Endpoint::open(diagnostics, broker.as_fd(), &shutdown)
+    Endpoint::open(diagnostics, control.as_fd(), &shutdown)
       .await
       .map_err(|e| {
         format!("open diagnostics {}: {e}", diagnostics.display())
       })?;
-  let mut hardware = Hardware::start();
+  let (mut hardware, client) =
+    Hardware::start().map_err(|e| e.to_string())?;
   let mut sessions = tokio::task::JoinSet::new();
   eprintln!("rkmpp service listening on {}", path.display());
   let mut panic = None;
   let result = loop {
     tokio::select! {
       result = hardware.terminated() => {
-        if let Err(error) = result && error.is_panic() { panic = Some(error.into_panic()); }
+        if let Err(payload) = result { panic = Some(payload); }
         break Err("hardware executor terminated".into());
       },
       result = endpoint.terminated() => {
@@ -58,13 +59,16 @@ async fn run(path: &Path, diagnostics: &Path) -> Result<(), String> {
         if let Err(error) = result { break Err(format!("termination wait: {error}")); }
         if shutdown.stopping() { break Ok(()); }
       },
-      admission = broker.accept() => {
+      // Lane queues bound submitted work, not the tasks and descriptor
+      // owners waiting to submit it. Reserve capacity for the entire
+      // session lifetime before consuming another broker offer.
+      admission = broker.accept(), if sessions.len() < MAX_SESSIONS => {
         match admission {
           Ok(Admission::Accepted(session)) => {
             let stop = shutdown.clone();
-            let client = hardware.client();
+            let client = client.clone();
             sessions.spawn_local(async move {
-              if let Err(error) = driver::run(session, stop, client).await {
+              if let Err(error) = run_session(session, stop, client).await {
                 eprintln!("rkmpp session: {error}");
               }
             });
@@ -94,9 +98,9 @@ async fn run(path: &Path, diagnostics: &Path) -> Result<(), String> {
     }
   }
   if let Err(error) = hardware.close().await {
-    result = Err(format!("hardware executor failed: {error}"));
-    if error.is_panic() && panic.is_none() {
-      panic = Some(error.into_panic());
+    result = Err("hardware executor panicked".into());
+    if panic.is_none() {
+      panic = Some(error);
     }
   }
   if let Err(error) = endpoint.close().await {
@@ -105,8 +109,90 @@ async fn run(path: &Path, diagnostics: &Path) -> Result<(), String> {
       panic = Some(error.into_panic());
     }
   }
+  drop(control);
+  if let Err(payload) = broker.close().await {
+    result = Err("kernel transport executor panicked".into());
+    if panic.is_none() {
+      panic = Some(payload);
+    }
+  }
   if let Some(panic) = panic {
     std::panic::resume_unwind(panic);
   }
   result
+}
+
+use std::io;
+
+use scheduler::{Channel, Engine};
+
+use crate::hardware::{Client, Engine as HardwareEngine};
+use crate::notify::Notify;
+use crate::pool::{Direction, Pool};
+use crate::protocol::command::Command;
+use crate::protocol::{Batch, Message};
+use crate::readiness::Readable;
+use crate::shutdown::Shutdown;
+use crate::transport::Session;
+
+impl Channel for Session {
+  async fn exchange(&mut self, batch: &mut Batch) -> io::Result<()> {
+    Session::exchange(self, batch).await
+  }
+
+  async fn register(
+    &mut self,
+    direction: Direction,
+    epoch: u64,
+    id: u32,
+  ) -> io::Result<Pool> {
+    Session::register(self, direction, epoch, id).await
+  }
+
+  async fn wait(
+    &mut self,
+    notify: &Notify,
+    notification: &Readable,
+    shutdown: &Shutdown,
+  ) -> io::Result<bool> {
+    Session::wait(self, notify, notification, shutdown).await
+  }
+}
+impl Engine for HardwareEngine {
+  async fn close(self) -> io::Result<()> {
+    HardwareEngine::close(self).await
+  }
+
+  fn notification(&self) -> Notify {
+    HardwareEngine::notification(self)
+  }
+
+  fn submit(
+    &mut self,
+    command: Command,
+    pool: Option<Pool>,
+  ) -> io::Result<()> {
+    HardwareEngine::submit(self, command, pool)
+  }
+
+  async fn advance(&mut self) -> io::Result<bool> {
+    HardwareEngine::advance(self).await
+  }
+
+  async fn wait(&self) -> io::Result<()> {
+    HardwareEngine::wait(self).await
+  }
+
+  fn take_reply(&mut self) -> Option<Message> {
+    HardwareEngine::take_reply(self)
+  }
+}
+pub(crate) async fn run_session(
+  mut session: Session,
+  shutdown: Shutdown,
+  client: Client,
+) -> Result<(), String> {
+  let backend =
+    client.open(session.lease()).await.map_err(|e| e.to_string())?;
+  scheduler::run(&mut session, backend, &shutdown).await.map(|_| ())
 }

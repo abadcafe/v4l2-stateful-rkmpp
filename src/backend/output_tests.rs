@@ -2,12 +2,13 @@
 //! public contract.
 use std::num::NonZeroU32;
 
+use dma_buf::Buffer;
+
 use super::output::{Output, Status};
-use crate::dma::Buffer;
 #[test]
 fn test_register_duplicate_pool_and_unknown_recycle_do_not_change_ownership()
  {
-  let mut output = Output::new();
+  let mut output = Output::new(crate::quantize::Factory::default());
   assert_eq!(output.id(), 0);
   output
     .register(1, vec![Buffer::allocate(4096).unwrap()], None)
@@ -30,7 +31,7 @@ fn test_register_duplicate_pool_and_unknown_recycle_do_not_change_ownership()
 }
 #[test]
 fn test_stop_requires_explicit_start_before_replacement_can_run() {
-  let mut output = Output::new();
+  let mut output = Output::new(crate::quantize::Factory::default());
   output.stop(None).unwrap();
   assert_eq!(output.status(), Status::Stopped);
   output
@@ -44,7 +45,7 @@ fn test_stop_requires_explicit_start_before_replacement_can_run() {
 
 #[test]
 fn test_register_rejects_invalid_identity_and_capacity_atomically() {
-  let mut output = Output::new();
+  let mut output = Output::new(crate::quantize::Factory::default());
   for (id, count) in [(0, 1), (1, 0), (1, 33)] {
     let buffers =
       (0..count).map(|_| Buffer::allocate(4096).unwrap()).collect();
@@ -61,7 +62,7 @@ fn test_register_rejects_invalid_identity_and_capacity_atomically() {
 
 #[test]
 fn test_start_invalid_count_preserves_stopped_pool() {
-  let mut output = Output::new();
+  let mut output = Output::new(crate::quantize::Factory::default());
   output.stop(None).unwrap();
   output
     .register(1, vec![Buffer::allocate(4096).unwrap()], None)
@@ -77,18 +78,15 @@ fn test_start_invalid_count_preserves_stopped_pool() {
 
 #[test]
 fn test_start_reuse_validates_storage_before_changing_decoder() {
+  use rkmpp::{Decoder, Input};
+
   use super::frame::FrameInput;
   use super::layout::Requirements;
-  use crate::mpp::{Decoder, Input};
-  use crate::notify::Notify;
   use crate::timestamp::Source;
 
   for (count, bytes) in [(18, 1_048_576), (32, 4096)] {
-    let mut decoder = Decoder::new(
-      u32::from_le_bytes(*b"VP90"),
-      Notify::new().unwrap(),
-    )
-    .unwrap();
+    let mut decoder =
+      Decoder::new(u32::from_le_bytes(*b"VP90"), || Ok(())).unwrap();
     let stream =
       include_bytes!("../../tests/artifacts/vp9-yuv420p.ivf");
     let size =
@@ -100,11 +98,7 @@ fn test_start_reuse_validates_storage_before_changing_decoder() {
     let input = Input::new(buffer).unwrap();
     let access = input.prepare(0, size).unwrap();
     let packet = access
-      .packet(
-        crate::submission::Payload::Input(0..size),
-        0,
-        Source::End,
-      )
+      .packet(rkmpp::Payload::Input(0..size), 0, Source::End as i64)
       .unwrap();
     decoder.packet(&packet).unwrap();
     let frame = decoder.frame().unwrap().unwrap();
@@ -112,7 +106,7 @@ fn test_start_reuse_validates_storage_before_changing_decoder() {
     assert!(info.info_change);
     let mut requirements = Requirements::from_frame(info);
     requirements.minimum = 32;
-    let mut output = Output::new();
+    let mut output = Output::new(crate::quantize::Factory::default());
     output
       .register(
         1,

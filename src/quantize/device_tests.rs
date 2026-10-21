@@ -2,8 +2,9 @@
 //! device admission.
 use std::os::fd::AsFd;
 
+use dma_buf::Buffer;
+
 use super::device::Device;
-use crate::dma::Buffer;
 #[test]
 fn test_new_accepts_dma_buf_memory_on_hardware_device() {
   let device = Device::new().unwrap();

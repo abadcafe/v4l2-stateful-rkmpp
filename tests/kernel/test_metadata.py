@@ -6,14 +6,14 @@ operations: pytest cases; entities: none; tests: fields and timestamp source.
 import ctypes
 
 import pytest
+from rkmpp_bridge_uapi import Reply
 
 from tests.kernel.test_frame_reply import CaptureSession, frame
 
 # Reuse the public session fixture, never implementation state.
 from tests.kernel.test_frame_reply import capture_session as capture_session
-from tests.support.bridge_abi import Message, Reply
 from tests.support.buffer_abi import Plane, VideoBuffer
-from tests.support.outcome import accepted
+from tests.support.outcome import accepted, present
 from tests.support.queue import Queue, QueueType
 from tests.support.syscalls import command, ioctl
 
@@ -35,7 +35,7 @@ def test_capture_sequence_counts_frames_not_fields(
     for index, field in enumerate(fields):
         reply = frame(session.queued[index])
         reply.field = field
-        assert accepted(session.raw.service.exchange([reply])).results[0] == 0
+        assert present(accepted(session.raw.service.exchange([reply])).result(0)) == 0
         actual.append(accepted(session.queue.dequeue()).sequence)
     assert tuple(actual) == expected
 
@@ -47,10 +47,10 @@ def test_timestamp_source_survives_packet_and_frame(
     session = capture_session
     output = Queue(session.raw.video.fd, QueueType.OUTPUT)
     # Retire the fixture's first packet and submit an explicitly marked one.
-    done = Message.from_buffer_copy(session.packets[0])
+    done = session.packets[0].clone()
     done.kind = Reply.INPUT_DONE
     done.pool_id = 1
-    assert accepted(session.raw.service.exchange([done])).results[0] == 0
+    assert present(accepted(session.raw.service.exchange([done])).result(0)) == 0
     _ = accepted(output.dequeue())
     planes = (Plane * 1)()
     Plane.from_buffer(planes).bytesused = 16
@@ -61,9 +61,9 @@ def test_timestamp_source_survives_packet_and_frame(
             session.raw.video.fd, command(3, "V", 15, ctypes.sizeof(payload)), payload
         )
     )
-    packet = Message.from_buffer_copy(accepted(session.raw.service.exchange()).events)
+    packet = present(accepted(session.raw.service.exchange()).event(0))
     assert packet.flags & 0x70000 == source
     reply = frame(session.queued[0])
     reply.flags = source
-    assert accepted(session.raw.service.exchange([reply])).results[0] == 0
+    assert present(accepted(session.raw.service.exchange([reply])).result(0)) == 0
     assert accepted(session.queue.dequeue()).flags & 0x70000 == source

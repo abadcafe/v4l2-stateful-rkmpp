@@ -1,16 +1,14 @@
 """module: syscalls; responsibility: own Linux syscall resources in acceptance tests.
 
-operations: OwnedFd, open_fd, ioctl, command, readonly_payload;
+operations: OwnedFd, WireBuffer, open_fd, ioctl, command;
 entities: OwnedFd; tests: syscalls_tests and kernel/test_copyout_faults.
 """
 
 import ctypes
-import mmap
 import os
-from collections.abc import Generator
-from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
+from typing import Protocol
 
 from pydantic import TypeAdapter
 
@@ -18,8 +16,10 @@ from tests.support.outcome import Ok, Rejected, Result
 
 _libc = ctypes.CDLL(None, use_errno=True)
 _libc.ioctl.restype = ctypes.c_int
-_libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-_libc.mprotect.restype = ctypes.c_int
+
+
+class WireBuffer(Protocol):
+    def ioctl(self, fd: int, request: int) -> int: ...
 
 
 class OwnedFd:
@@ -63,7 +63,12 @@ def command(direction: int, letter: str, number: int, size: int = 0) -> int:
     return direction << 30 | size << 16 | ord(letter) << 8 | number
 
 
-def ioctl(fd: int, request: int, payload: ctypes.Structure | int = 0) -> Result[int]:
+def ioctl(
+    fd: int, request: int, payload: ctypes.Structure | WireBuffer | int = 0
+) -> Result[int]:
+    if not isinstance(payload, (ctypes.Structure, int)):
+        result = payload.ioctl(fd, request)
+        return Rejected(-result, f"ioctl {request:#x}") if result < 0 else Ok(result)
     address = (
         ctypes.addressof(payload) if isinstance(payload, ctypes.Structure) else payload
     )
@@ -77,32 +82,3 @@ def ioctl(fd: int, request: int, payload: ctypes.Structure | int = 0) -> Result[
     if result < 0:
         return Rejected(ctypes.get_errno(), f"ioctl {request:#x}")
     return Ok(result)
-
-
-@contextmanager
-def readonly_payload(payload: ctypes.Structure) -> Generator[int]:
-    size = ctypes.sizeof(payload)
-    with mmap.mmap(-1, size) as mapping:
-        mapping[:] = ctypes.string_at(ctypes.addressof(payload), size)
-        anchor = ctypes.c_char.from_buffer(mapping)
-        address = ctypes.addressof(anchor)
-        del anchor
-        assert (
-            TypeAdapter(int).validate_python(
-                _libc.mprotect(ctypes.c_void_p(address), size, mmap.PROT_READ),
-                strict=True,
-            )
-            == 0
-        )
-        try:
-            yield address
-        finally:
-            assert (
-                TypeAdapter(int).validate_python(
-                    _libc.mprotect(
-                        ctypes.c_void_p(address), size, mmap.PROT_READ | mmap.PROT_WRITE
-                    ),
-                    strict=True,
-                )
-                == 0
-            )

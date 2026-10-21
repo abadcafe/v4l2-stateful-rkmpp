@@ -5,7 +5,6 @@ tests: service/test_decode, service reconfiguration/concurrency/lifetimes.
 All image memory is real DMA-BUF; only bridge events and acknowledgements are simulated.
 """
 
-import ctypes
 import errno
 import hashlib
 from collections import deque
@@ -13,24 +12,23 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from pydantic import BaseModel
-
-from tests.support.bridge_abi import (
+from rkmpp_bridge_uapi import (
     EXCHANGE,
     REGISTER_POOL,
     VERSION,
     Batch,
-    Descriptor,
     Event,
     Message,
     Pool,
     Reply,
 )
+
 from tests.support.dma_heap import Buffer
 from tests.support.dmabuf import i420
 from tests.support.mock_process import Process
 from tests.support.mock_wire import Patch, Request
 from tests.support.mock_wire import Reply as Response
-from tests.support.outcome import Ok, Rejected, Result
+from tests.support.outcome import Ok, Rejected, Result, present
 from tests.support.stream import Codec, Packet, load
 
 
@@ -196,7 +194,7 @@ class _Stream:
     def _prepare_capture(self, size: int) -> Result[None]:
         self._held_capture.clear()
         self._capture = []
-        minimum = self._layout.count if self._layout is not None else 18
+        minimum = self._layout.count if self._layout is not None else 2
         for _ in range(max(self._capture_count, minimum)):
             buffer = Buffer.allocate(size)
             if isinstance(buffer, Rejected):
@@ -208,7 +206,7 @@ class _Stream:
         return Ok(None)
 
     def _register(self, request: Request) -> Response:
-        pool = Pool.from_buffer_copy(request.body)
+        pool = present(Pool.decode(request.body))
         if (
             pool.version != VERSION
             or pool.epoch != self._epoch
@@ -221,16 +219,16 @@ class _Stream:
         self._registrations.append((pool.kind, pool.pool_id))
         pool.count = len(buffers)
         for index, buffer in enumerate(buffers):
-            descriptor = Descriptor.from_buffer(
-                pool.buffers, index * ctypes.sizeof(Descriptor)
-            )
+            descriptor = present(pool.descriptor(index))
             descriptor.fd = -1
             descriptor.size = buffer.size
+            assert pool.set_descriptor(index, descriptor)
         return Response(
             body=bytes(pool),
             fds=tuple(buffer.fd for buffer in buffers),
             patches=tuple(
-                Patch(32 + index * 8, index) for index in range(len(buffers))
+                Patch(present(Pool.descriptor_offset(index)), index)
+                for index in range(len(buffers))
             ),
         )
 
@@ -256,7 +254,7 @@ class _Stream:
             if message.format != 1 or message.size <= 0:
                 return Rejected(errno.EPROTO, "service published invalid NV12 storage")
             replacing = bool(self._capture)
-            self._layout = Message.from_buffer_copy(message)
+            self._layout = message.clone()
             self._layouts.append((message.width, message.height))
             self._capture_minimums.append(message.count)
             self._generation += 1
@@ -283,7 +281,7 @@ class _Stream:
                     event for event in self._events if event.kind != Event.RECYCLE
                 )
                 self._replacing = True
-                self._events.append(self._event(Event.RESET, flags=9 | (1 << 16)))
+                self._events.append(self._event(Event.RESET, flags=(1 << 16)))
                 return Ok(None)
             return self._prepare_capture(message.size)
         if message.kind == Reply.STOPPED:
@@ -380,7 +378,7 @@ class _Stream:
                     event for event in self._events if event.kind != Event.RECYCLE
                 )
                 self._events.append(
-                    self._event(Event.RESET, flags=9 | (1 << 16) | (1 << 17))
+                    self._event(Event.RESET, flags=(1 << 16) | (1 << 17))
                 )
             elif len(self._frames) == self._restart_at_frame:
                 self._ordinary_restart = True
@@ -388,7 +386,7 @@ class _Stream:
                 self._events = deque(
                     event for event in self._events if event.kind != Event.RECYCLE
                 )
-                self._events.append(self._event(Event.RESET, flags=9 | (1 << 16)))
+                self._events.append(self._event(Event.RESET, flags=(1 << 16)))
             elif not self._ordinary_restart:
                 self._held_capture.append(message.index)
                 if len(self._held_capture) > self._capture_delay:
@@ -411,7 +409,7 @@ class _Stream:
                     self._replacing = True
                     self._resume_pending = True
                     self._events.append(
-                        self._event(Event.RESET, flags=9 | (1 << 16) | (1 << 17))
+                        self._event(Event.RESET, flags=(1 << 16) | (1 << 17))
                     )
                     return Ok(None)
                 return self._resume()
@@ -424,7 +422,7 @@ class _Stream:
             if self._completed < self._repetitions:
                 self._epoch += 1
                 self._restarting = True
-                self._events.append(self._event(Event.RESET, flags=10))
+                self._events.append(self._event(Event.RESET, flags=0))
                 return Ok(None)
             self._eos = True
             self._events.append(self._event(Event.CLOSE))
@@ -445,18 +443,16 @@ class _Stream:
             return self._register(request)
         if request.command != EXCHANGE:
             return self._fail("service used unknown bridge command")
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         if batch.version != VERSION or batch.reply_count > 16 or batch.reserved != 0:
             return self._fail("service emitted invalid exchange header")
         self._maximum_reply_batch = max(self._maximum_reply_batch, batch.reply_count)
         for index in range(batch.reply_count):
-            message = Message.from_buffer_copy(
-                batch.replies, index * ctypes.sizeof(Message)
-            )
+            message = present(batch.reply(index))
             consumed = self._consume(message)
             if isinstance(consumed, Rejected):
                 return self._fail(consumed.operation, consumed.code)
-            batch.results[index] = 0
+            assert batch.set_result(index, 0)
         if (
             (
                 self._next == len(self._packets)
@@ -470,7 +466,7 @@ class _Stream:
             self._events.append(self._event(Event.DRAIN))
         batch.event_count = min(16, len(self._events))
         for index in range(batch.event_count):
-            batch.events[index] = self._events.popleft()
+            assert batch.set_event(index, self._events.popleft())
         return Response(body=bytes(batch))
 
     def run(self, process: Process) -> Result[Decoded]:
@@ -530,7 +526,7 @@ def play(
     timestamps: tuple[int, ...] = (),
     abort_drain: bool = False,
     natural_sequences: int = 1,
-    capture_count: int = 18,
+    capture_count: int = 2,
     sources: tuple[int, ...] = (),
     capture_delay: int = 0,
 ) -> Result[Decoded]:
@@ -552,7 +548,7 @@ def play(
             Packet(data=p.data, timestamp=t)
             for p, t in zip(chunks, timestamps, strict=True)
         )
-    if not 18 <= capture_count <= 32:
+    if not 2 <= capture_count <= 32:
         return Rejected(errno.EINVAL, "invalid capture buffer count")
     if not 0 <= capture_delay < capture_count:
         return Rejected(errno.EINVAL, "invalid capture return delay")

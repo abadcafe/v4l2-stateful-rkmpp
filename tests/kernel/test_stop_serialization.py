@@ -3,17 +3,16 @@
 operations: pytest cases; entities: none; tests: concurrent commands wait for reset.
 """
 
-import ctypes
 import errno
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from rkmpp_bridge_uapi import Event, Message, Reply
 
-from tests.support.bridge_abi import Event, Message, Reply
 from tests.support.event_abi import DecoderCommand
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import Ok, accepted
+from tests.support.outcome import Ok, accepted, present
 from tests.support.queue import Queue, QueueType
 from tests.support.syscalls import command, ioctl
 
@@ -33,7 +32,7 @@ def test_stop_serializes_other_mutating_operations(
                 break
             assert time.monotonic() < deadline
             time.sleep(0.001)
-        reset = Message.from_buffer_copy(batch.events)
+        reset = present(batch.event(0))
         assert reset.kind == Event.RESET
         if operation == "streamoff":
             second = executor.submit(output.stream_off)
@@ -44,9 +43,11 @@ def test_stop_serializes_other_mutating_operations(
             )
         time.sleep(0.05)
         waited = not second.done()
-        acknowledgement = Message.from_buffer_copy(reset)
+        acknowledgement = reset.clone()
         acknowledgement.kind = Reply.STOPPED
-        assert accepted(peer.service.exchange([acknowledgement])).results[0] == 0
+        assert (
+            present(accepted(peer.service.exchange([acknowledgement])).result(0)) == 0
+        )
         accepted(first.result(timeout=3))
         assert isinstance(second.result(timeout=3), Ok)
         assert waited
@@ -61,9 +62,7 @@ def test_capture_stop_accepts_already_inflight_completions_before_acknowledgemen
     for index in range(18):
         accepted(capture.queue(index))
     accepted(capture.stream_on())
-    cap = Message.from_buffer_copy(
-        accepted(peer.service.exchange()).events, ctypes.sizeof(Message)
-    )
+    cap = present(accepted(peer.service.exchange()).event(1))
     assert cap.kind == Event.RECYCLE
     while accepted(peer.service.exchange()).event_count:
         pass
@@ -76,15 +75,17 @@ def test_capture_stop_accepts_already_inflight_completions_before_acknowledgemen
                 break
             assert time.monotonic() < deadline
             time.sleep(0.001)
-        reset = Message.from_buffer_copy(batch.events)
+        reset = present(batch.event(0))
         assert reset.kind == Event.RESET and reset.epoch == packets[0].epoch
-        done = Message.from_buffer_copy(packets[0])
+        done = packets[0].clone()
         done.kind = Reply.INPUT_DONE
-        frame = Message.from_buffer_copy(cap)
+        frame = cap.clone()
         frame.kind = Reply.FRAME
         frame.bytesused = 6144
         reset.kind = Reply.STOPPED
-        results = accepted(peer.service.exchange([done, frame, reset])).results
+        results = present(
+            accepted(peer.service.exchange([done, frame, reset])).results(3)
+        )
         accepted(stopping.result(timeout=3))
         assert list(results[:3]) == [0, 0, 0]
     # OUTPUT remains live and its completion is not lost during CAPTURE teardown.
@@ -114,7 +115,7 @@ def test_capture_stop_rejects_acknowledgement_from_previous_stop(
                     break
                 assert time.monotonic() < deadline
                 time.sleep(0.001)
-            reset = Message.from_buffer_copy(batch.events)
+            reset = present(batch.event(0))
             assert reset.kind == Event.RESET
             assert reset.count != 0
             reset.kind = Reply.STOPPED
@@ -127,14 +128,15 @@ def test_capture_stop_rejects_acknowledgement_from_previous_stop(
                 # Complete the actual stop even when this regression fails.
                 current = accepted(peer.service.exchange([reset]))
                 accepted(stopping.result(timeout=3))
-                assert stale.results[0] == -errno.ESTALE
-                assert current.results[0] == 0
+                assert present(stale.result(0)) == -errno.ESTALE
+                assert present(current.result(0)) == 0
             else:
-                zero = Message.from_buffer_copy(reset)
+                zero = reset.clone()
                 zero.count = 0
                 assert (
-                    accepted(peer.service.exchange([zero])).results[0] == -errno.ESTALE
+                    present(accepted(peer.service.exchange([zero])).result(0))
+                    == -errno.ESTALE
                 )
-                assert accepted(peer.service.exchange([reset])).results[0] == 0
+                assert present(accepted(peer.service.exchange([reset])).result(0)) == 0
                 accepted(stopping.result(timeout=3))
             previous = reset

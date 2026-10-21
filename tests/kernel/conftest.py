@@ -5,15 +5,14 @@ tests: test_batch, test_pool, test_frame_reply, test_layout_reply,
 test_copyout_faults, test_lifecycle.
 """
 
-import ctypes
 from collections.abc import Generator
 from pathlib import Path
 
 import pytest
+from rkmpp_bridge_uapi import Message
 
-from tests.support.bridge_abi import Message
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import accepted
+from tests.support.outcome import accepted, present
 from tests.support.queue import Queue, QueueType
 from tests.support.stream import Codec
 from tests.support.video_formats import set_format
@@ -41,8 +40,5 @@ def packet_session(raw_session: Peer) -> tuple[Peer, tuple[Message, ...]]:
         accepted(output.queue(index, 16, index * 100000))
     batch = accepted(raw_session.service.exchange())
     assert batch.event_count == 3
-    packets = tuple(
-        Message.from_buffer_copy(batch.events, i * ctypes.sizeof(Message))
-        for i in range(3)
-    )
+    packets = tuple(present(batch.event(i)) for i in range(3))
     return raw_session, packets

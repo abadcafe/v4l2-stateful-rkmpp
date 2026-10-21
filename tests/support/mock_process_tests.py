@@ -3,35 +3,52 @@
 operations: pytest cases; entities: none; tests: startup/session/error/termination.
 """
 
-import ctypes
 import errno
 import os
 from pathlib import Path
 
 import pytest
+from rkmpp_bridge_uapi import EXCHANGE, VERSION, Batch, Event
 
-from tests.support.bridge_abi import EXCHANGE, VERSION, Batch, Event, Message
-from tests.support.mock_process import Process
+from tests.support.mock_process import Peer, Process
 from tests.support.mock_wire import Reply, Request
-from tests.support.outcome import Rejected, accepted
+from tests.support.outcome import Rejected, accepted, present
+from tests.support.seqpacket import Socket
+
+
+@pytest.mark.parametrize(
+    "timeout", [0.0, -1.0, float("nan"), float("inf"), -float("inf")]
+)
+def test_wait_invalid_deadline_rejects_without_waiting(timeout: float) -> None:
+    endpoint, remote = accepted(Socket.pair())
+
+    def handle(request: Request) -> Reply:
+        return Reply(body=request.body)
+
+    peer = Peer(endpoint, handle)
+    try:
+        result = peer.wait(timeout)
+        assert isinstance(result, Rejected) and result.code == errno.EINVAL
+    finally:
+        peer.close()
+        accepted(remote.close())
 
 
 def test_process_session_close_uses_real_daemon_and_only_mock_endpoint(
     executable: Path, tmp_path: Path
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
 
     def handle(request: Request) -> Reply:
         assert request.command == EXCHANGE
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         assert batch.version == VERSION and batch.reply_count == 0
         batch.event_count = 1
-        event = Message.from_buffer(batch.events)
+        event = present(batch.event(0))
         event.version = VERSION
         event.kind = Event.CLOSE
         event.epoch = 1
+        assert batch.set_event(0, event)
         return Reply(body=bytes(batch))
 
     process = accepted(Process.open(executable, library, tmp_path / "mock"))
@@ -39,7 +56,7 @@ def test_process_session_close_uses_real_daemon_and_only_mock_endpoint(
         peer = accepted(process.session(handle))
         assert accepted(peer.wait(5)) is None
         assert len(peer.calls()) == 1
-        assert len(peer.calls()[0].body) == ctypes.sizeof(Batch)
+        assert len(peer.calls()[0].body) == Batch.SIZE
         assert process.process.poll() is None
     assert process.process.returncode == 0
     assert "events=1" in process.log()
@@ -48,9 +65,7 @@ def test_process_session_close_uses_real_daemon_and_only_mock_endpoint(
 def test_process_rejected_accept_exits_with_original_errno(
     executable: Path, tmp_path: Path
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         assert accepted(process.reject_accept(errno.EIO)) is None
         assert process.process.wait(timeout=5) == 1
@@ -70,9 +85,7 @@ def test_process_environment_and_descriptors_never_select_real_bridge(
     tmp_path: Path,
 ) -> None:
     parent = dict(os.environ)
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         links = [
             path.readlink().as_posix()
@@ -88,9 +101,7 @@ def test_process_environment_and_descriptors_never_select_real_bridge(
 def test_reject_accept_invalid_errno_preserves_idle_daemon(
     executable: Path, tmp_path: Path, code: int
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         result = process.reject_accept(code)
         assert isinstance(result, Rejected) and result.code == errno.EINVAL
@@ -101,9 +112,7 @@ def test_session_invalid_response_closes_peer_and_reports_rejected(
     executable: Path,
     tmp_path: Path,
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
 
         def handle(request: Request) -> Reply:
@@ -127,9 +136,7 @@ def test_open_inherits_only_selected_descriptors_and_preserves_parent_owners(
 ) -> None:
     from tests.support.syscalls import OwnedFd
 
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     selected, private = tmp_path / "selected", tmp_path / "private"
     _ = selected.write_bytes(b"selected")
     _ = private.write_bytes(b"private")

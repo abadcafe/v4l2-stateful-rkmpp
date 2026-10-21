@@ -3,13 +3,13 @@
 //! none; tests:
 //! test_message_wire_layout_matches_published_kernel_uapi
 //! test_batch_wire_layout_matches_published_kernel_uapi
-//! test_pool_default_has_no_owned_file_descriptors
+//! test_all_public_wire_fields_and_constants_match_compiled_c_header
 //! test_validate_accepts_empty_and_maximum_batch_counts
 //! test_validate_rejects_invalid_version_reserved_or_counts
 //! test_event_and_reply_discriminants_match_wire_contract
 use crate::protocol::registration::{Descriptor, MAX_BUFFERS, Pool};
 use crate::protocol::{
-  Batch, Event, MAX_BATCH, Message, Reply, VERSION,
+  Batch, Event, MAX_BATCH, Message, Reply, VERSION, validate,
 };
 #[test]
 fn test_message_wire_layout_matches_published_kernel_uapi() {
@@ -37,13 +37,12 @@ fn test_batch_wire_layout_matches_published_kernel_uapi() {
 fn test_validate_accepts_empty_and_maximum_batch_counts() {
   for reply_count in [0, MAX_BATCH as u32] {
     for event_count in [0, MAX_BATCH as u32] {
-      Batch {
+      validate(&Batch {
         version: VERSION,
         reply_count,
         event_count,
         ..Default::default()
-      }
-      .validate()
+      })
       .unwrap();
     }
   }
@@ -60,14 +59,13 @@ fn test_validate_rejects_invalid_version_reserved_or_counts() {
     (VERSION, 0, 0, 1),
   ] {
     assert_eq!(
-      Batch {
+      validate(&Batch {
         version,
         reply_count,
         event_count,
         reserved,
         ..Default::default()
-      }
-      .validate()
+      })
       .unwrap_err()
       .kind(),
       std::io::ErrorKind::InvalidData

@@ -6,6 +6,9 @@ operations: read_bytes, i420; entities: none; tests: dmabuf_tests and decode pix
 import errno
 import mmap
 import sys
+from collections.abc import Callable
+
+import numpy as np
 
 from tests.support.dma_sync import finish_read, start_read
 from tests.support.outcome import Ok, Rejected, Result
@@ -14,15 +17,25 @@ from tests.support.outcome import Ok, Rejected, Result
 def read_bytes(fd: int, length: int, offset: int = 0) -> Result[bytes]:
     if length <= 0 or offset < 0 or length + offset > sys.maxsize:
         return Rejected(errno.EINVAL, "invalid DMA-BUF read extent")
+
+    def copy(mapping: mmap.mmap) -> bytes:
+        return mapping[offset : offset + length]
+
+    return _read(fd, length + offset, copy)
+
+
+def _read(fd: int, length: int, extract: Callable[[mmap.mmap], bytes]) -> Result[bytes]:
+    if not 0 < length <= sys.maxsize:
+        return Rejected(errno.EINVAL, "invalid DMA-BUF read extent")
     start = start_read(fd)
     if isinstance(start, Rejected):
         return start
     result: Result[bytes]
     try:
         with mmap.mmap(
-            fd, length + offset, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ
+            fd, length, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ
         ) as mapping:
-            result = Ok(mapping[offset : offset + length])
+            result = Ok(extract(mapping))
     except OSError as error:
         result = Rejected(error.errno or 0, "mmap DMA-BUF")
     finally:
@@ -53,30 +66,37 @@ def i420(
         or top + height > rows
     ):
         return Rejected(errno.EINVAL, "invalid NV12 crop geometry")
-    raw = read_bytes(fd, stride * (rows + (top + height + 1) // 2))
-    if isinstance(raw, Rejected):
-        return raw
-    data = raw.value
-    y = b"".join(
-        data[(top + row) * stride + left : (top + row) * stride + left + width]
-        for row in range(height)
-    )
-    chroma_width = 2 * ((width + 1) // 2)
-    u = b"".join(
-        data[
-            (rows + top // 2 + row) * stride + left : (rows + top // 2 + row) * stride
-            + left
-            + chroma_width : 2
-        ]
-        for row in range((height + 1) // 2)
-    )
-    v = b"".join(
-        data[
-            (rows + top // 2 + row) * stride + left + 1 : (rows + top // 2 + row)
-            * stride
-            + left
-            + chroma_width : 2
-        ]
-        for row in range((height + 1) // 2)
-    )
-    return Ok(y + u + v)
+
+    def extract(mapping: mmap.mmap) -> bytes:
+        # Strided arrays borrow the synchronized mapping. Only the compact
+        # destination is allocated; padding and intermediate Y/U/V planes
+        # are never copied into Python buffers.
+        chroma_width, chroma_height = (width + 1) // 2, (height + 1) // 2
+        luma_size, chroma_size = width * height, chroma_width * chroma_height
+        pixels: np.ndarray[tuple[int, ...], np.dtype[np.uint8]] = np.empty(
+            luma_size + 2 * chroma_size, dtype=np.uint8
+        )
+        luma: np.ndarray[tuple[int, ...], np.dtype[np.uint8]] = np.ndarray(
+            (height, width),
+            dtype=np.uint8,
+            buffer=mapping,
+            offset=top * stride + left,
+            strides=(stride, 1),
+        )
+        chroma: np.ndarray[tuple[int, ...], np.dtype[np.uint8]] = np.ndarray(
+            (chroma_height, chroma_width, 2),
+            dtype=np.uint8,
+            buffer=mapping,
+            offset=(rows + top // 2) * stride + left,
+            strides=(stride, 2, 1),
+        )
+        pixels[:luma_size].reshape(height, width)[:] = luma
+        pixels[luma_size : luma_size + chroma_size].reshape(
+            chroma_height, chroma_width
+        )[:] = chroma[:, :, 0]
+        pixels[luma_size + chroma_size :].reshape(chroma_height, chroma_width)[:] = (
+            chroma[:, :, 1]
+        )
+        return pixels.tobytes()
+
+    return _read(fd, stride * (rows + (top + height + 1) // 2), extract)

@@ -12,9 +12,10 @@ import errno
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from tests.support.bridge_abi import Event, Message, Reply
+from rkmpp_bridge_uapi import Event, Message, Reply
+
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import Rejected, accepted
+from tests.support.outcome import Rejected, accepted, present
 from tests.support.queue import Queue, QueueType
 
 
@@ -32,25 +33,22 @@ def test_stream_off_waits_for_new_epoch_reset_acknowledgement(
                 break
             assert time.monotonic() < deadline
             time.sleep(0.001)
-        reset = Message.from_buffer_copy(batch.events)
+        reset = present(batch.event(0))
         assert reset.kind == Event.RESET and reset.epoch > packets[0].epoch
         assert not stopped.done()
-        stale = Message.from_buffer_copy(packets[0])
+        stale = packets[0].clone()
         stale.kind = Reply.INPUT_DONE
-        acknowledgement = Message.from_buffer_copy(reset)
+        acknowledgement = reset.clone()
         acknowledgement.kind = Reply.STOPPED
         replies = accepted(session.service.exchange([stale, acknowledgement]))
-        assert list(replies.results[:2]) == [-errno.ESTALE, 0]
+        assert list(present(replies.results(2))) == [-errno.ESTALE, 0]
         accepted(stopped.result(timeout=5))
 
 
 def test_close_video_emits_close_event(raw_session: Peer) -> None:
     raw_session.video.close()
     batch = accepted(raw_session.service.exchange())
-    assert (
-        batch.event_count == 1
-        and Message.from_buffer_copy(batch.events).kind == Event.CLOSE
-    )
+    assert batch.event_count == 1 and present(batch.event(0)).kind == Event.CLOSE
 
 
 def test_disconnect_service_poisoned_video_reports_eio(raw_session: Peer) -> None:

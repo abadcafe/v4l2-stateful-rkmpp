@@ -10,11 +10,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from rkmpp_bridge_uapi import VERSION, Event, Message, Reply
 
-from tests.support.bridge_abi import VERSION, Event, Message, Reply
 from tests.support.event_abi import DecoderCommand, Subscription
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import Rejected, accepted
+from tests.support.outcome import Rejected, accepted, present
 from tests.support.queue import Queue, QueueType
 from tests.support.syscalls import command, ioctl
 from tests.support.video import Video
@@ -77,22 +77,26 @@ def test_decoder_drain_defers_new_input_until_completed_and_resumed(
     accepted(capture.stream_on())
     while accepted(peer.service.exchange()).event_count:
         pass
-    replies = [Message.from_buffer_copy(message) for message in packets]
+    replies = [message.clone() for message in packets]
     for reply in replies:
         reply.kind = Reply.INPUT_DONE
-    assert list(accepted(peer.service.exchange(replies)).results[:3]) == [0, 0, 0]
+    assert list(present(accepted(peer.service.exchange(replies)).results(3))) == [
+        0,
+        0,
+        0,
+    ]
     assert [accepted(output.dequeue()).index for _ in range(3)] == [0, 1, 2]
     accepted(peer.video.stop())
     batch = accepted(peer.service.exchange())
-    drain = Message.from_buffer_copy(batch.events)
+    drain = present(batch.event(0))
     assert batch.event_count == 1 and drain.kind == Event.DRAIN
     for result in (peer.video.stop(), peer.video.start()):
         assert isinstance(result, Rejected) and result.code == errno.EBUSY
     accepted(output.queue(0, 16, 789012))
     assert accepted(peer.service.exchange()).event_count == 0
-    eos = Message.from_buffer_copy(drain)
+    eos = drain.clone()
     eos.kind = Reply.EOS
-    assert accepted(peer.service.exchange([eos])).results[0] == 0
+    assert present(accepted(peer.service.exchange([eos])).result(0)) == 0
     result = peer.video.start()
     assert isinstance(result, Rejected) and result.code == errno.EBUSY
     last = accepted(capture.dequeue())
@@ -109,29 +113,27 @@ def test_decoder_drain_defers_new_input_until_completed_and_resumed(
                     break
                 assert time.monotonic() < deadline
                 time.sleep(0.001)
-            reset = Message.from_buffer_copy(batch.events)
-            assert (
-                reset.flags == 9 | (1 << 16) | (1 << 17) and reset.epoch == drain.epoch
-            )
+            reset = present(batch.event(0))
+            assert reset.flags == (1 << 16) | (1 << 17) and reset.epoch == drain.epoch
             reset.kind = Reply.STOPPED
-            assert accepted(peer.service.exchange([reset])).results[0] == 0
+            assert present(accepted(peer.service.exchange([reset])).result(0)) == 0
             accepted(stopped.result(timeout=5))
         accepted(capture.stream_on())
         accepted(capture.queue(0))
         batch = accepted(peer.service.exchange())
         assert batch.event_count == 4
-        assert Message.from_buffer_copy(batch.events).kind == Event.CAPTURE
-        offset = ctypes.sizeof(Message)
-        first = Message.from_buffer_copy(batch.events, offset)
-        second = Message.from_buffer_copy(batch.events, offset + ctypes.sizeof(Message))
+        assert present(batch.event(0)).kind == Event.CAPTURE
+        offset = Message.SIZE
+        first = present(batch.event(offset // Message.SIZE))
+        second = present(batch.event((offset + Message.SIZE) // Message.SIZE))
         assert first.kind == Event.RESUME and second.kind == Event.PACKET
         assert second.timestamp == 789012000
         return
     accepted(peer.video.start())
     batch = accepted(peer.service.exchange())
     assert batch.event_count == 2
-    first = Message.from_buffer_copy(batch.events)
-    second = Message.from_buffer_copy(batch.events, ctypes.sizeof(Message))
+    first = present(batch.event(0))
+    second = present(batch.event(1))
     assert first.kind == Event.RESUME and second.kind == Event.PACKET
     assert second.timestamp == 789012000
 
@@ -165,7 +167,7 @@ def test_unsubscribe_source_change_stops_public_event_notifications(
         size=12288,
         format=1,
     )
-    assert accepted(raw_session.service.exchange([layout])).results[0] == 0
+    assert present(accepted(raw_session.service.exchange([layout])).result(0)) == 0
     assert accepted(raw_session.video.events()) == []
 
 
@@ -201,12 +203,12 @@ def test_capture_stop_preserves_pending_input_and_epoch(
                 break
             assert time.monotonic() < deadline
             time.sleep(0.001)
-        reset = Message.from_buffer_copy(batch.events)
+        reset = present(batch.event(0))
         assert reset.kind == Event.RESET
-        assert reset.flags == 9 | (1 << 16)
+        assert reset.flags == (1 << 16)
         assert reset.epoch == packets[0].epoch
         reset.kind = Reply.STOPPED
-        assert accepted(peer.service.exchange([reset])).results[0] == 0
+        assert present(accepted(peer.service.exchange([reset])).result(0)) == 0
         accepted(stopped.result(timeout=5))
     for index in range(18):
         accepted(capture.queue(index))
@@ -215,9 +217,9 @@ def test_capture_stop_preserves_pending_input_and_epoch(
         pass
     output = Queue(peer.video.fd, QueueType.OUTPUT)
     for packet in packets:
-        done = Message.from_buffer_copy(packet)
+        done = packet.clone()
         done.kind = Reply.INPUT_DONE
-        assert accepted(peer.service.exchange([done])).results[0] == 0
+        assert present(accepted(peer.service.exchange([done])).result(0)) == 0
         assert accepted(output.dequeue()).index == packet.index
 
 
@@ -235,20 +237,22 @@ def test_natural_eos_excludes_inputs_after_its_sequence_boundary(
     for index in range(18):
         accepted(capture.queue(index))
     accepted(capture.stream_on())
-    cap = Message.from_buffer_copy(accepted(peer.service.exchange()).events)
+    cap = present(accepted(peer.service.exchange()).event(0))
     while accepted(peer.service.exchange()).event_count:
         pass
     if stop_requested:
         accepted(peer.video.stop())
         _ = accepted(peer.service.exchange())
-    draining = Message.from_buffer_copy(packets[0])
+    draining = packets[0].clone()
     draining.kind = Reply.DRAINING
-    done = Message.from_buffer_copy(packets[0])
+    done = packets[0].clone()
     done.kind = Reply.INPUT_DONE
     done.flags = 2 if failed_input else 0
-    eos = Message.from_buffer_copy(cap)
+    eos = cap.clone()
     eos.kind = Reply.EOS
-    assert list(accepted(peer.service.exchange([done, draining, eos])).results[:3]) == [
+    assert list(
+        present(accepted(peer.service.exchange([done, draining, eos])).results(3))
+    ) == [
         0,
         0,
         0,
@@ -284,10 +288,10 @@ def test_capture_streamoff_aborts_incomplete_drain(
                 break
             assert time.monotonic() < deadline
             time.sleep(0.001)
-        reset = Message.from_buffer_copy(batch.events)
+        reset = present(batch.event(0))
         assert reset.flags & (1 << 17)
         reset.kind = Reply.STOPPED
-        assert accepted(peer.service.exchange([reset])).results[0] == 0
+        assert present(accepted(peer.service.exchange([reset])).result(0)) == 0
         accepted(stopping.result(timeout=5))
     for index in range(18):
         accepted(capture.queue(index))

@@ -5,31 +5,29 @@ tests: SIGKILL during MPP work, clean idle/active SIGINT and SIGTERM.
 The kernel endpoint is simulated; signals, workers and hardware are real.
 """
 
-import ctypes
 import signal
 import threading
 from pathlib import Path
 
 import pytest
-
-from tests.service.conftest import MockFactory
-from tests.support.bridge_abi import (
+from rkmpp_bridge_uapi import (
     EXCHANGE,
     REGISTER_POOL,
     VERSION,
     Batch,
-    Descriptor,
     Event,
     Message,
     Pool,
     Reply,
 )
+
+from tests.service.conftest import MockFactory
 from tests.support.dma_heap import Buffer
 from tests.support.mock_decode import play
 from tests.support.mock_process import Process
 from tests.support.mock_wire import Patch, Request
 from tests.support.mock_wire import Reply as Response
-from tests.support.outcome import accepted
+from tests.support.outcome import accepted, present
 from tests.support.stream import Codec, load
 
 
@@ -40,32 +38,38 @@ def decoding(process: Process, buffer: Buffer, size: int) -> threading.Event:
     def handle(request: Request) -> Response:
         nonlocal exchanges
         if request.command == REGISTER_POOL:
-            pool = Pool.from_buffer_copy(request.body)
+            pool = present(Pool.decode(request.body))
             pool.count = 1
-            descriptor = Descriptor.from_buffer(pool.buffers)
+            descriptor = present(pool.descriptor(0))
             descriptor.fd, descriptor.size = -1, buffer.size
-            return Response(body=bytes(pool), fds=(buffer.fd,), patches=(Patch(32, 0),))
+            assert pool.set_descriptor(0, descriptor)
+            return Response(
+                body=bytes(pool),
+                fds=(buffer.fd,),
+                patches=(Patch(present(Pool.descriptor_offset(0)), 0),),
+            )
         assert request.command == EXCHANGE
         exchanges += 1
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         for index in range(batch.reply_count):
-            message = Message.from_buffer_copy(
-                batch.replies, index * ctypes.sizeof(Message)
-            )
+            message = present(batch.reply(index))
             assert message.kind in (Reply.INPUT_DONE, Reply.LAYOUT)
             if message.kind == Reply.LAYOUT:
                 assert (message.width, message.height, message.format) == (256, 128, 1)
                 initialized.set()
         batch.event_count = int(exchanges == 1)
         if batch.event_count:
-            batch.events[0] = Message(
-                version=VERSION,
-                kind=Event.PACKET,
-                count=1,
-                epoch=1,
-                pool_id=1,
-                codec=Codec.H264.fourcc,
-                bytesused=size,
+            assert batch.set_event(
+                0,
+                Message(
+                    version=VERSION,
+                    kind=Event.PACKET,
+                    count=1,
+                    epoch=1,
+                    pool_id=1,
+                    codec=Codec.H264.fourcc,
+                    bytesused=size,
+                ),
             )
         return Response(body=bytes(batch))
 

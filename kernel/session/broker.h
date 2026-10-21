@@ -10,7 +10,9 @@
  * an endpoint or leave the client in a terminal error state; returning an
  * allocation error must never leave a live, undiscoverable session. */
 struct rb_offer;
-struct rb_offer *rb_broker_publish(void *owner, int (*attach)(void *owner));
+struct rb_session;
+struct rb_offer *rb_broker_publish(struct rb_session *owner,
+                                   int (*attach)(struct rb_session *owner));
 void rb_broker_reoffer(struct rb_offer *offer);
 void rb_broker_withdraw(struct rb_offer *offer);
 void rb_broker_destroy(struct rb_offer *offer);

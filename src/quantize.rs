@@ -7,9 +7,11 @@
 use std::io;
 use std::num::NonZeroUsize;
 
-use crate::dma::system as dma;
-use crate::image::{Depth, Plane};
+use dma_buf as dma;
+use dma_buf::image::{Depth, Plane};
 mod context;
+mod pipeline;
+pub use pipeline::Factory;
 #[cfg(test)]
 mod context_tests;
 mod device;
@@ -38,8 +40,8 @@ pub struct Quantizer {
   prepared: Option<Prepared>,
 }
 impl Quantizer {
-  pub fn new() -> io::Result<Self> {
-    let context = Context::new()?;
+  pub fn new(factory: &Factory) -> io::Result<Self> {
+    let context = Context::new(factory)?;
     let imports =
       Cache::new(context.device(), NonZeroUsize::new(64).unwrap())?;
     Ok(Self { context, imports, failed: false, prepared: None })
@@ -68,9 +70,9 @@ impl Quantizer {
       Layout::new(depth, width, height, source, destination)?;
     let src = source.metadata()?;
     let dst = destination.metadata()?;
-    if (src.st_dev == dst.st_dev && src.st_ino == dst.st_ino)
-      || src.st_size < layout.source_size() as i64
-      || dst.st_size < layout.destination_size() as i64
+    if (src.identity() == dst.identity())
+      || src.size() < layout.source_size() as i64
+      || dst.size() < layout.destination_size() as i64
     {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,

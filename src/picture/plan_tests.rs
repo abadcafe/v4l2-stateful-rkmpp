@@ -1,6 +1,8 @@
 //! module: picture::plan_tests; responsibility: immutable semantic
 //! plans.
-use super::{Boundary, Id, Limits, Output, Part, Plan};
+use codec_parser::Limits;
+
+use super::{Boundary, Id, Output, Part, Plan};
 #[test]
 fn test_complete_pair_combines_picture_order_and_final_reference_state()
 {

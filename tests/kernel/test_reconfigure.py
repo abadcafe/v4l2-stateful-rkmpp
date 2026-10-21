@@ -4,7 +4,6 @@ operations: pytest cases; entities: none;
 tests: LAST, retained output epoch, reset acknowledgement and replaced capture ownership.
 """
 
-import ctypes
 import errno
 import os
 import select
@@ -12,10 +11,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from rkmpp_bridge_uapi import VERSION, Event, Message, Reply
 
-from tests.support.bridge_abi import VERSION, Event, Message, Reply
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import Rejected, accepted
+from tests.support.outcome import Rejected, accepted, present
 from tests.support.queue import BufferInfo, Queue, QueueType
 from tests.support.video_formats import selection
 
@@ -49,40 +48,39 @@ def test_capture_source_change_resets_only_capture_and_keeps_input_valid(
         format=1,
     )
     if initial_layout:
-        assert accepted(peer.service.exchange([first])).results[0] == 0
+        assert present(accepted(peer.service.exchange([first])).result(0)) == 0
         assert accepted(peer.video.events()) == [(5, 1)]
     capture = Queue(peer.video.fd, QueueType.CAPTURE)
     assert accepted(capture.request(18)) == 18
     for index in range(18):
         accepted(capture.queue(index))
-    replacement = Message.from_buffer_copy(first)
+    replacement = first.clone()
     replacement.width = replacement.stride = 64 if size_only else 128
     replacement.coded_width = replacement.width
     replacement.size = 12288
     if not start_before_layout:
-        assert accepted(peer.service.exchange([replacement])).results[0] == 0
+        assert present(accepted(peer.service.exchange([replacement])).result(0)) == 0
     accepted(capture.stream_on())
     initial = accepted(peer.service.exchange())
-    assert Message.from_buffer_copy(initial.events).kind == Event.CAPTURE
-    old = Message.from_buffer_copy(initial.events, ctypes.sizeof(Message))
+    assert present(initial.event(0)).kind == Event.CAPTURE
+    old = present(initial.event(1))
     assert old.kind == Event.RECYCLE
     assert accepted(peer.service.exchange()).event_count == 3
     if start_before_layout:
-        assert accepted(peer.service.exchange([replacement])).results[0] == 0
-    premature = Message.from_buffer_copy(old)
+        assert present(accepted(peer.service.exchange([replacement])).result(0)) == 0
+    premature = old.clone()
     premature.kind, premature.index, premature.bytesused = Reply.FRAME, 1, 12288
     premature.generation = 2 if initial_layout else 1
-    assert accepted(peer.service.exchange([premature])).results[0] == -errno.ESTALE
+    assert (
+        present(accepted(peer.service.exchange([premature])).result(0)) == -errno.ESTALE
+    )
     resume = peer.video.start()
     assert isinstance(resume, Rejected) and resume.code == errno.EINVAL
     last = accepted(capture.dequeue())
     assert last.flags & 0x100000 and last.bytesused == (0,)
     # Old-layout recycling is legal until CAPTURE is stopped.
     accepted(capture.queue(last.index))
-    assert (
-        Message.from_buffer_copy(accepted(peer.service.exchange()).events).kind
-        == Event.RECYCLE
-    )
+    assert present(accepted(peer.service.exchange()).event(0)).kind == Event.RECYCLE
     assert accepted(peer.video.events()) == [(5, 1)]
     assert accepted(selection(peer.video.fd, QueueType.CAPTURE)) == (
         replacement.width,
@@ -97,13 +95,13 @@ def test_capture_source_change_resets_only_capture_and_keeps_input_valid(
                 break
             assert time.monotonic() < deadline
             time.sleep(0.001)
-        reset = Message.from_buffer_copy(batch.events)
-        assert reset.kind == Event.RESET and reset.flags == 9 | (1 << 16)
+        reset = present(batch.event(0))
+        assert reset.kind == Event.RESET and reset.flags == (1 << 16)
         assert reset.epoch == packets[0].epoch
         assert reset.generation == (2 if initial_layout else 1)
         assert not stopped.done()
         reset.kind = Reply.STOPPED
-        assert accepted(peer.service.exchange([reset])).results[0] == 0
+        assert present(accepted(peer.service.exchange([reset])).result(0)) == 0
         accepted(stopped.result(timeout=5))
     # After stop the new layout is authoritative, even without REQBUFS.
     too_small = capture.queue(0)
@@ -113,22 +111,20 @@ def test_capture_source_change_resets_only_capture_and_keeps_input_valid(
     for index in range(18):
         accepted(capture.queue(index))
     accepted(capture.stream_on())
-    current = Message.from_buffer_copy(
-        accepted(peer.service.exchange()).events, ctypes.sizeof(Message)
-    )
+    current = present(accepted(peer.service.exchange()).event(1))
     assert current.kind == Event.RECYCLE and current.pool_id > old.pool_id
     assert accepted(peer.service.exchange()).event_count == 3
     stale = peer.service.register(9, old.epoch, old.pool_id)
     assert isinstance(stale, Rejected) and stale.code == errno.ESTALE
     old.kind, old.bytesused = Reply.FRAME, 6144
     current.kind, current.bytesused = Reply.FRAME, 12288
-    completed = Message.from_buffer_copy(packets[0])
+    completed = packets[0].clone()
     completed.kind = Reply.INPUT_DONE
     statuses = accepted(peer.service.exchange([old, current, completed]))
-    assert list(statuses.results[:3]) == [-errno.ESTALE, 0, 0]
+    assert list(present(statuses.results(3))) == [-errno.ESTALE, 0, 0]
     assert accepted(capture.dequeue()).bytesused == (12288,)
     assert accepted(Queue(peer.video.fd, QueueType.OUTPUT).dequeue()).index == 0
-    assert ctypes.sizeof(current) == 120
+    assert Message.SIZE == 120
 
 
 @pytest.mark.parametrize("draining", [False, True])
@@ -142,15 +138,12 @@ def test_capture_source_change_reuses_sufficient_pool_without_streamoff(
     for index in range(18):
         accepted(capture.queue(index))
     accepted(capture.stream_on())
-    old = Message.from_buffer_copy(accepted(peer.service.exchange()).events)
+    old = present(accepted(peer.service.exchange()).event(0))
     while accepted(peer.service.exchange()).event_count:
         pass
     if draining:
         accepted(peer.video.stop())
-        assert (
-            Message.from_buffer_copy(accepted(peer.service.exchange()).events).kind
-            == Event.DRAIN
-        )
+        assert present(accepted(peer.service.exchange()).event(0)).kind == Event.DRAIN
     layout = Message(
         coded_width=64,
         coded_height=64,
@@ -165,7 +158,7 @@ def test_capture_source_change_reuses_sufficient_pool_without_streamoff(
         size=6144,
         format=1,
     )
-    assert accepted(peer.service.exchange([layout])).results[0] == 0
+    assert present(accepted(peer.service.exchange([layout])).result(0)) == 0
     if dequeue_last:
         last = accepted(capture.dequeue())
         assert last.flags & 0x100000
@@ -178,17 +171,14 @@ def test_capture_source_change_reuses_sufficient_pool_without_streamoff(
         batch = accepted(peer.service.exchange())
         if batch.event_count == 0:
             break
-        events.extend(
-            Message.from_buffer_copy(batch.events, i * ctypes.sizeof(Message))
-            for i in range(batch.event_count)
-        )
+        events.extend(present(batch.event(i)) for i in range(batch.event_count))
     assert events[0].kind == Event.CAPTURE
     assert events[0].pool_id == old.pool_id
     assert events[0].generation == 1
     assert [event.index for event in events[1:]] == list(range(18))
-    frame = Message.from_buffer_copy(events[1])
+    frame = events[1].clone()
     frame.kind, frame.bytesused = Reply.FRAME, 6144
-    assert accepted(peer.service.exchange([frame])).results[0] == 0
+    assert present(accepted(peer.service.exchange([frame])).result(0)) == 0
     decoded = accepted(capture.dequeue())
     assert decoded.bytesused == (6144,)
     assert not decoded.flags & 0x100000
@@ -235,7 +225,7 @@ def test_source_change_wakes_waiting_capture_client(
             waiting = executor.submit(wait_capture)
             time.sleep(0.02)
             was_waiting = not waiting.done()
-            assert accepted(peer.service.exchange([layout])).results[0] == 0
+            assert present(accepted(peer.service.exchange([layout])).result(0)) == 0
             last = waiting.result(timeout=5)
             assert was_waiting
             assert last.flags & 0x100000 and last.bytesused == (0,)

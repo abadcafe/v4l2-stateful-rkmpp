@@ -1,35 +1,26 @@
 //! module: lib; responsibility: publish the bridge's owned module
 //! contracts. operations: public module interfaces; entities: none;
 //! tests: co-located module tests.
-pub mod backend;
-pub mod bitstream;
+mod backend;
+mod bitstream;
 #[cfg(test)]
 mod bitstream_tests;
-pub mod diagnostics;
-pub mod dma;
-pub mod hardware;
-pub mod image;
-pub mod mpp;
-pub mod notify;
-pub mod pool;
-pub mod protocol;
-pub mod quantize;
-pub mod service;
-pub mod shutdown;
-pub mod transport;
+mod diagnostics;
+mod hardware;
+mod notify;
+mod pool;
+mod protocol;
+mod quantize;
+mod service;
+mod shutdown;
+mod transport;
 
 #[cfg(test)]
 mod backend_tests;
 #[cfg(test)]
 mod diagnostics_tests;
 #[cfg(test)]
-mod dma_tests;
-#[cfg(test)]
 mod hardware_tests;
-#[cfg(test)]
-mod image_tests;
-#[cfg(test)]
-mod mpp_tests;
 #[cfg(test)]
 mod notify_tests;
 #[cfg(test)]
@@ -45,31 +36,39 @@ mod shutdown_tests;
 #[cfg(test)]
 mod transport_tests;
 
-mod packet_syntax;
-#[cfg(test)]
-mod packet_syntax_tests;
-
-pub mod timestamp;
+mod timestamp;
 #[cfg(test)]
 mod timestamp_tests;
 
 mod frontend;
 #[cfg(test)]
 mod frontend_tests;
-pub mod picture;
+mod picture;
 
 mod submission;
 #[cfg(test)]
 mod submission_tests;
 
-pub mod readiness;
+mod readiness;
 #[cfg(test)]
 mod readiness_tests;
 
-pub mod fence;
+mod fence;
 #[cfg(test)]
 mod fence_tests;
 
-pub mod descriptor;
+mod descriptor;
 #[cfg(test)]
 mod descriptor_tests;
+
+/// Run the bridge service.
+pub use service::serve;
+
+mod execution;
+#[cfg(test)]
+mod execution_tests;
+
+mod codec;
+
+#[cfg(test)]
+mod frontend_decoder_tests;

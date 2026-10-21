@@ -23,6 +23,32 @@ impl Fence {
     self.descriptor.clone()
   }
 
+  pub fn wait(&self) -> io::Result<()> {
+    let Some(fd) = &self.descriptor else {
+      return Ok(());
+    };
+    let mut descriptor = libc::pollfd {
+      fd: fd.as_raw_fd(),
+      events: libc::POLLIN,
+      revents: 0,
+    };
+    loop {
+      // SAFETY: the lease retains this descriptor until the terminal
+      // signal.
+      if unsafe { libc::poll(&mut descriptor, 1, -1) } >= 0 {
+        return if descriptor.revents & libc::POLLNVAL != 0 {
+          Err(io::Error::other("invalid GPU completion descriptor"))
+        } else {
+          Ok(())
+        };
+      }
+      let error = io::Error::last_os_error();
+      if error.kind() != io::ErrorKind::Interrupted {
+        return Err(error);
+      }
+    }
+  }
+
   pub fn ready(&self) -> io::Result<bool> {
     let Some(fd) = &self.descriptor else {
       return Ok(true);

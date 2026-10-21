@@ -5,7 +5,7 @@
 //! entities: Messages, Message; tests: sei_tests.
 use std::io;
 
-use super::bits::Bits;
+use codec_parser::syntax::bits::Bits;
 
 pub(super) struct Message<'a> {
   pub kind: u32,

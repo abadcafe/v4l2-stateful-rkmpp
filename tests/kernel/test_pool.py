@@ -8,16 +8,15 @@ operations: pytest cases; entities: InvalidField; tests:
 
 """
 
-import ctypes
 import errno
 import os
 from typing import Literal
 
 import pytest
+from rkmpp_bridge_uapi import REGISTER_POOL, VERSION, Message, Pool
 
-from tests.support.bridge_abi import REGISTER_POOL, VERSION, Descriptor, Message, Pool
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import Rejected, accepted
+from tests.support.outcome import Rejected, accepted, present
 from tests.support.syscalls import OwnedFd, ioctl
 
 type InvalidField = Literal["version", "reserved", "kind", "epoch", "pool_id"]
@@ -40,9 +39,7 @@ def test_register_pool_exports_cloexec_sized_buffers(
     fds: list[OwnedFd] = []
     try:
         for index in range(pool.count):
-            descriptor = Descriptor.from_buffer_copy(
-                pool.buffers, index * ctypes.sizeof(Descriptor)
-            )
+            descriptor = present(pool.descriptor(index))
             owner = OwnedFd(descriptor.fd)
             fds.append(owner)
             assert not os.get_inheritable(owner.fd)
@@ -74,7 +71,7 @@ def test_register_pool_rejects_invalid_request(
     packet = packets[0]
     pool = Pool(version=VERSION, kind=10, epoch=packet.epoch, pool_id=packet.pool_id)
     if field == "reserved":
-        pool.reserved[0] = 1
+        pool.reserved = [1, 0]
     elif field == "kind":
         pool.kind = 0
     elif field == "version":

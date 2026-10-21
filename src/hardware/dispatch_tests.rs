@@ -8,6 +8,7 @@ fn reset(epoch: u64) -> Command {
   Command::try_from(Message {
     version: VERSION,
     kind: Event::Reset as u32,
+    count: 1,
     epoch,
     ..Default::default()
   })
@@ -16,7 +17,8 @@ fn reset(epoch: u64) -> Command {
 #[test]
 fn test_advance_executes_ordered_batch_and_reuses_storage() {
   let mut dispatch = Dispatch::default();
-  let mut backend = Backend::new().unwrap();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
   for round in 1..=3 {
     for epoch in 1..=16 {
       dispatch.submit(reset(epoch + round * 16), None).unwrap();

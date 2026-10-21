@@ -1,10 +1,9 @@
 //! module: notify; responsibility: an owned, clonable eventfd wakeup.
-//! operations: new, signal, drain, wait; entities: Notify; tests:
+//! operations: new, signal, drain; entities: Notify; tests:
 //! notify_tests.
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
-use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct Notify(Arc<OwnedFd>);
 impl Notify {
@@ -67,26 +66,6 @@ impl Notify {
         return Err(error);
       }
     }
-  }
-
-  pub fn wait(&self, timeout: Duration) -> io::Result<bool> {
-    let mut fd = libc::pollfd {
-      fd: self.0.as_raw_fd(),
-      events: libc::POLLIN,
-      revents: 0,
-    };
-    // SAFETY: fd is a valid one-element poll array.
-    let status = unsafe {
-      libc::poll(
-        &mut fd,
-        1,
-        timeout.as_millis().min(i32::MAX as u128) as i32,
-      )
-    };
-    if status < 0 {
-      return Err(io::Error::last_os_error());
-    }
-    Ok(fd.revents & libc::POLLIN != 0)
   }
 }
 impl AsFd for Notify {

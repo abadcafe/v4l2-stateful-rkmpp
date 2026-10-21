@@ -3,7 +3,7 @@
 //! operations/entities: AccessUnit, Report; tests: bitstream_tests.
 #[derive(Debug)]
 pub struct AccessUnit {
-  pub payload: crate::submission::Payload,
+  pub payload: rkmpp::Payload,
   pub geometry: crate::picture::Geometry,
   pub plan: crate::picture::Plan,
 }

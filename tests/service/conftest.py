@@ -17,9 +17,7 @@ type MockFactory = Callable[[], Process]
 
 @pytest.fixture
 def mock_factory(executable: Path, tmp_path: Path) -> Generator[MockFactory]:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     processes: list[Process] = []
 
     def start() -> Process:

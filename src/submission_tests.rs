@@ -1,6 +1,8 @@
 //! module: submission_tests; responsibility: bounded compressed payload
 //! ownership, exact assembly and transactional failure.
-use crate::submission::{MAX_PACKET_SIZE, Payload, Prefix};
+use rkmpp::{MAX_PACKET_SIZE, Payload};
+
+use crate::submission::Prefix;
 #[test]
 fn test_compose_without_prefix_borrows_the_exact_input_range() {
   let mut prefix = Prefix::default();

@@ -3,7 +3,8 @@
 //! reconstruct it. operations: Plan::new, accessors, complete_pair;
 //! entities: Id, Part, Plan; tests: plan_tests and
 //! backend/presentation_tests.
-use super::limits::Limits;
+use codec_parser::Limits;
+
 use super::output::Output;
 #[derive(
   Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord,

@@ -5,25 +5,24 @@ tests: malformed exchanges, unsupported events, errno, idle wake and broker retr
 Every call reaches the unmodified production ELF through its kernel-facing ABI.
 """
 
-import ctypes
 import errno
 import threading
 import time
 
 import pytest
+from rkmpp_bridge_uapi import EXCHANGE, VERSION, Batch, Event, Message, Reply
 
-from tests.support.bridge_abi import EXCHANGE, VERSION, Batch, Event, Message, Reply
 from tests.support.mock_process import Process
 from tests.support.mock_wire import Reply as Response
 from tests.support.mock_wire import Request
-from tests.support.outcome import accepted
+from tests.support.outcome import accepted, present
 
 
 def closed(request: Request) -> Response:
     assert request.command == EXCHANGE
-    batch = Batch.from_buffer_copy(request.body)
+    batch = present(Batch.decode(request.body))
     batch.event_count = 1
-    batch.events[0] = Message(version=VERSION, kind=Event.CLOSE, epoch=1)
+    assert batch.set_event(0, Message(version=VERSION, kind=Event.CLOSE, epoch=1))
     return Response(body=bytes(batch))
 
 
@@ -54,18 +53,15 @@ def test_exchange_invalid_event_returns_failed_without_killing_other_sessions(
     def handle(request: Request) -> Response:
         nonlocal first
         assert request.command == EXCHANGE
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         if first:
             first = False
             batch.event_count = 1
-            batch.events[0] = Message(
-                version=version, kind=kind, flags=flags, epoch=1, count=1
+            assert batch.set_event(
+                0, Message(version=version, kind=kind, flags=flags, epoch=1, count=1)
             )
             return Response(body=bytes(batch))
-        replies.extend(
-            Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message)).kind
-            for i in range(batch.reply_count)
-        )
+        replies.extend(present(batch.reply(i)).kind for i in range(batch.reply_count))
         return Response(code=errno.EPIPE)
 
     accepted(accepted(mock_service.session(handle)).wait(5))
@@ -82,11 +78,8 @@ def test_exchange_kernel_errno_has_bounded_session_exit(
     seen: list[int] = []
 
     def handle(request: Request) -> Response:
-        batch = Batch.from_buffer_copy(request.body)
-        seen.extend(
-            Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message)).kind
-            for i in range(batch.reply_count)
-        )
+        batch = present(Batch.decode(request.body))
+        seen.extend(present(batch.reply(i)).kind for i in range(batch.reply_count))
         return Response(code=code)
 
     accepted(accepted(mock_service.session(handle)).wait(5))
@@ -138,10 +131,12 @@ def test_exchange_full_event_batch_fetches_next_batch_without_poll_wake(
         calls += 1
         if calls == 2:
             return closed(request)
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         batch.event_count = 16
         for index in range(16):
-            batch.events[index] = Message(version=VERSION, kind=Event.RESUME, epoch=1)
+            assert batch.set_event(
+                index, Message(version=VERSION, kind=Event.RESUME, epoch=1)
+            )
         return Response(body=bytes(batch))
 
     peer = accepted(mock_service.session(handle))
@@ -165,16 +160,15 @@ def test_exchange_empty_drain_completes_without_initializing_mpp(
     def handle(request: Request) -> Response:
         nonlocal first
         assert request.command == EXCHANGE
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         if first:
             first = False
             batch.event_count = 1
-            batch.events[0] = Message(version=VERSION, kind=Event.DRAIN, epoch=1)
+            assert batch.set_event(
+                0, Message(version=VERSION, kind=Event.DRAIN, epoch=1)
+            )
             return Response(body=bytes(batch))
-        replies.extend(
-            Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message)).kind
-            for i in range(batch.reply_count)
-        )
+        replies.extend(present(batch.reply(i)).kind for i in range(batch.reply_count))
         if replies:
             return closed(request)
         return Response(body=bytes(batch))
@@ -192,17 +186,19 @@ def test_exchange_capture_reset_before_decoder_initialization_completes(
     def handle(request: Request) -> Response:
         nonlocal sent
         assert request.command == EXCHANGE
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         if not sent:
             sent = True
             batch.event_count = 1
-            batch.events[0] = Message(
-                version=VERSION, kind=Event.RESET, flags=1 << 16, epoch=1
+            assert batch.set_event(
+                0,
+                Message(
+                    version=VERSION, kind=Event.RESET, count=1, flags=1 << 16, epoch=1
+                ),
             )
             return Response(body=bytes(batch))
         replies.extend(
-            Message.from_buffer_copy(batch.replies, index * ctypes.sizeof(Message)).kind
-            for index in range(batch.reply_count)
+            present(batch.reply(index)).kind for index in range(batch.reply_count)
         )
         return Response(code=errno.EPIPE)
 
@@ -223,26 +219,77 @@ def test_event_reserved_is_rejected_before_resource_transfer_or_state_mutation(
         nonlocal first
         # Rejection must precede REGISTER_POOL, CLOSE, or backend RESET.
         assert request.command == EXCHANGE
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         if first:
             first = False
             batch.event_count = 1
             message = Message(
                 version=VERSION, kind=kind, epoch=2, generation=3, pool_id=7
             )
-            message.reserved[0] = reserved
-            batch.events[0] = message
+            message.reserved = reserved
+            assert batch.set_event(0, message)
             return Response(body=bytes(batch))
-        responses.extend(
-            Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message))
-            for i in range(batch.reply_count)
-        )
+        responses.extend(present(batch.reply(i)) for i in range(batch.reply_count))
         return Response(code=errno.EPIPE)
 
     accepted(accepted(mock_service.session(handle)).wait(5))
     assert len(responses) == 1
     failed = responses[0]
     assert (failed.kind, failed.epoch, failed.generation) == (Reply.FAILED, 2, 3)
-    assert list(failed.reserved) == [0]
+    assert failed.reserved == 0
     accepted(accepted(mock_service.session(closed)).wait(5))
+    assert mock_service.process.poll() is None
+
+
+@pytest.mark.parametrize(
+    ("kind", "invalid"),
+    [
+        (Event.PACKET, {"codec": 0}),
+        (Event.PACKET, {"index": 32}),
+        (Event.PACKET, {"count": 0}),
+        (Event.PACKET, {"data_offset": 0xFFFFFFFF}),
+        (Event.PACKET, {"flags": 0x20000}),
+        (Event.CAPTURE, {"pool_id": 0}),
+        (Event.CAPTURE, {"count": 33}),
+        (Event.CAPTURE, {"flags": 2}),
+        (Event.RECYCLE, {"index": 32}),
+        (Event.RECYCLE, {"count": 0}),
+        (Event.RESET, {"count": 0}),
+        (Event.RESET, {"flags": 1}),
+    ],
+)
+def test_command_invalid_domain_is_rejected_before_pool_transfer(
+    mock_service: Process, kind: int, invalid: dict[str, int]
+) -> None:
+    first = True
+    replies: list[int] = []
+
+    def handle(request: Request) -> Response:
+        nonlocal first
+        # REGISTER_POOL before validation would transfer resources for an
+        # invalid command; only the EXCHANGE failure acknowledgement is legal.
+        assert request.command == EXCHANGE
+        batch = present(Batch.decode(request.body))
+        if first:
+            first = False
+            fields = {
+                "version": VERSION,
+                "kind": kind,
+                "epoch": 1,
+                "pool_id": 1,
+                "count": 1,
+                "bytesused": 1,
+                "codec": int.from_bytes(b"H264", "little"),
+            }
+            fields.update(invalid)
+            batch.event_count = 1
+            assert batch.set_event(0, Message(**fields))
+            return Response(body=bytes(batch))
+        replies.extend(
+            present(batch.reply(index)).kind for index in range(batch.reply_count)
+        )
+        return Response(code=errno.EPIPE)
+
+    accepted(accepted(mock_service.session(handle)).wait(5))
+    assert replies == [Reply.FAILED]
     assert mock_service.process.poll() is None

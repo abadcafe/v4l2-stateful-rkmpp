@@ -12,9 +12,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
-
-from tests.support.bridge import Session
-from tests.support.bridge_abi import (
+from rkmpp_bridge_uapi import (
     ACCEPT,
     EXCHANGE,
     VERSION,
@@ -23,8 +21,10 @@ from tests.support.bridge_abi import (
     Message,
     Reply,
 )
+
+from tests.support.bridge import Session
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import Rejected, accepted
+from tests.support.outcome import Rejected, accepted, present
 from tests.support.queue import Queue, QueueType
 from tests.support.syscalls import OwnedFd, ioctl, open_fd
 from tests.support.video import Video
@@ -58,11 +58,11 @@ def test_failed_session_rejects_every_reply_without_state_mutation(
         assert isinstance(result, Rejected) and result.code == errno.EPIPE
     batch = Batch(version=VERSION, reply_count=2 if same_batch else 1)
     if same_batch:
-        batch.replies[0] = failed
-    batch.replies[batch.reply_count - 1] = following
+        assert batch.set_reply(0, failed)
+    assert batch.set_reply(batch.reply_count - 1, following)
     result = ioctl(peer.service.fd, EXCHANGE, batch)
     assert isinstance(result, Rejected) and result.code == errno.EPIPE
-    assert list(batch.results[: batch.reply_count]) == (
+    assert list(present(batch.results(batch.reply_count))) == (
         [0, -errno.EPIPE] if same_batch else [-errno.EPIPE]
     )
     assert accepted(get_format(peer.video.fd, QueueType.CAPTURE)) == before
@@ -89,20 +89,22 @@ def test_accept_pending_video_sessions_preserves_fifo_and_independent_poisoning(
             assert accepted(queue.request(1)) == 1
             accepted(queue.stream_on())
             accepted(queue.queue(0, 16, index * 1000))
-        peers = [Session(OwnedFd(accepted(ioctl(broker.fd, ACCEPT)))) for _ in videos]
+        peers = [
+            owned.enter_context(Session(OwnedFd(accepted(ioctl(broker.fd, ACCEPT)))))
+            for _ in videos
+        ]
         events: list[Message] = []
         for index, peer in enumerate(peers):
-            _ = owned.callback(peer.close)
-            event = Message.from_buffer_copy(accepted(peer.exchange()).events)
+            event = present(accepted(peer.exchange()).event(0))
             assert event.kind == Event.PACKET and event.timestamp == index * 1000000
             events.append(event)
         peers[1].close()
         result = Queue(videos[1].fd, QueueType.OUTPUT).request(1)
         assert isinstance(result, Rejected) and result.code == errno.EIO
         for index in (0, 2):
-            reply = Message.from_buffer_copy(events[index])
+            reply = events[index].clone()
             reply.kind = Reply.INPUT_DONE
-            assert accepted(peers[index].exchange([reply])).results[0] == 0
+            assert present(accepted(peers[index].exchange([reply])).result(0)) == 0
             queue = Queue(videos[index].fd, QueueType.OUTPUT)
             assert accepted(queue.dequeue()).index == 0
             accepted(queue.queue(0, 16))
@@ -178,9 +180,10 @@ def test_failed_reply_has_no_effect_on_another_open_session(kernel_owner: Path) 
             owned.enter_context(accepted(Video.open(Path("/dev/video0"))))
             for _ in range(2)
         ]
-        peers = [Session(OwnedFd(accepted(ioctl(broker.fd, ACCEPT)))) for _ in videos]
-        for peer in peers:
-            _ = owned.callback(peer.close)
+        peers = [
+            owned.enter_context(Session(OwnedFd(accepted(ioctl(broker.fd, ACCEPT)))))
+            for _ in videos
+        ]
         failed = Message(version=VERSION, kind=Reply.FAILED, epoch=1)
         ended = peers[0].exchange([failed])
         assert isinstance(ended, Rejected) and ended.code == errno.EPIPE

@@ -3,12 +3,8 @@
 //! Parameters, Picture, Field; tests: poc_tests. State advances once
 //! per primary coded picture, never once per slice.
 use std::io;
-#[derive(Clone)]
-pub(super) enum Parameters {
-  Lsb(usize),
-  Delta { nonreference: i32, bottom: i32, offsets: Vec<i32> },
-  FrameNumber,
-}
+
+use codec_parser::syntax::h264::Poc as Parameters;
 #[derive(Clone, Copy)]
 pub(super) enum Field {
   Frame,

@@ -8,13 +8,19 @@ dependencies = [
     "ruff>=0.16",
     "basedpyright>=1.31",
     "websockets>=17",
+    "numpy>=2.5.4",
+    "rkmpp-bridge-uapi",
 ]
 
 [tool.uv]
 package = false
 
+[tool.uv.sources]
+rkmpp-bridge-uapi = { path = "crates/rkmpp-bridge-uapi" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 python_files = ["test_*.py", "*_tests.py"]
 addopts = "-v --strict-config --strict-markers -ra"
 filterwarnings = ["error"]

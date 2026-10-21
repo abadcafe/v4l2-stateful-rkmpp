@@ -116,9 +116,7 @@ def test_hardware_executor_creation_failure_exits_and_removes_endpoint(
     endpoint = tmp_path / "status"
     marker = tmp_path / "thread-failure"
     marker.touch()
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     assert library.is_file()
     environment = dict(os.environ)
     environment.update(

@@ -38,9 +38,7 @@ def test_diagnostics_reports_actual_image_credentials_and_exact_resources(
 def test_diagnostics_replaced_disk_binary_preserves_running_inode_identity(
     executable: Path, tmp_path: Path
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     image = tmp_path / "service"
     _ = shutil.copyfile(executable, image)
     image.chmod(0o700)
@@ -87,9 +85,7 @@ def test_diagnostics_counts_inherited_resources_independently_of_parent_activity
     executable: Path,
     tmp_path: Path,
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with (
         OwnedFd(os.open("/proc/self/fd", os.O_RDONLY | os.O_DIRECTORY)) as directory,
         ExitStack() as resources,

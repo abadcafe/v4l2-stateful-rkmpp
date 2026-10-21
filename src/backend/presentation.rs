@@ -2,57 +2,51 @@
 //! picture output. operations: prepare, picture, barrier, discard,
 //! drain, take; entities: Presentation, Pending; tests:
 //! presentation_tests.
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::VecDeque;
 
 use crate::picture::{Boundary, Id, Plan};
 struct Pending<T> {
   id: Id,
+  order: i32,
   latency: u64,
   value: T,
 }
 pub(super) struct Presentation<T> {
-  pictures: BTreeMap<(i32, u64), Pending<T>>,
+  pictures: Vec<Pending<T>>,
   ready: VecDeque<T>,
-  references: BTreeSet<Id>,
+  references: Vec<Id>,
   prepared: Option<Id>,
-  serial: u64,
+  occupied: Vec<Id>,
 }
 impl<T> Default for Presentation<T> {
   fn default() -> Self {
     Self {
-      pictures: BTreeMap::new(),
+      pictures: Vec::new(),
       ready: VecDeque::new(),
-      references: BTreeSet::new(),
+      references: Vec::new(),
       prepared: None,
-      serial: 0,
+      occupied: Vec::new(),
     }
   }
 }
 impl<T> Presentation<T> {
-  fn occupancy(&self) -> usize {
-    self.references.len()
-      + self
-        .pictures
-        .values()
-        .enumerate()
-        .filter(|(index, p)| {
-          !self.references.contains(&p.id)
-            && !self
-              .pictures
-              .values()
-              .take(*index)
-              .any(|prior| prior.id == p.id)
-        })
-        .count()
+  fn occupancy(&mut self) -> usize {
+    self.occupied.clear();
+    self.occupied.extend_from_slice(&self.references);
+    self
+      .occupied
+      .extend(self.pictures.iter().map(|picture| picture.id));
+    self.occupied.sort_unstable();
+    self.occupied.dedup();
+    self.occupied.len()
   }
 
   fn bump(&mut self) -> bool {
-    if let Some((_, p)) = self.pictures.pop_first() {
-      self.ready.push_back(p.value);
-      true
-    } else {
-      false
+    if self.pictures.is_empty() {
+      return false;
     }
+    self.ready.push_back(self.pictures.remove(0).value);
+    true
   }
 
   pub(super) fn prepare(&mut self, p: &Plan) -> bool {
@@ -68,15 +62,13 @@ impl<T> Presentation<T> {
       progress = !self.pictures.is_empty();
       self.drain();
     }
-    self.references = p
-      .references()
-      .iter()
-      .copied()
-      .filter(|&id| id != p.id())
-      .collect();
+    self.references.clear();
+    self.references.extend(
+      p.references().iter().copied().filter(|&id| id != p.id()),
+    );
     while self.pictures.len() > p.limits().reorder()
       || p.limits().latency().is_some_and(|limit| {
-        self.pictures.values().any(|p| p.latency >= limit)
+        self.pictures.iter().any(|p| p.latency >= limit)
       })
     {
       if !self.bump() {
@@ -88,8 +80,8 @@ impl<T> Presentation<T> {
       if !p.reference()
         && self
           .pictures
-          .first_key_value()
-          .is_none_or(|((order, _), _)| *order > p.output().order)
+          .first()
+          .is_none_or(|picture| picture.order > p.output().order)
       {
         break;
       }
@@ -102,23 +94,31 @@ impl<T> Presentation<T> {
   }
 
   pub(super) fn picture(&mut self, value: T, p: &Plan) {
-    self.references = p.references().iter().copied().collect();
+    self.references.clear();
+    self.references.extend_from_slice(p.references());
     if p.output().display {
-      for ((order, _), pending) in &mut self.pictures {
-        if *order > p.output().order {
+      for pending in &mut self.pictures {
+        if pending.order > p.output().order {
           pending.latency = pending.latency.saturating_add(1);
         }
       }
-      self.serial += 1;
+      let index = self
+        .pictures
+        .partition_point(|prior| prior.order <= p.output().order);
       self.pictures.insert(
-        (p.output().order, self.serial),
-        Pending { id: p.id(), latency: 0, value },
+        index,
+        Pending {
+          id: p.id(),
+          order: p.output().order,
+          latency: 0,
+          value,
+        },
       );
     }
     while self.pictures.len() > p.limits().reorder()
       || self.occupancy() > p.limits().capacity()
       || p.limits().latency().is_some_and(|limit| {
-        self.pictures.values().any(|p| p.latency >= limit)
+        self.pictures.iter().any(|p| p.latency >= limit)
       })
     {
       if !self.bump() {

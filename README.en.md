@@ -15,7 +15,8 @@ flowchart TD
     Chromium[Chromium] -->|V4L2 OUTPUT: compressed bitstream| Kernel[v4l2_rkmpp_bridge kernel module]
     Kernel <-->|Private ioctl: sessions, buffer pools, batched events| Service[v4l2-stateful-rkmpp Rust service]
     Service --> Async[Tokio current-thread runtime]
-    Async -->|bounded batches| Hardware[Shared spawn_blocking executor]
+    Async -->|bounded ioctl transactions| Transport[Dedicated admission and channel threads]
+    Async -->|bounded batches| Hardware[Four bounded hardware lanes]
     Hardware -->|DMA / GPU sync-file readiness| Async
     Hardware --> Frontend[Unified framed input admission]
     Frontend --> Headers[GStreamer header and boundary validation]
@@ -31,13 +32,17 @@ flowchart TD
     GPU --> Display[Desktop compositing and display]
 ```
 
-The service uses one Tokio orchestration thread for admission, session scheduling, diagnostics and shutdown. One shared `spawn_blocking` executor owns all MPP/Vulkan contexts and executes command batches with bounded decode progress. DMA dependencies and Vulkan completion are awaited asynchronously through sync-files; frame and CAPTURE leases remain held until conversion completes. Sessions do not create native threads. Shutdown stops admission, waits for session operations, then destroys hardware contexts on their execution thread. Vendor libraries may still create their own internal threads.
+The service uses one Tokio orchestration thread for admission, session scheduling, diagnostics and shutdown. Startup creates one admission lane, four ioctl transport lanes and four hardware lanes, each with a queue capacity of 64. Admission is limited to 64 live sessions, including their entire lifetime while awaiting executor capacity. Further offers remain in the kernel until a session closes. Each session retains its transport and hardware affinity. Blocking ioctls run outside the orchestration thread, and cancellation retains submitted transactions. Hardware lanes own per-session MPP contexts and share one lazily created Vulkan device and compute pipeline. Command and submission resources remain independent; shared GPU queue submission is synchronized. DMA dependencies and completion are awaited through sync-files. Conversion retains source and destination leases while decoding may produce one pending picture. Sessions create no bridge native threads. Shutdown stops admission, collects session operations, then destroys hardware contexts on their owning threads. Vendor libraries may still create internal threads.
 
-8-bit decoding uses registered CAPTURE buffers and waits for their return when the pool is exhausted. The service does not allocate temporary decode surfaces. It negotiates 18–32 CAPTURE buffers according to the stream’s reference/display storage budget. Vulkan handles images from retired pools or repeated presentations whose original buffer is still held by the client. The 10-bit conversion writes directly to the final CAPTURE buffers. The bridge performs no full-frame CPU copies.
+8-bit decoding uses registered CAPTURE buffers and waits for their return when the pool is exhausted. The service does not allocate temporary decode surfaces. It negotiates 18–32 CAPTURE buffers according to the stream’s reference/display storage budget. Vulkan handles images from retired pools or repeated presentations whose original buffer is still held by the client. 10-bit output negotiates a minimum of two CAPTURE buffers. Conversion writes directly to the final CAPTURE buffers. The bridge performs no full-frame CPU copies.
+
+`kernel/bridge_uapi.h` is the sole private UAPI source. `crates/rkmpp-bridge-uapi/` provides Rust wire types and the `rkmpp_bridge_uapi` Python module in one crate. PyO3 bindings always compile, without an optional binding feature. `rkmpp-bridge-uapi/Cargo.toml` unconditionally enables the PyO3 `extension-module` feature to fix extension-module linkage: the importing interpreter supplies Python APIs, and the service has no runtime dependency on libpython. Bindgen derives the raw ABI; exhaustive field initialization and event/reply matches make incompatible protocol field or enum changes compile errors. Service validation and Python mock behavior remain independent. The packaged `.pyi` supplies static types, with tests comparing its public fields, constructor parameters and enum members against the actual extension. `uv run pytest` builds and installs this local package through maturin; wheels are local installation/cache artifacts and are not published. Cargo and uv both track header changes; build scripts, the workspace lockfile, sources and stubs also invalidate their respective caches. Protocol version 11 requires updating the service and kernel together. The kernel endpoint encapsulates ABI copies and descriptor rollback behind transitions on an opaque session. The service validates typed commands before registering pools. Admission owns immutable normalized H.264/HEVC sequence snapshots; presentation ordering reads those snapshots.
+
+The main service stays in root `src/`. The root Cargo manifest manages the workspace and selects only the service and its dependencies by default. `crates/rkmpp/` owns MPP objects, buffer groups and nonblocking decode; `crates/codec-parser/` owns the GStreamer codecparser ABI and independent syntax parsing. Neither depends on the service or private UAPI. `crates/dma-buf/` supplies shared DMA-BUF ownership, CPU access and image views to MPP and GPU clients. The service translates V4L2 timestamps and field order. The UAPI Rust/Python interfaces compile together as part of the service dependency graph. The independent preload mock lives in `crates/v4l2-rkmpp-kernel-mock/` outside that graph. All packages share the root lockfile and output directory; the preload mock uses nightly.
 
 ## Build, install, and use
 
-Building requires Rust, a C toolchain, matching vendor kernel headers, pahole, glslang, libclang, GStreamer codecparsers development headers and library, pkg-config, rockchip-mpp, and vulkan-icd-loader. Run from the project root:
+Building requires Rust, Python 3.14+, a C toolchain, matching vendor kernel headers, pahole, glslang, libclang, GStreamer codecparsers development headers and library, pkg-config, rockchip-mpp, and vulkan-icd-loader. Run from the project root:
 
 ```sh
 make -C kernel
@@ -89,24 +94,22 @@ These limitations apply to the listed tested versions and builds.
 
 ## Test commands
 
-Tests require an RK3588 machine, Python 3.14+, uv, Rust nightly, FFmpeg, Chromium, and an available graphical desktop session. Run from the project root as a regular user in the video group. Kernel integration tests require an idle control device. Kernel and browser integration tests require the module to be loaded and any existing bridge service to be stopped manually before running.
+Tests require an RK3588 machine, Python 3.14+, uv, Rust nightly, FFmpeg, Chromium, and an available graphical desktop session. Run from the project root as a regular user in the video group. Kernel integration tests require an idle control device and no other video clients creating sessions during the run. Kernel and browser integration tests require the module to be loaded and any existing bridge service to be stopped manually before running.
 
 Browser integration tests reject an already running service and ask you to stop it. Run `cargo build` first: browser tests only check and use `target/debug/v4l2-stateful-rkmpp` in the current checkout. They start and stop the service but do not build it, and fail if the binary is missing. Rebuild the service yourself after changing its source. Tests do not check whether the loaded module matches the source; update the module yourself. A passing result applies only to the module actually loaded. The running kernel identity is recorded under `kernel-runtime*/` in the pytest temporary directory, and the service identity used by each browser test is recorded in its `service-identity.json`.
 
 The test interception library uses Rust's `c_variadic` feature to implement C variadic interfaces, so its Clippy checks, build, and tests require nightly. The main service uses stable Rust.
 
 ```sh
-cargo +nightly fmt
-cargo +nightly fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo +nightly fmt --all
+cargo +nightly fmt --all --check
+cargo clippy --workspace --exclude v4l2-rkmpp-kernel-mock --all-targets -- -D warnings
 cargo build
-cargo test
+cargo test --workspace --exclude v4l2-rkmpp-kernel-mock --no-fail-fast
 
-cargo +nightly fmt --manifest-path tests/support/preload/Cargo.toml
-cargo +nightly fmt --manifest-path tests/support/preload/Cargo.toml --check
-cargo +nightly clippy --manifest-path tests/support/preload/Cargo.toml --target-dir target/kernel-mock --all-targets -- -D warnings
-cargo +nightly build --manifest-path tests/support/preload/Cargo.toml --target-dir target/kernel-mock
-cargo +nightly test --manifest-path tests/support/preload/Cargo.toml --target-dir target/kernel-mock
+cargo +nightly clippy -p v4l2-rkmpp-kernel-mock --all-targets -- -D warnings
+cargo +nightly build -p v4l2-rkmpp-kernel-mock
+cargo +nightly test -p v4l2-rkmpp-kernel-mock
 
 uv run ruff format
 uv run ruff format --check
@@ -123,6 +126,8 @@ uv run pytest tests/service
 uv run pytest tests/browser
 uv run python -m tests.tools.performance
 ```
+
+`tests/tools/` contains only tool directories, currently just `performance/`, run with `python -m tests.tools.performance`. Its entry point, implementation and corresponding tests live together. The UAPI Python interface and Rust wire types live together in `crates/rkmpp-bridge-uapi/`; uv builds that same crate as a local Python dependency. All packages share a Cargo workspace, dev profile and root `target/` directory for development builds. Video expansion shared by browser tests and performance measurement lives in `tests/support/video_expansion.py`.
 
 The performance tool measures CPU/GPU/MPP utilization and dropped frames for H.264, VP9, and AV1 at 4K30. Reports are saved to `target/benchmarks/`. The video group needs write permission on `/proc/mpp_service/load_interval`.
 

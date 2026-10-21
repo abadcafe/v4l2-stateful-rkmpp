@@ -1,0 +1,17 @@
+[package]
+name = "rkmpp-bridge-uapi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+bytemuck.workspace = true
+pyo3 = { version = "0.29", features = ["extension-module"] }
+libc.workspace = true
+memmap2 = "0.9"
+
+[build-dependencies]
+bindgen.workspace = true

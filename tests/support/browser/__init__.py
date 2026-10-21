@@ -7,6 +7,7 @@ No service supervision, utilization sampling or performance controls live here.
 
 import errno
 import json
+import math
 import os
 import signal
 import subprocess
@@ -104,7 +105,7 @@ class Browser:
         executable: Path = _CHROMIUM,
         startup_timeout: float = 15,
     ) -> Result[Browser]:
-        if startup_timeout <= 0:
+        if not math.isfinite(startup_timeout) or startup_timeout <= 0:
             return Rejected(errno.EINVAL, "invalid browser startup deadline")
         lease = _Lease()
         result: Result[Browser] | None = None

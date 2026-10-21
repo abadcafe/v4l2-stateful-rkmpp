@@ -5,26 +5,25 @@ tests: response header, reply cardinality, errno domain and session isolation.
 Only the production process's external bridge protocol is exercised.
 """
 
-import ctypes
 import errno
 from typing import Literal
 
 import pytest
+from rkmpp_bridge_uapi import EXCHANGE, VERSION, Batch, Event, Message, Reply
 
-from tests.support.bridge_abi import EXCHANGE, VERSION, Batch, Event, Message, Reply
 from tests.support.mock_process import Process
 from tests.support.mock_wire import Reply as Response
 from tests.support.mock_wire import Request
-from tests.support.outcome import accepted
+from tests.support.outcome import accepted, present
 
 type HeaderField = Literal["version", "reply_count", "event_count", "reserved"]
 
 
 def closed(request: Request) -> Response:
     assert request.command == EXCHANGE
-    batch = Batch.from_buffer_copy(request.body)
+    batch = present(Batch.decode(request.body))
     batch.event_count = 1
-    batch.events[0] = Message(version=VERSION, kind=Event.CLOSE, epoch=1)
+    assert batch.set_event(0, Message(version=VERSION, kind=Event.CLOSE, epoch=1))
     return Response(body=bytes(batch))
 
 
@@ -37,12 +36,9 @@ def test_exchange_invalid_response_header_reports_failed_and_keeps_broker_alive(
 
     def handle(request: Request) -> Response:
         assert request.command == EXCHANGE
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         if batch.reply_count:
-            failed.extend(
-                Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message))
-                for i in range(batch.reply_count)
-            )
+            failed.extend(present(batch.reply(i)) for i in range(batch.reply_count))
             return Response(code=errno.EPIPE)
         if field == "version":
             batch.version += 1
@@ -84,19 +80,20 @@ def test_exchange_per_reply_errno_tolerates_staleness_and_isolates_fatal_status(
         nonlocal calls
         assert request.command == EXCHANGE
         calls += 1
-        batch = Batch.from_buffer_copy(request.body)
-        seen.extend(
-            Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message)).kind
-            for i in range(batch.reply_count)
-        )
+        batch = present(Batch.decode(request.body))
+        seen.extend(present(batch.reply(i)).kind for i in range(batch.reply_count))
         if calls == 1:
             batch.event_count = 1
-            batch.events[0] = Message(version=VERSION, kind=Event.RESET, epoch=2)
+            assert batch.set_event(
+                0, Message(version=VERSION, kind=Event.RESET, count=1, epoch=2)
+            )
         elif calls == 2:
             assert batch.reply_count == 1 and seen == [Reply.STOPPED]
-            batch.results[0] = -code
+            assert batch.set_result(0, -code)
             batch.event_count = 1
-            batch.events[0] = Message(version=VERSION, kind=Event.CLOSE, epoch=2)
+            assert batch.set_event(
+                0, Message(version=VERSION, kind=Event.CLOSE, epoch=2)
+            )
         else:
             return Response(code=errno.EPIPE)
         return Response(body=bytes(batch))
@@ -116,19 +113,22 @@ def test_exchange_invalid_reply_status_isolates_session(
     def handle(request: Request) -> Response:
         nonlocal calls
         calls += 1
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         seen.extend(
-            Message.from_buffer_copy(batch.replies, index * ctypes.sizeof(Message)).kind
-            for index in range(batch.reply_count)
+            present(batch.reply(index)).kind for index in range(batch.reply_count)
         )
         if calls == 1:
             batch.event_count = 1
-            batch.events[0] = Message(version=VERSION, kind=Event.RESET, epoch=2)
+            assert batch.set_event(
+                0, Message(version=VERSION, kind=Event.RESET, count=1, epoch=2)
+            )
         elif calls == 2:
             assert batch.reply_count == 1
-            batch.results[0] = status
+            assert batch.set_result(0, status)
             batch.event_count = 1
-            batch.events[0] = Message(version=VERSION, kind=Event.CLOSE, epoch=2)
+            assert batch.set_event(
+                0, Message(version=VERSION, kind=Event.CLOSE, epoch=2)
+            )
         else:
             return Response(code=errno.EPIPE)
         return Response(body=bytes(batch))
@@ -150,19 +150,22 @@ def test_exchange_response_cannot_change_submitted_reply_count(
     def handle(request: Request) -> Response:
         nonlocal calls
         calls += 1
-        batch = Batch.from_buffer_copy(request.body)
+        batch = present(Batch.decode(request.body))
         seen.extend(
-            Message.from_buffer_copy(batch.replies, index * ctypes.sizeof(Message)).kind
-            for index in range(batch.reply_count)
+            present(batch.reply(index)).kind for index in range(batch.reply_count)
         )
         if calls == 1:
             batch.event_count = 1
-            batch.events[0] = Message(version=VERSION, kind=Event.RESET, epoch=2)
+            assert batch.set_event(
+                0, Message(version=VERSION, kind=Event.RESET, count=1, epoch=2)
+            )
         elif calls == 2:
             assert batch.reply_count == 1
             batch.reply_count = returned
             batch.event_count = 1
-            batch.events[0] = Message(version=VERSION, kind=Event.CLOSE, epoch=2)
+            assert batch.set_event(
+                0, Message(version=VERSION, kind=Event.CLOSE, epoch=2)
+            )
         else:
             return Response(code=errno.EPIPE)
         return Response(body=bytes(batch))

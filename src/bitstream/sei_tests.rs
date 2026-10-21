@@ -4,6 +4,13 @@
 use super::sei::Messages;
 
 #[test]
+fn test_next_rejects_invalid_emulation_prevention_in_reserved_payload()
+{
+  let mut messages = Messages::new(&[128, 3, 0, 0, 3, 4, 0x80]);
+  assert!(messages.next().is_err());
+}
+
+#[test]
 fn test_next_reads_reserved_types_and_extended_payload_sizes() {
   let mut data = vec![128, 1, 0x55, 255, 128, 255, 1];
   data.extend([0x55; 256]);

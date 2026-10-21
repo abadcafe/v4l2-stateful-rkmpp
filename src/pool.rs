@@ -3,7 +3,8 @@
 //! Direction; tests: pool_tests.
 use std::io;
 
-use crate::dma::Buffer;
+use dma_buf::Buffer;
+
 use crate::protocol::registration::MAX_BUFFERS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

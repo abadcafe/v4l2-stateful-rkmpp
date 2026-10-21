@@ -62,6 +62,33 @@ def test_quantize_invalid_extent_or_truncated_planar_data_is_rejected() -> None:
         assert isinstance(result, Rejected) and result.code == errno.EINVAL
 
 
+def test_quantize_odd_planes_restart_threshold_coordinates_and_clamp_large_samples() -> (
+    None
+):
+    for width, height in ((1, 1), (3, 5), (8, 3)):
+        dimensions = (
+            (width, height),
+            ((width + 1) // 2, (height + 1) // 2),
+            ((width + 1) // 2, (height + 1) // 2),
+        )
+        samples: list[int] = []
+        expected = bytearray()
+        for _ in range(2):
+            for columns, rows in dimensions:
+                for row in range(rows):
+                    for column in range(columns):
+                        value = (0, 257, 1022, 1023, 65535)[(row + column) % 5]
+                        samples.append(value)
+                        expected.append(
+                            min(
+                                255,
+                                (value + ((0, 2), (3, 1))[row % 2][column % 2]) // 4,
+                            )
+                        )
+        raw = struct.pack(f"<{len(samples)}H", *samples)
+        assert accepted(quantize(raw, width, height)) == bytes(expected)
+
+
 def test_frame_hashes_missing_reference_returns_rejected(tmp_path: Path) -> None:
     assert isinstance(frame_hashes(tmp_path / "missing.h264", 8, 256, 128), Rejected)
 

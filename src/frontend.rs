@@ -3,8 +3,10 @@
 //! Frontend, Codec, Admission, Task, Payload; tests: frontend_tests.
 use std::io;
 
-use crate::picture::{Descriptor, Id, Limits, Output, Part, Plan};
-pub(crate) use crate::submission::Payload;
+use codec_parser::Limits;
+use rkmpp::Payload;
+
+use crate::picture::{Descriptor, Id, Output, Part, Plan};
 use crate::timestamp::Source;
 pub(crate) struct Task {
   pub payload: Payload,
@@ -16,7 +18,7 @@ pub(crate) struct Admission {
 }
 enum Codec {
   Annexb(crate::bitstream::Parser),
-  Framed(crate::packet_syntax::Validator),
+  Framed(codec_parser::Validator),
 }
 pub(crate) struct Frontend {
   codec: Codec,
@@ -30,7 +32,7 @@ impl Frontend {
       b"H264" | b"HEVC" => {
         Codec::Annexb(crate::bitstream::Parser::new(fourcc)?)
       }
-      _ => Codec::Framed(crate::packet_syntax::Validator::new(fourcc)?),
+      _ => Codec::Framed(codec_parser::Validator::new(fourcc)?),
     };
     Ok(Self {
       codec,
@@ -45,8 +47,9 @@ impl Frontend {
     bytes: &[u8],
     timestamp: u64,
     source: Source,
+    budget: usize,
   ) -> io::Result<Admission> {
-    let result = self.inspect(bytes, timestamp, source);
+    let result = self.inspect(bytes, timestamp, source, budget.min(32));
     // Annex B owns its metadata/recovery transaction in Parser. Framed
     // codecs retain metadata here, so reset that whole transaction on
     // any rejected submission, not only on assembled-task overflow.
@@ -61,10 +64,18 @@ impl Frontend {
     bytes: &[u8],
     timestamp: u64,
     source: Source,
+    budget: usize,
   ) -> io::Result<Admission> {
     match &mut self.codec {
       Codec::Annexb(parser) => {
         let report = parser.admit(bytes)?;
+        if report.units.len() > budget {
+          parser.seek()?;
+          return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "coded frame budget exhausted",
+          ));
+        }
         let tasks = report
           .units
           .into_iter()
@@ -81,13 +92,13 @@ impl Frontend {
         Ok(Admission { tasks, end: report.end })
       }
       Codec::Framed(validator) => {
-        if bytes.len() > crate::submission::MAX_PACKET_SIZE {
+        if bytes.len() > rkmpp::MAX_PACKET_SIZE {
           return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "compressed input exceeds limit",
           ));
         }
-        let ranges = validator.validate(bytes)?;
+        let ranges = validator.validate(bytes, budget)?;
         if ranges.is_empty() {
           self.metadata.append(bytes)?;
         }
@@ -134,8 +145,9 @@ impl Frontend {
         let configuration = validator.configuration();
         let mut next = Self::new(self.fourcc)?;
         if !configuration.is_empty() {
-          next.admit(&configuration, 0, Source::End)?;
+          next.admit(&configuration, 0, Source::End, 0)?;
         }
+        next.serial = self.serial;
         *self = next;
         Ok(())
       }

@@ -1,0 +1,11 @@
+[package]
+name = "rkmpp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+dma-buf.workspace = true
+
+[dev-dependencies]
+libc.workspace = true

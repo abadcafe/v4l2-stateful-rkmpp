@@ -8,16 +8,17 @@
 use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
 
+use dma_buf::Buffer;
+use dma_buf::image::Plane;
+
 use super::context::Context;
 use super::imports::Cache;
-use crate::dma::Buffer;
-use crate::image::Plane;
 
 #[test]
 fn test_new_rejects_budget_that_cannot_retain_both_conversion_images() {
   assert!(
     Cache::new(
-      Context::new().unwrap().device(),
+      Context::new(&super::Factory::default()).unwrap().device(),
       NonZeroUsize::new(1).unwrap()
     )
     .is_err()
@@ -26,7 +27,7 @@ fn test_new_rejects_budget_that_cannot_retain_both_conversion_images() {
 
 #[test]
 fn test_pair_reuses_dma_identity_across_duplicated_file_descriptors() {
-  let context = Context::new().unwrap();
+  let context = Context::new(&super::Factory::default()).unwrap();
   let mut cache =
     Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
       .unwrap();
@@ -59,7 +60,7 @@ fn test_pair_reuses_dma_identity_across_duplicated_file_descriptors() {
 
 #[test]
 fn test_pair_eviction_preserves_both_live_conversion_descriptors() {
-  let context = Context::new().unwrap();
+  let context = Context::new(&super::Factory::default()).unwrap();
   let mut cache =
     Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
       .unwrap();
@@ -104,7 +105,7 @@ fn test_pair_eviction_preserves_both_live_conversion_descriptors() {
 #[test]
 fn test_pair_rejects_non_dma_and_empty_imports_without_poisoning_cache()
 {
-  let context = Context::new().unwrap();
+  let context = Context::new(&super::Factory::default()).unwrap();
   let mut cache =
     Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
       .unwrap();
@@ -130,7 +131,7 @@ fn test_pair_rejects_non_dma_and_empty_imports_without_poisoning_cache()
 
 #[test]
 fn test_pair_rejects_aliased_images_and_non_dma_source() {
-  let context = Context::new().unwrap();
+  let context = Context::new(&super::Factory::default()).unwrap();
   let mut cache =
     Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
       .unwrap();

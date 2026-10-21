@@ -2,7 +2,6 @@
 //! reference picture identities through marking operations. operations:
 //! apply; entities: Memory, Picture, Operation, State, Entry; tests:
 //! reference_tests.
-use std::collections::BTreeSet;
 use std::io;
 #[derive(Clone, Copy)]
 pub(super) enum Operation {
@@ -64,6 +63,12 @@ fn long_num(entry: &Entry, current: &Picture) -> Option<u32> {
   })
 }
 impl Memory {
+  pub(super) fn reset(&mut self) {
+    self.entries.clear();
+    self.unpaired = None;
+    self.previous_reference = None;
+  }
+
   pub(super) fn apply(
     &mut self,
     picture: Picture,
@@ -116,9 +121,41 @@ impl Memory {
             "H264 reference pictures lost: forbidden frame_num gap",
           ));
         }
+        let count =
+          (picture.frame + picture.modulus - missing) % picture.modulus;
+        let mut long = self
+          .entries
+          .iter()
+          .filter(|entry| entry.long.is_some())
+          .map(|entry| entry.id)
+          .collect::<Vec<_>>();
+        long.sort_unstable();
+        long.dedup();
+        if long.len() >= picture.maximum.max(1) as usize {
+          return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame gap has no evictable reference slot",
+          ));
+        }
+        // After at most maximum synthetic pictures, every old
+        // short-term reference has been evicted. Advance
+        // discarded identities at once; materialize only the
+        // suffix that can survive in the DPB.
+        let skipped = count.saturating_sub(picture.maximum.max(1));
+        if skipped != 0 {
+          self.entries.retain(|entry| entry.long.is_some());
+          self.serial =
+            self.serial.checked_add(u64::from(skipped)).ok_or_else(
+              || io::Error::other("picture identity exhausted"),
+            )?;
+          missing = (missing + skipped) % picture.modulus;
+        }
         while missing != picture.frame {
           self.slide(missing, picture.modulus, picture.maximum);
-          self.serial += 1;
+          self.serial =
+            self.serial.checked_add(1).ok_or_else(|| {
+              io::Error::other("picture identity exhausted")
+            })?;
           for bottom in [false, true] {
             self.entries.push(Entry {
               id: self.serial,
@@ -145,14 +182,18 @@ impl Memory {
         continuation = true;
         id
       } else {
-        self.serial += 1;
+        self.serial = self.serial.checked_add(1).ok_or_else(|| {
+          io::Error::other("picture identity exhausted")
+        })?;
         self.unpaired =
           Some((stored_frame, bottom, reference, self.serial));
         self.serial
       }
     } else {
       self.unpaired = None;
-      self.serial += 1;
+      self.serial = self.serial.checked_add(1).ok_or_else(|| {
+        io::Error::other("picture identity exhausted")
+      })?;
       self.serial
     };
     let mut current_long = None;
@@ -179,7 +220,7 @@ impl Memory {
             .retain(|entry| long_num(entry, &picture) != Some(number)),
           Operation::LongFromShort(diff, index) => {
             let target = current - i64::from(diff);
-            let targets: BTreeSet<u64> = self
+            let targets: Vec<u64> = self
               .entries
               .iter()
               .filter(|entry| {
@@ -224,14 +265,18 @@ impl Memory {
     if picture.maximum == 0 {
       self.entries.clear();
     }
-    let mut references: BTreeSet<_> =
+    let mut references: Vec<_> =
       self.entries.iter().map(|entry| entry.id).collect();
+    references.sort_unstable();
+    references.dedup();
     if reference && picture.maximum != 0 {
       // Adaptive marking must free capacity explicitly. Sliding marking
       // cannot evict long-term pictures. Neither path may grow the DPB
       // beyond the SPS contract; the admission owner resets rejected
       // syntax transactions before accepting another coded picture.
-      references.insert(id);
+      if let Err(index) = references.binary_search(&id) {
+        references.insert(index, id);
+      }
       if references.len() > picture.maximum as usize {
         return Err(io::Error::new(
           io::ErrorKind::InvalidData,
@@ -252,20 +297,21 @@ impl Memory {
     if reference {
       self.previous_reference = Some(stored_frame);
     }
-    Ok(State {
-      id,
-      continuation,
-      references: references.into_iter().collect(),
-    })
+    Ok(State { id, continuation, references })
   }
 
   fn slide(&mut self, frame: u32, modulus: u32, maximum: u32) {
+    // Entries are appended in increasing picture identity order; paired
+    // fields share adjacent entries. Retain operations preserve that
+    // order.
     while self
       .entries
       .iter()
-      .map(|e| e.id)
-      .collect::<BTreeSet<_>>()
-      .len()
+      .map(|entry| entry.id)
+      .fold((None, 0usize), |(previous, count), id| {
+        (Some(id), count + usize::from(previous != Some(id)))
+      })
+      .1
       >= maximum.max(1) as usize
     {
       let oldest = self

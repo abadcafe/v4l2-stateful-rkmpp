@@ -8,15 +8,15 @@ use std::os::fd::AsFd;
 
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
-use crate::protocol::command::Command;
+use crate::protocol::command::{Action, Command, Stop};
 use crate::protocol::{
   Batch, Event, MAX_BATCH, Message, Reply, VERSION,
 };
 use crate::readiness::Readable;
 use crate::shutdown::Shutdown;
 pub(super) trait Channel {
-  fn exchange(&mut self, batch: &mut Batch) -> io::Result<()>;
-  fn register(
+  async fn exchange(&mut self, batch: &mut Batch) -> io::Result<()>;
+  async fn register(
     &mut self,
     direction: Direction,
     epoch: u64,
@@ -63,6 +63,7 @@ pub(super) async fn run(
   let mut current = Message::default();
   let mut pools = [0u32; 2];
   let mut fetch = true;
+  let mut advance = true;
   let (mut max_events, mut max_replies) = (0u32, 0u32);
   let mut pending = VecDeque::with_capacity(64);
   let (mut exchanges, mut registrations, mut events, mut replies) =
@@ -85,7 +86,7 @@ pub(super) async fn run(
       if fetch || batch.reply_count != 0 {
         exchanges += 1;
         replies += u64::from(batch.reply_count);
-        if let Err(error) = control.exchange(&mut batch) {
+        if let Err(error) = control.exchange(&mut batch).await {
           return if error.raw_os_error() == Some(libc::EPIPE) {
             Ok(())
           } else {
@@ -115,54 +116,63 @@ pub(super) async fn run(
         if command.kind() == Event::Close {
           return Ok(());
         }
-        let direction = match command.kind() {
-          Event::Packet => Some((0, Direction::Output)),
-          Event::Capture | Event::Recycle => {
-            Some((1, Direction::Capture))
+        let direction = match command.action {
+          Action::Packet { pool, .. } => {
+            Some((0, Direction::Output, pool.get()))
+          }
+          Action::Capture { pool, .. } => {
+            Some((1, Direction::Capture, pool.get()))
+          }
+          Action::Recycle { pool, .. } => {
+            Some((1, Direction::Capture, pool.get()))
           }
           _ => None,
         };
         let mut registration = None;
-        if let Some((slot, kind)) = direction
-          && pools[slot] != message.pool_id
+        if let Some((slot, kind, id)) = direction
+          && pools[slot] != id
         {
-          let pool = match control.register(
-            kind,
-            message.epoch,
-            message.pool_id,
-          ) {
-            Ok(pool) => pool,
-            Err(error)
-              if matches!(
-                error.raw_os_error(),
-                Some(libc::EPIPE | libc::ESTALE)
-              ) =>
+          let pool =
+            match control.register(kind, command.route.epoch, id).await
             {
-              continue;
-            }
-            Err(error) => {
-              return Err(format!("register pool: {error}"));
-            }
-          };
+              Ok(pool) => pool,
+              Err(error)
+                if matches!(
+                  error.raw_os_error(),
+                  Some(libc::EPIPE | libc::ESTALE)
+                ) =>
+              {
+                continue;
+              }
+              Err(error) => {
+                return Err(format!("register pool: {error}"));
+              }
+            };
           registration = Some(pool);
           registrations += 1;
-          pools[slot] = message.pool_id;
+          pools[slot] = id;
         }
+        advance = true;
         backend.submit(command, registration).map_err(|e| {
           format!("backend event {}: {e}", message.kind)
         })?;
-        if command.kind() == Event::Reset {
-          if message.flags & Message::RESET_CAPTURE_ONLY != 0 {
+        if let Action::Reset { scope, .. } = command.action {
+          if matches!(scope, Stop::Capture { .. }) {
             pools[1] = 0;
           } else {
             pools = [0; 2];
           }
         }
       }
-      let progressed = backend
-        .advance()
-        .await
-        .map_err(|e| format!("backend progress: {e}"))?;
+      let progressed = if advance {
+        backend
+          .advance()
+          .await
+          .map_err(|e| format!("backend progress: {e}"))?
+      } else {
+        false
+      };
+      advance = progressed;
       while let Some(reply) = backend.take_reply() {
         pending.push_back(reply);
       }
@@ -181,7 +191,10 @@ pub(super) async fn run(
         ready = backend.wait() => ready.map(|()| false),
       };
       match ready {
-        Ok(control_ready) => fetch = control_ready,
+        Ok(control_ready) => {
+          fetch = control_ready;
+          advance = !control_ready;
+        }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
         Err(error) => return Err(format!("wait: {error}")),
       }
@@ -201,7 +214,7 @@ pub(super) async fn run(
       generation: current.generation,
       ..Default::default()
     };
-    let _ = control.exchange(&mut batch);
+    let _ = control.exchange(&mut batch).await;
   }
   let stats = Statistics {
     exchanges,

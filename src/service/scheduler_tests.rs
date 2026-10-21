@@ -23,8 +23,9 @@ use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 
+use dma_buf::Buffer;
+
 use super::scheduler::{Channel, Engine, run};
-use crate::dma::Buffer;
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
 use crate::protocol::command::Command;
@@ -34,7 +35,7 @@ use crate::shutdown::{Shutdown, Signals};
 #[derive(Default)]
 struct Observed {
   replies: Vec<Vec<Message>>,
-  events: Vec<Message>,
+  events: Vec<Command>,
   pools: Vec<u32>,
   waits: usize,
   steps: usize,
@@ -48,7 +49,7 @@ struct Control {
   seen: Rc<RefCell<Observed>>,
 }
 impl Channel for Control {
-  fn exchange(&mut self, batch: &mut Batch) -> io::Result<()> {
+  async fn exchange(&mut self, batch: &mut Batch) -> io::Result<()> {
     self
       .seen
       .borrow_mut()
@@ -63,7 +64,7 @@ impl Channel for Control {
     Ok(())
   }
 
-  fn register(
+  async fn register(
     &mut self,
     direction: Direction,
     _epoch: u64,
@@ -110,7 +111,7 @@ impl Engine for Decoder {
     if let Some(pool) = pool {
       self.seen.borrow_mut().pools.push(pool.into_parts().1);
     }
-    self.seen.borrow_mut().events.push(*command.message());
+    self.seen.borrow_mut().events.push(command);
     if self.event_error {
       Err(io::Error::other("event rejected"))
     } else {
@@ -150,6 +151,9 @@ fn message(kind: u32, id: u32) -> Message {
     kind,
     epoch: 1,
     pool_id: id,
+    count: 1,
+    bytesused: 1,
+    codec: u32::from_le_bytes(*b"H264"),
     ..Default::default()
   }
 }
@@ -503,4 +507,16 @@ async fn test_run_waits_after_consumed_events_when_engine_has_no_runnable_work()
   run(&mut control, engine, &signals.shutdown()).await.unwrap();
   assert_eq!(seen.borrow().advances, 1);
   assert_eq!(seen.borrow().waits, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_reply_only_exchange_does_not_advance_idle_hardware() {
+  let (mut control, mut engine, seen) =
+    fixture(vec![Ok(batch(&[])), Ok(batch(&[])), close()]);
+  engine.replies.push_back(message(Reply::InputDone as u32, 1));
+  let signals = Signals::install().unwrap();
+  let stats =
+    run(&mut control, engine, &signals.shutdown()).await.unwrap();
+  assert_eq!((stats.exchanges, stats.replies), (3, 1));
+  assert_eq!(seen.borrow().advances, 1);
 }

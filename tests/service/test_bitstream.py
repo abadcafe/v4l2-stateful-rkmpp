@@ -7,8 +7,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from rkmpp_bridge_uapi import Reply
 
-from tests.support.bridge_abi import Reply
 from tests.support.mock_decode import play
 from tests.support.mock_process import Process
 from tests.support.outcome import accepted

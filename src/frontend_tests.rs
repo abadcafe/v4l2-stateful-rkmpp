@@ -1,6 +1,92 @@
 //! Public codec admission contract across all five framed formats.
-use crate::frontend::{Frontend, Payload};
+use rkmpp::Payload;
+
+use crate::frontend::Frontend;
 use crate::timestamp::Source;
+
+#[test]
+fn test_admit_recovery_and_seek_never_reuse_picture_identity() {
+  let h264 =
+    &include_bytes!("../tests/artifacts/h264-yuv420p.h264")[..4454];
+  let hevc =
+    &include_bytes!("../tests/artifacts/hevc-yuv420p.hevc")[..5496];
+  let ivf = |bytes: &'static [u8]| {
+    let size =
+      u32::from_le_bytes(bytes[32..36].try_into().unwrap()) as usize;
+    &bytes[44..44 + size]
+  };
+  for (codec, bytes) in [
+    (*b"H264", h264),
+    (*b"HEVC", hevc),
+    (
+      *b"VP80",
+      ivf(include_bytes!("../tests/artifacts/vp8-yuv420p.ivf")),
+    ),
+    (
+      *b"VP90",
+      ivf(include_bytes!("../tests/artifacts/vp9-yuv420p.ivf")),
+    ),
+    (
+      *b"AV01",
+      ivf(include_bytes!("../tests/artifacts/av1-yuv420p.ivf")),
+    ),
+  ] {
+    let mut frontend =
+      Frontend::new(u32::from_le_bytes(codec)).unwrap();
+    let first =
+      frontend.admit(bytes, 0, Source::End, 32).unwrap().tasks[0]
+        .descriptor
+        .plan
+        .id();
+    assert!(frontend.admit(&[0xff], 1, Source::End, 32).is_err());
+    let recovered =
+      frontend.admit(bytes, 2, Source::End, 32).unwrap().tasks[0]
+        .descriptor
+        .plan
+        .id();
+    assert!(
+      recovered > first,
+      "recovery reused {codec:?} picture identity"
+    );
+    frontend.seek().unwrap();
+    let sought =
+      frontend.admit(bytes, 3, Source::End, 32).unwrap().tasks[0]
+        .descriptor
+        .plan
+        .id();
+    assert!(
+      sought > recovered,
+      "seek reused {codec:?} picture identity"
+    );
+  }
+}
+
+#[test]
+fn test_admit_frame_budget_rejects_expansion_and_recovers_transaction()
+{
+  let ivf = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
+  let size =
+    u32::from_le_bytes(ivf[32..36].try_into().unwrap()) as usize;
+  let key = &ivf[44..44 + size];
+  let mut input = key.to_vec();
+  for _ in 0..262_144 {
+    input.extend_from_slice(&[0x1a, 1, 0x88]);
+  }
+  let mut frontend =
+    Frontend::new(u32::from_le_bytes(*b"AV01")).unwrap();
+  assert_eq!(
+    frontend.admit(&input, 0, Source::End, 8).err().unwrap().kind(),
+    std::io::ErrorKind::InvalidData
+  );
+  let admitted = frontend.admit(key, 7, Source::Start, 1).unwrap();
+  assert_eq!(admitted.tasks.len(), 1);
+  assert_eq!(admitted.tasks[0].descriptor.timestamp, 7);
+  assert!(frontend.admit(key, 8, Source::End, 0).is_err());
+  assert_eq!(
+    frontend.admit(key, 9, Source::End, 1).unwrap().tasks.len(),
+    1
+  );
+}
 #[test]
 fn test_admit_all_codecs_carry_identity_and_submission_timestamp() {
   let h264 =
@@ -23,7 +109,8 @@ fn test_admit_all_codecs_carry_identity_and_submission_timestamp() {
   ] {
     let mut frontend =
       Frontend::new(u32::from_le_bytes(codec)).unwrap();
-    let admitted = frontend.admit(bytes, 123, Source::Start).unwrap();
+    let admitted =
+      frontend.admit(bytes, 123, Source::Start, 32).unwrap();
     assert!(!admitted.end);
     assert_eq!(admitted.tasks.len(), 1);
     assert!(matches!(admitted.tasks[0].payload, Payload::Input(_)));
@@ -36,7 +123,7 @@ fn test_admit_invalid_input_cannot_create_decode_task() {
   for codec in [*b"H264", *b"HEVC", *b"VP80", *b"VP90", *b"AV01"] {
     let mut frontend =
       Frontend::new(u32::from_le_bytes(codec)).unwrap();
-    assert!(frontend.admit(&[0xff], 0, Source::End).is_err());
+    assert!(frontend.admit(&[0xff], 0, Source::End, 32).is_err());
   }
 }
 
@@ -53,7 +140,12 @@ fn test_admit_av1_temporal_unit_assigns_each_coded_frame_its_own_task()
       u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
         as usize;
     let admission = frontend
-      .admit(&bytes[offset + 12..offset + 12 + size], 1, Source::End)
+      .admit(
+        &bytes[offset + 12..offset + 12 + size],
+        1,
+        Source::End,
+        32,
+      )
       .unwrap();
     multiple |= admission.tasks.len() > 1;
     assert_eq!(
@@ -89,13 +181,13 @@ fn test_admit_separate_av1_sequence_and_seek_restore_decoder_configuration()
     Frontend::new(u32::from_le_bytes(*b"AV01")).unwrap();
   assert!(
     frontend
-      .admit(&packet[..15], 0, Source::End)
+      .admit(&packet[..15], 0, Source::End, 32)
       .unwrap()
       .tasks
       .is_empty()
   );
   let admission =
-    frontend.admit(&packet[15..], 1, Source::End).unwrap();
+    frontend.admit(&packet[15..], 1, Source::End, 32).unwrap();
   let Payload::Prefixed { prefix, range } = &admission.tasks[0].payload
   else {
     panic!("standalone sequence must reach MPP with its picture");
@@ -104,7 +196,7 @@ fn test_admit_separate_av1_sequence_and_seek_restore_decoder_configuration()
   assert_eq!(range, &(0..packet.len() - 15));
   frontend.seek().unwrap();
   let admission =
-    frontend.admit(&packet[15..], 2, Source::End).unwrap();
+    frontend.admit(&packet[15..], 2, Source::End, 32).unwrap();
   assert!(matches!(
     admission.tasks[0].payload,
     Payload::Prefixed { .. }
@@ -137,15 +229,19 @@ fn test_admit_oversized_metadata_picture_is_rejected_and_can_recover() {
   }
   padding.resize(padding.len() + length, 0);
   assert!(
-    frontend.admit(&padding, 0, Source::End).unwrap().tasks.is_empty()
+    frontend
+      .admit(&padding, 0, Source::End, 32)
+      .unwrap()
+      .tasks
+      .is_empty()
   );
   let error = frontend
-    .admit(packet, 1, Source::End)
+    .admit(packet, 1, Source::End, 32)
     .err()
     .expect("oversized combined packet");
   assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
   assert_eq!(
-    frontend.admit(packet, 2, Source::End).unwrap().tasks.len(),
+    frontend.admit(packet, 2, Source::End, 32).unwrap().tasks.len(),
     1
   );
 }
@@ -165,15 +261,15 @@ fn test_admit_metadata_overflow_does_not_poison_next_keyframe() {
   for _ in 0..2 {
     assert!(
       frontend
-        .admit(&padding, 0, Source::End)
+        .admit(&padding, 0, Source::End, 32)
         .unwrap()
         .tasks
         .is_empty()
     );
   }
-  assert!(frontend.admit(&[0x7a, 0], 1, Source::End).is_err());
+  assert!(frontend.admit(&[0x7a, 0], 1, Source::End, 32).is_err());
   assert_eq!(
-    frontend.admit(packet, 2, Source::End).unwrap().tasks.len(),
+    frontend.admit(packet, 2, Source::End, 32).unwrap().tasks.len(),
     1
   );
 }

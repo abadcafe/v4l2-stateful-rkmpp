@@ -7,6 +7,7 @@ Explicit inherited descriptors remain owned by the caller and are copied into th
 """
 
 import errno
+import math
 import os
 import queue
 import subprocess
@@ -18,7 +19,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from types import TracebackType
 
-from tests.support.bridge_abi import ACCEPT
+from rkmpp_bridge_uapi import ACCEPT
+
 from tests.support.mock_wire import Reply, Request, read_request, reply, wake
 from tests.support.outcome import Ok, Rejected, Result
 from tests.support.seqpacket import Socket
@@ -71,7 +73,7 @@ class Peer:
             self._done.set()
 
     def wait(self, timeout: float) -> Result[None]:
-        if timeout <= 0:
+        if not math.isfinite(timeout) or timeout <= 0:
             return Rejected(errno.EINVAL, "invalid peer deadline")
         if not self._done.wait(timeout):
             return Rejected(errno.ETIMEDOUT, "mock peer did not close")

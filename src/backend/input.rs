@@ -5,9 +5,10 @@
 //! tests/service/test_resources.
 use std::io;
 
-use crate::dma::Buffer;
-use crate::mpp::{Input, InputAccess, Packet};
-use crate::submission::{Origin, Payload};
+use dma_buf::Buffer;
+use rkmpp::{Input, InputAccess, Packet, Payload};
+
+use crate::submission::Origin;
 use crate::timestamp::Source;
 struct Slot {
   input: Input,
@@ -103,7 +104,7 @@ impl InputPool {
       .get(index)
       .and_then(|s| s.access.as_ref())
       .ok_or_else(|| io::Error::other("input has no read lease"))?
-      .packet(payload, identity, source)
+      .packet(payload, identity, source as i64)
   }
 
   pub(super) fn bytes(&self, index: usize) -> io::Result<&[u8]> {

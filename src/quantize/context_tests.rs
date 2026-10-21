@@ -8,15 +8,16 @@
 use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
 
+use dma_buf::Buffer;
+use dma_buf::image::{Depth, Plane};
+
 use super::context::Context;
 use super::imports::Cache;
 use super::layout::Layout;
-use crate::dma::Buffer;
-use crate::image::{Depth, Plane};
 
 #[test]
 fn test_dispatch_real_imports_completes_and_publishes_nv12_pixels() {
-  let mut context = Context::new().unwrap();
+  let mut context = Context::new(&super::Factory::default()).unwrap();
   let mut imports =
     Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
       .unwrap();
@@ -81,8 +82,8 @@ fn test_dispatch_real_imports_completes_and_publishes_nv12_pixels() {
 
 #[test]
 fn test_dispatch_rejects_foreign_device_without_poisoning_context() {
-  let mut context = Context::new().unwrap();
-  let other = Context::new().unwrap();
+  let mut context = Context::new(&super::Factory::default()).unwrap();
+  let other = Context::new(&super::Factory::default()).unwrap();
   let mut imports =
     Cache::new(other.device(), NonZeroUsize::new(2).unwrap()).unwrap();
   let source = Buffer::allocate(4096).unwrap();
@@ -102,7 +103,7 @@ fn test_dispatch_rejects_foreign_device_without_poisoning_context() {
 
 #[test]
 fn test_dispatch_imports_survive_cache_eviction_before_submission() {
-  let mut context = Context::new().unwrap();
+  let mut context = Context::new(&super::Factory::default()).unwrap();
   let mut imports =
     Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
       .unwrap();
@@ -133,7 +134,7 @@ fn test_dispatch_imports_survive_cache_eviction_before_submission() {
 
 #[test]
 fn test_dispatch_rejects_undersized_imports_before_submission() {
-  let mut context = Context::new().unwrap();
+  let mut context = Context::new(&super::Factory::default()).unwrap();
   let mut imports =
     Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
       .unwrap();
@@ -150,4 +151,19 @@ fn test_dispatch_rejects_undersized_imports_before_submission() {
     std::io::ErrorKind::InvalidInput
   );
   assert!(context.finish().unwrap());
+}
+
+#[test]
+fn test_new_shared_factory_reuses_device_and_keeps_contexts_independent()
+ {
+  let factory = super::Factory::default();
+  let first = Context::new(&factory).unwrap();
+  let second = Context::new(&factory.clone()).unwrap();
+  assert!(std::sync::Arc::ptr_eq(&first.device(), &second.device()));
+  drop(first);
+  second.quiesce().unwrap();
+  assert!(!std::sync::Arc::ptr_eq(
+    &second.device(),
+    &Context::new(&super::Factory::default()).unwrap().device()
+  ));
 }

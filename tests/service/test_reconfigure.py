@@ -58,6 +58,7 @@ def test_decode_changed_layout_preserves_every_pixel(
             artifacts / file,
             initial_capture_size=512 * 256 * 3 if reuse else 0,
             reuse_capture=reuse,
+            capture_count=32 if reuse else 2,
         )
     )
     assert all(frame.flags == 0 for frame in result.frames), [

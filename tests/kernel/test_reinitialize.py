@@ -12,12 +12,12 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
+from rkmpp_bridge_uapi import ACCEPT, VERSION, Message, Reply
 
 from tests.support.bridge import Session
-from tests.support.bridge_abi import ACCEPT, VERSION, Message, Reply
 from tests.support.control_abi import Control
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import Rejected, accepted
+from tests.support.outcome import Rejected, accepted, present
 from tests.support.queue import Queue, QueueType
 from tests.support.stream import Codec
 from tests.support.syscalls import OwnedFd, command, ioctl, open_fd
@@ -42,7 +42,7 @@ def test_full_cleanup_restores_capture_minimum_without_setting_format(
         size=6144,
         format=1,
     )
-    assert accepted(raw_session.service.exchange([layout])).results[0] == 0
+    assert present(accepted(raw_session.service.exchange([layout])).result(0)) == 0
     minimum = Control(id=0x980927)
     request = command(3, "V", 27, ctypes.sizeof(minimum))
     _ = accepted(ioctl(raw_session.video.fd, request, minimum))
@@ -51,8 +51,8 @@ def test_full_cleanup_restores_capture_minimum_without_setting_format(
     for kind in (QueueType.OUTPUT, QueueType.CAPTURE):
         assert accepted(Queue(raw_session.video.fd, kind).request(0)) == 0
     _ = accepted(ioctl(raw_session.video.fd, request, minimum))
-    assert minimum.value == 18
-    assert accepted(Queue(raw_session.video.fd, QueueType.CAPTURE).request(1)) == 18
+    assert minimum.value == 2
+    assert accepted(Queue(raw_session.video.fd, QueueType.CAPTURE).request(1)) == 2
 
 
 @pytest.mark.parametrize("capture_first", [False, True])
@@ -81,7 +81,7 @@ def test_full_cleanup_reinitializes_same_fd_with_isolated_service_endpoint(
             accepted(output.stream_on())
             accepted(capture.stream_on())
             batch = accepted(service.exchange())
-            packet = Message.from_buffer_copy(batch.events)
+            packet = present(batch.event(0))
             while accepted(service.exchange()).event_count:
                 pass
             layout = Message(
@@ -98,7 +98,7 @@ def test_full_cleanup_reinitializes_same_fd_with_isolated_service_endpoint(
                 size=12288,
                 format=1,
             )
-            assert accepted(service.exchange([layout])).results[0] == 0
+            assert present(accepted(service.exchange([layout])).result(0)) == 0
             # Leave SOURCE_CHANGE queued. Recovery must preserve subscription,
             # but an event from the failed incarnation cannot survive teardown.
             if disconnect:
@@ -127,10 +127,10 @@ def test_full_cleanup_reinitializes_same_fd_with_isolated_service_endpoint(
             accepted(output.stream_on())
             batch = accepted(service.exchange())
             assert batch.event_count == 1
-            current = Message.from_buffer_copy(batch.events)
+            current = present(batch.event(0))
             assert current.epoch > packet.epoch and current.codec == Codec.VP9.fourcc
             for previous in stale:
-                forged = Message.from_buffer_copy(current)
+                forged = current.clone()
                 forged.kind = Reply.INPUT_DONE
                 result = previous.exchange([forged])
                 assert isinstance(result, Rejected) and result.code == errno.EPIPE
@@ -140,9 +140,9 @@ def test_full_cleanup_reinitializes_same_fd_with_isolated_service_endpoint(
                 assert isinstance(result, Rejected) and result.code == errno.EPIPE
                 previous.close()
             stale.clear()
-            done = Message.from_buffer_copy(current)
+            done = current.clone()
             done.kind = Reply.INPUT_DONE
-            assert accepted(service.exchange([done])).results[0] == 0
+            assert present(accepted(service.exchange([done])).result(0)) == 0
             assert accepted(output.dequeue()).bytesused == (24,)
             # Fail the fresh incarnation too: the next iteration must not depend
             # on the original endpoint or any stale queue error/layout state.

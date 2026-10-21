@@ -4,6 +4,7 @@ operations: pytest cases; entities: none; tests: timeout, cleanup, workspace saf
 Real playback behavior is covered by tests/browser through this public interface.
 """
 
+import errno
 import subprocess
 from pathlib import Path
 from typing import BinaryIO
@@ -78,3 +79,17 @@ def test_open_existing_workspace_does_not_replace_user_files(tmp_path: Path) -> 
     _ = (directory / "owned.txt").write_text("preserve")
     assert isinstance(Browser.open(directory, (), ()), Rejected)
     assert (directory / "owned.txt").read_text() == "preserve"
+
+
+@pytest.mark.parametrize(
+    "timeout", [0.0, -1.0, float("nan"), float("inf"), -float("inf")]
+)
+def test_open_invalid_deadline_rejects_before_allocating_workspace(
+    tmp_path: Path, timeout: float
+) -> None:
+    directory = tmp_path / "browser"
+    result = Browser.open(
+        directory, (), (), executable=tmp_path / "missing", startup_timeout=timeout
+    )
+    assert isinstance(result, Rejected) and result.code == errno.EINVAL
+    assert not directory.exists()

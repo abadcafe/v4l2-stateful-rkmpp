@@ -4,26 +4,30 @@
 //! context_tests and quantize_tests through the public conversion
 //! interface.
 use std::io;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use ash::vk;
 
 use super::device::Device;
 use super::imports::Pair;
 use super::layout::Layout;
+use super::pipeline::{Factory, Pipeline};
 use crate::fence::Fence;
 fn error(operation: &str, result: vk::Result) -> io::Error {
   io::Error::other(format!("Vulkan {operation}: {result:?}"))
 }
 struct Submission {
   _imports: Pair,
-  fence: Option<Fence>,
+  state: Submitted,
+}
+enum Submitted {
+  Preparing,
+  Queued,
+  Exported(Fence),
 }
 pub(super) struct Context {
-  gpu: Rc<Device>,
-  descriptor_layout: vk::DescriptorSetLayout,
-  layout: vk::PipelineLayout,
-  pipeline: vk::Pipeline,
+  gpu: Arc<Device>,
+  program: Arc<Pipeline>,
   descriptors_pool: vk::DescriptorPool,
   descriptors: vk::DescriptorSet,
   pool: vk::CommandPool,
@@ -33,12 +37,11 @@ pub(super) struct Context {
   failed: bool,
 }
 impl Context {
-  pub(super) fn new() -> io::Result<Self> {
+  pub(super) fn new(factory: &Factory) -> io::Result<Self> {
+    let program = factory.get()?;
     let mut context = Self {
-      gpu: Device::new()?,
-      descriptor_layout: vk::DescriptorSetLayout::null(),
-      layout: vk::PipelineLayout::null(),
-      pipeline: vk::Pipeline::null(),
+      gpu: program.device(),
+      program,
       descriptors_pool: vk::DescriptorPool::null(),
       descriptors: vk::DescriptorSet::null(),
       pool: vk::CommandPool::null(),
@@ -55,67 +58,7 @@ impl Context {
     // SAFETY: all handles belong to gpu; local descriptor slices
     // outlive their calls.
     let d = self.gpu.api();
-    let bindings = [0, 1].map(|binding| {
-      vk::DescriptorSetLayoutBinding::default()
-        .binding(binding)
-        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-        .descriptor_count(1)
-        .stage_flags(vk::ShaderStageFlags::COMPUTE)
-    });
-    self.descriptor_layout = unsafe {
-      d.create_descriptor_set_layout(
-        &vk::DescriptorSetLayoutCreateInfo::default()
-          .bindings(&bindings),
-        None,
-      )
-    }
-    .map_err(|r| error("descriptor layout", r))?;
-    let layouts = [self.descriptor_layout];
-    let pushes = [vk::PushConstantRange::default()
-      .stage_flags(vk::ShaderStageFlags::COMPUTE)
-      .size(28)];
-    self.layout = unsafe {
-      d.create_pipeline_layout(
-        &vk::PipelineLayoutCreateInfo::default()
-          .set_layouts(&layouts)
-          .push_constant_ranges(&pushes),
-        None,
-      )
-    }
-    .map_err(|r| error("pipeline layout", r))?;
-    let shader =
-      include_bytes!(concat!(env!("OUT_DIR"), "/quantize.spv"));
-    let words: Vec<u32> = shader
-      .chunks_exact(4)
-      .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-      .collect();
-    let module = unsafe {
-      d.create_shader_module(
-        &vk::ShaderModuleCreateInfo::default().code(&words),
-        None,
-      )
-    }
-    .map_err(|r| error("shader module", r))?;
-    let stage = vk::PipelineShaderStageCreateInfo::default()
-      .stage(vk::ShaderStageFlags::COMPUTE)
-      .module(module)
-      .name(c"main");
-    let info = [vk::ComputePipelineCreateInfo::default()
-      .stage(stage)
-      .layout(self.layout)];
-    let pipelines = unsafe {
-      d.create_compute_pipelines(vk::PipelineCache::null(), &info, None)
-    };
-    unsafe { d.destroy_shader_module(module, None) };
-    self.pipeline = match pipelines {
-      Ok(p) => p[0],
-      Err((partial, result)) => {
-        for pipeline in partial {
-          unsafe { d.destroy_pipeline(pipeline, None) };
-        }
-        return Err(error("compute pipeline", result));
-      }
-    };
+    let layouts = [self.program.descriptor_layout()];
     let sizes = [vk::DescriptorPoolSize::default()
       .ty(vk::DescriptorType::STORAGE_BUFFER)
       .descriptor_count(2)];
@@ -166,22 +109,37 @@ impl Context {
     Ok(())
   }
 
-  pub(super) fn device(&self) -> Rc<Device> {
+  pub(super) fn device(&self) -> Arc<Device> {
     self.gpu.clone()
   }
 
   pub(super) fn quiesce(&self) -> io::Result<()> {
     // An error completion must not release its input frame while
     // submitted GPU work still owns it.
-    unsafe { self.gpu.api().device_wait_idle() }
-      .map_err(|r| error("drain failed dispatch", r))
+    match self.pending.as_ref().map(|pending| &pending.state) {
+      Some(Submitted::Exported(fence)) => fence.wait(),
+      Some(Submitted::Queued) => {
+        // SAFETY: export did not consume the submitted fence payload.
+        unsafe {
+          self.gpu.api().wait_for_fences(&[self.fence], true, u64::MAX)
+        }
+        .map_err(|r| error("drain dispatch", r))
+      }
+      Some(Submitted::Preparing) | None => Ok(()),
+    }
   }
 
   pub(super) fn completion(&self) -> Option<crate::descriptor::Lease> {
     self
       .pending
       .as_ref()
-      .and_then(|p| p.fence.as_ref())
+      .and_then(|p| {
+        if let Submitted::Exported(fence) = &p.state {
+          Some(fence)
+        } else {
+          None
+        }
+      })
       .and_then(Fence::lease)
   }
 
@@ -189,9 +147,13 @@ impl Context {
     if self.failed {
       return Err(io::Error::other("Vulkan context failed previously"));
     }
-    if let Some(fence) =
-      self.pending.as_ref().and_then(|p| p.fence.as_ref())
-    {
+    if let Some(fence) = self.pending.as_ref().and_then(|p| {
+      if let Submitted::Exported(fence) = &p.state {
+        Some(fence)
+      } else {
+        None
+      }
+    }) {
       match fence.ready() {
         Ok(false) => return Ok(false),
         Ok(true) => {}
@@ -234,7 +196,10 @@ impl Context {
     // Any failed Vulkan call latches the context. No later dispatch
     // can recycle resources whose submission status is uncertain.
     self.failed = true;
-    self.pending = Some(Submission { _imports: imports, fence: None });
+    self.pending = Some(Submission {
+      _imports: imports,
+      state: Submitted::Preparing,
+    });
     // SAFETY: this submission owns its imports until completion or
     // quiesce; this context exclusively owns command resource
     // retirement.
@@ -289,14 +254,14 @@ impl Context {
       d.cmd_bind_pipeline(
         self.commands,
         vk::PipelineBindPoint::COMPUTE,
-        self.pipeline,
+        self.program.handle(),
       )
     };
     unsafe {
       d.cmd_bind_descriptor_sets(
         self.commands,
         vk::PipelineBindPoint::COMPUTE,
-        self.layout,
+        self.program.layout(),
         0,
         &[self.descriptors],
         &[],
@@ -307,7 +272,7 @@ impl Context {
     unsafe {
       d.cmd_push_constants(
         self.commands,
-        self.layout,
+        self.program.layout(),
         vk::ShaderStageFlags::COMPUTE,
         0,
         bytes,
@@ -360,32 +325,21 @@ impl Context {
     unsafe { d.reset_fences(&[self.fence]) }
       .map_err(|r| error("reset fence", r))?;
     let commands = [self.commands];
-    unsafe {
-      d.queue_submit(
-        self.gpu.queue(),
-        &[vk::SubmitInfo::default().command_buffers(&commands)],
-        self.fence,
-      )
-    }
-    .map_err(|r| error("queue submit", r))?;
+    unsafe { self.gpu.submit(&commands, self.fence) }?;
+    self.pending.as_mut().unwrap().state = Submitted::Queued;
     let fence =
       Fence::new(unsafe { self.gpu.export_fence(self.fence) }?);
-    self.pending.as_mut().unwrap().fence = Some(fence);
+    self.pending.as_mut().unwrap().state = Submitted::Exported(fence);
     self.failed = false;
     Ok(())
   }
 }
 impl Drop for Context {
   fn drop(&mut self) {
+    let _ = self.quiesce();
     let d = self.gpu.api();
-    let _ = unsafe { d.device_wait_idle() };
     unsafe { d.destroy_fence(self.fence, None) };
     unsafe { d.destroy_command_pool(self.pool, None) };
     unsafe { d.destroy_descriptor_pool(self.descriptors_pool, None) };
-    unsafe { d.destroy_pipeline(self.pipeline, None) };
-    unsafe { d.destroy_pipeline_layout(self.layout, None) };
-    unsafe {
-      d.destroy_descriptor_set_layout(self.descriptor_layout, None)
-    };
   }
 }

@@ -11,10 +11,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from types import FrameType
 
-from tests.support.bridge_abi import VERSION, Message, Reply
+from rkmpp_bridge_uapi import VERSION, Message, Reply
+
 from tests.support.event_abi import Event
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import Result, accepted
+from tests.support.outcome import Result, accepted, present
 from tests.support.syscalls import command, ioctl
 
 
@@ -65,7 +66,7 @@ def test_dqevent_wait_allows_service_to_publish_source_change(
                         )
                     ],
                 )
-                assert accepted(publishing.result(timeout=2)).results[0] == 0
+                assert present(accepted(publishing.result(timeout=2)).result(0)) == 0
                 _ = accepted(waiting.result(timeout=2))
                 assert event.kind == 5
             finally:

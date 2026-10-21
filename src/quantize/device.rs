@@ -4,7 +4,7 @@
 //! context_tests.
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use ash::{Entry, vk};
 struct Instance(ash::Instance);
@@ -16,22 +16,22 @@ impl Drop for Instance {
   }
 }
 pub(super) struct Device {
-  instance: Rc<Instance>,
+  instance: Arc<Instance>,
   api: ash::Device,
   family: u32,
-  queue: vk::Queue,
+  queue: Mutex<vk::Queue>,
   external: ash::khr::external_memory_fd::Device,
 }
 fn error(operation: &str, result: vk::Result) -> io::Error {
   io::Error::other(format!("Vulkan {operation}: {result:?}"))
 }
 impl Device {
-  pub(super) fn new() -> io::Result<Rc<Self>> {
+  pub(super) fn new() -> io::Result<Arc<Self>> {
     let entry = Entry::linked();
     let app = vk::ApplicationInfo::default()
       .application_name(c"v4l2-rkmpp-quantize")
       .api_version(vk::API_VERSION_1_1);
-    let instance = Rc::new(Instance(
+    let instance = Arc::new(Instance(
       unsafe {
         entry.create_instance(
           &vk::InstanceCreateInfo::default().application_info(&app),
@@ -101,15 +101,39 @@ impl Device {
     let queue = unsafe { api.get_device_queue(family, 0) };
     let external =
       ash::khr::external_memory_fd::Device::new(&instance.0, &api);
-    Ok(Rc::new(Self { instance, api, family, queue, external }))
+    Ok(Arc::new(Self {
+      instance,
+      api,
+      family,
+      queue: Mutex::new(queue),
+      external,
+    }))
   }
 
   pub(super) fn family(&self) -> u32 {
     self.family
   }
 
-  pub(super) fn queue(&self) -> vk::Queue {
-    self.queue
+  /// # Safety
+  /// Commands and fence belong to this device and retain their
+  /// resources until completion. Each command buffer and fence has
+  /// one submission owner.
+  pub(super) unsafe fn submit(
+    &self,
+    commands: &[vk::CommandBuffer],
+    fence: vk::Fence,
+  ) -> io::Result<()> {
+    let queue = self.queue.lock().unwrap();
+    // SAFETY: the caller owns the resources; the mutex serializes the
+    // shared queue.
+    unsafe {
+      self.api.queue_submit(
+        *queue,
+        &[vk::SubmitInfo::default().command_buffers(commands)],
+        fence,
+      )
+    }
+    .map_err(|r| error("queue submit", r))
   }
 
   /// # Safety

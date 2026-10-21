@@ -120,3 +120,46 @@ def test_av1_metadata_rejection_recovers_on_first_valid_keyframe(
     assert tuple(frame.digest for frame in result.frames) == accepted(
         frame_hashes(source, 8, 256, 128)
     )
+
+
+def test_av1_inconsistent_redundant_header_reports_damage_and_recovers_pixels(
+    mock_service: Process, artifacts: Path
+) -> None:
+    from tests.support.stream import Packet
+
+    source = artifacts / "av1-yuv420p.ivf"
+    packets = accepted(load(Codec.AV1, source))
+    primary = bytes.fromhex(
+        "0a0b000000f9dbfff8842a02801a1b10021ac56360bdfc1fd807fc021001120000000000041041000823"
+    )
+    redundant = bytearray(primary[13:])
+    redundant[0] = 0x3A
+    redundant[3] ^= 4
+    # The codecparser parses redundant headers independently and accepts this
+    # altered scalar. Picture admission must enforce AV1 6.8.1's identical-copy
+    # requirement before the inconsistent picture can reach MPP.
+    key = packets[0].data
+    offset = 16  # delimiter + sequence + FRAME OBU header
+    assert key[15] == 0x32
+    while key[offset] & 128:
+        offset += 1
+    tiles = key[offset + 1 + 27 :]
+    length = len(tiles)
+    encoded = bytearray()
+    while length >= 128:
+        encoded.append((length & 127) | 128)
+        length >>= 7
+    encoded.append(length)
+    bad = primary + redundant + b"\x22" + encoded + tiles
+    submissions = (Packet(data=bytes(bad), timestamp=0), *packets)
+    result = accepted(
+        play(mock_service, Codec.AV1, source, input_count=1, submissions=submissions)
+    )
+    assert result.eos and not result.errors
+    assert tuple(bool(done.flags & 2) for done in result.input_completions) == (
+        True,
+        *(False for _ in packets),
+    )
+    assert tuple(frame.digest for frame in result.frames) == accepted(
+        frame_hashes(source, 8, 256, 128)
+    )

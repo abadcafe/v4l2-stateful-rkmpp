@@ -5,6 +5,7 @@ tests: service_process_tests, browser acceptance. Only owned processes are stopp
 """
 
 import errno
+import math
 import os
 import subprocess
 import sys
@@ -53,7 +54,7 @@ class Lease:
         *,
         startup_timeout: float = 10,
     ) -> Result[Lease]:
-        if startup_timeout <= 0:
+        if not math.isfinite(startup_timeout) or startup_timeout <= 0:
             return Rejected(errno.EINVAL, "invalid service startup deadline")
         try:
             log = log_path.open("wb")

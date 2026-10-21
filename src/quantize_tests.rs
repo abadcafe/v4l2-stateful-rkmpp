@@ -6,8 +6,9 @@
 //! test_convert_4k_frame_preserves_pixels_and_padding
 use std::os::fd::AsFd;
 
-use crate::dma::Buffer;
-use crate::image::{Depth, Plane};
+use dma_buf::Buffer;
+use dma_buf::image::{Depth, Plane};
+
 use crate::quantize::Quantizer;
 
 fn sample(x: u32, y: u32, plane: u32) -> u32 {
@@ -118,7 +119,8 @@ fn check(q: &mut Quantizer, w: u32, h: u32, repeats: usize) {
 #[test]
 fn test_convert_pixels_saturation_fractional_mean_padding_and_odd_dimensions()
  {
-  let mut q = Quantizer::new().unwrap();
+  let mut q =
+    Quantizer::new(&crate::quantize::Factory::default()).unwrap();
   check(&mut q, 256, 256, 8);
   check(&mut q, 258, 130, 3);
   check(&mut q, 255, 127, 3);
@@ -126,7 +128,8 @@ fn test_convert_pixels_saturation_fractional_mean_padding_and_odd_dimensions()
 
 #[test]
 fn test_convert_distinct_buffer_lifetimes_preserve_all_pixels() {
-  let mut q = Quantizer::new().unwrap();
+  let mut q =
+    Quantizer::new(&crate::quantize::Factory::default()).unwrap();
   for _ in 0..16 {
     check(&mut q, 32, 32, 1);
   }
@@ -134,7 +137,12 @@ fn test_convert_distinct_buffer_lifetimes_preserve_all_pixels() {
 
 #[test]
 fn test_convert_4k_frame_preserves_pixels_and_padding() {
-  check(&mut Quantizer::new().unwrap(), 3840, 2160, 2);
+  check(
+    &mut Quantizer::new(&crate::quantize::Factory::default()).unwrap(),
+    3840,
+    2160,
+    2,
+  );
 }
 
 #[test]
@@ -148,7 +156,7 @@ fn test_convert_eight_bit_preserves_pixels_across_different_strides() {
     }
   }
   target.write().unwrap().fill(0xa5);
-  Quantizer::new()
+  Quantizer::new(&crate::quantize::Factory::default())
     .unwrap()
     .convert(
       Depth::Eight,
@@ -172,12 +180,13 @@ fn test_convert_eight_bit_preserves_pixels_across_different_strides() {
 
 #[test]
 fn test_convert_concurrent_contexts_publish_pixels_to_cpu_readers() {
+  let factory = crate::quantize::Factory::default();
   std::thread::scope(|scope| {
     let workers: Vec<_> = (0..2)
       .map(|_| {
         scope.spawn(|| {
           for _ in 0..16 {
-            check(&mut Quantizer::new().unwrap(), 256, 128, 1);
+            check(&mut Quantizer::new(&factory).unwrap(), 256, 128, 1);
           }
         })
       })
@@ -202,7 +211,8 @@ fn test_convert_first_gpu_write_is_visible_in_never_cpu_mapped_oversized_output(
     }
   }
   for _ in 0..16 {
-    let mut q = Quantizer::new().unwrap();
+    let mut q =
+      Quantizer::new(&crate::quantize::Factory::default()).unwrap();
     let destination = Buffer::allocate(512 * 256 * 3).unwrap();
     q.convert(
       Depth::Ten,
@@ -253,7 +263,8 @@ fn test_submit_drop_waits_for_started_gpu_work_before_releasing_imports()
   let target = Buffer::allocate(4096).unwrap();
   source.write().unwrap().fill(37);
   target.write().unwrap().fill(0);
-  let mut quantizer = Quantizer::new().unwrap();
+  let mut quantizer =
+    Quantizer::new(&crate::quantize::Factory::default()).unwrap();
   quantizer
     .submit(
       Depth::Eight,

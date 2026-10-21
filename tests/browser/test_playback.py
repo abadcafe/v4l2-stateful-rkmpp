@@ -24,7 +24,7 @@ from tests.support.outcome import accepted
 from tests.support.pixels import crop_rgb, decode_png
 from tests.support.player import media_properties
 from tests.support.service_runtime import Running, sample
-from tests.tools.media import expand
+from tests.support.video_expansion import expand
 
 
 class Screenshot(BaseModel):

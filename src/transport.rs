@@ -1,44 +1,162 @@
-//! module: transport; responsibility: transfer owned resources over the
-//! published bridge ABI. operations: broker accept, session
-//! exchange/register/wait; entities: Broker, Session; registered
-//! resources use the pool contract. tests: transport_tests,
-//! tests/kernel and tests/service/test_recovery; no socket fd
-//! transport.
+//! module: transport; responsibility: transfer owned bridge resources
+//! without blocking the runtime. operations: Broker open/accept/close,
+//! Session new/exchange/register/wait; entities: Broker, Session,
+//! Flight, Registration. tests: transport_tests, kernel and service
+//! process acceptance. All lanes are created at startup; a session
+//! retains each in-flight ioctl across cancellation.
 use std::fs::OpenOptions;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::num::NonZeroUsize;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
+use crate::descriptor::Lease;
+use crate::execution::{self, Limits, Pending, Pool as Executors};
 use crate::notify::Notify;
 use crate::pool::{Direction, Pool as RegisteredPool};
-use crate::protocol::registration::Pool;
-use crate::protocol::{Batch, VERSION};
+use crate::protocol::{Batch, MAX_BATCH, Message};
 use crate::readiness::Readable;
 use crate::shutdown::Shutdown;
 mod admission;
 #[cfg(test)]
 mod admission_tests;
-pub use admission::Admission;
-pub struct Broker {
-  ready: Readable,
-}
-pub struct Session {
-  ready: Readable,
-}
+mod ioctl;
 mod registration;
 #[cfg(test)]
 mod registration_tests;
-
+pub use admission::Admission;
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Registration {
+  direction: Direction,
+  epoch: u64,
+  id: u32,
+}
+enum Flight {
+  Exchange { result: Pending<Batch> },
+  Register { key: Registration, result: Pending<RegisteredPool> },
+}
+pub struct Session {
+  ready: Readable,
+  client: execution::Client<()>,
+  flight: Option<Flight>,
+  // The request snapshot survives cancellation. Reuse its storage for
+  // the whole session instead of allocating once per ioctl exchange.
+  submitted: Vec<Message>,
+}
+pub struct Broker {
+  ready: Readable,
+  acceptors: Executors<()>,
+  channels: Executors<()>,
+  acceptor: execution::Client<()>,
+  accepting: Option<Pending<Admission<OwnedFd>>>,
+  panic: Option<Box<dyn std::any::Any + Send>>,
+}
+fn limits(workers: usize) -> Limits {
+  Limits {
+    workers: NonZeroUsize::new(workers).unwrap(),
+    backlog: NonZeroUsize::new(64).unwrap(),
+  }
+}
 impl Session {
-  pub fn lease(&self) -> crate::descriptor::Lease {
+  pub fn new(
+    fd: OwnedFd,
+    client: execution::Client<()>,
+  ) -> io::Result<Self> {
+    Ok(Self {
+      ready: Readable::new(fd)?,
+      client,
+      flight: None,
+      submitted: Vec::with_capacity(MAX_BATCH),
+    })
+  }
+
+  pub fn lease(&self) -> Lease {
     self.ready.lease()
   }
 
-  pub fn new(fd: OwnedFd) -> io::Result<Self> {
-    let ready = Readable::new(fd)?;
-    Ok(Self { ready })
+  pub async fn exchange(
+    &mut self,
+    batch: &mut Batch,
+  ) -> io::Result<()> {
+    crate::protocol::validate(batch)?;
+    if self.flight.is_none() {
+      let lease = self.lease();
+      let result = self
+        .client
+        .schedule(|| {
+          self.submitted.clear();
+          self.submitted.extend_from_slice(
+            &batch.replies[..batch.reply_count as usize],
+          );
+          let owned = *batch;
+          move |_| ioctl::exchange(lease, owned)
+        })
+        .await?;
+      self.flight = Some(Flight::Exchange { result });
+    }
+    let Some(Flight::Exchange { result }) = self.flight.as_mut() else {
+      return Err(busy());
+    };
+    if self.submitted.as_slice()
+      != &batch.replies[..batch.reply_count as usize]
+    {
+      return Err(busy());
+    }
+    let completed = result.await;
+    self.flight = None;
+    *batch = completed?;
+    Ok(())
   }
+
+  pub async fn register(
+    &mut self,
+    direction: Direction,
+    epoch: u64,
+    id: u32,
+  ) -> io::Result<RegisteredPool> {
+    let key = Registration { direction, epoch, id };
+    if self.flight.is_none() {
+      let lease = self.lease();
+      let result = self
+        .client
+        .schedule(|| {
+          move |_| ioctl::register(lease, direction, epoch, id)
+        })
+        .await?;
+      self.flight = Some(Flight::Register { key, result });
+    }
+    let Some(Flight::Register { key: active, result }) =
+      self.flight.as_mut()
+    else {
+      return Err(busy());
+    };
+    if *active != key {
+      return Err(busy());
+    }
+    let completed = result.await;
+    self.flight = None;
+    completed
+  }
+
+  pub async fn wait(
+    &self,
+    notify: &Notify,
+    notification: &Readable,
+    shutdown: &Shutdown,
+  ) -> io::Result<bool> {
+    tokio::select! {
+      result = self.ready.wait() => { result?; Ok(true) },
+      result = notification.wait() => { result?; notify.drain()?; Ok(false) },
+      () = shutdown.cancelled() => Ok(false),
+    }
+  }
+}
+fn busy() -> io::Error {
+  io::Error::new(
+    io::ErrorKind::WouldBlock,
+    "another ioctl transaction is in flight",
+  )
 }
 impl AsFd for Broker {
   fn as_fd(&self) -> BorrowedFd<'_> {
@@ -54,98 +172,66 @@ impl Broker {
       .open(path)?
       .into();
     let ready = Readable::new(fd)?;
-    Ok(Self { ready })
+    let acceptors =
+      Executors::start("rkmpp-accept", limits(1), || (), |_| {})?;
+    let acceptor = acceptors.router().lane();
+    let channels =
+      Executors::start("rkmpp-channel", limits(4), || (), |_| {})?;
+    Ok(Self {
+      ready,
+      acceptors,
+      channels,
+      acceptor,
+      accepting: None,
+      panic: None,
+    })
   }
 
-  pub async fn accept(&self) -> io::Result<Admission<Session>> {
-    self.ready.wait().await?;
-    const ACCEPT: libc::c_ulong = ((b'R' as libc::c_ulong) << 8) | 0x80;
-    let fd =
-      unsafe { libc::ioctl(self.ready.as_fd().as_raw_fd(), ACCEPT) };
-    if fd < 0 {
-      return Admission::classify(io::Error::last_os_error());
+  fn failed(&mut self, result: std::thread::Result<()>) -> io::Error {
+    if let Err(payload) = result {
+      self.panic = Some(payload);
     }
-    // SAFETY: ACCEPT installs and returns a fresh session fd in this
-    // process.
-    Ok(Admission::Accepted(Session::new(unsafe {
-      OwnedFd::from_raw_fd(fd)
-    })?))
-  }
-}
-impl Session {
-  pub fn exchange(&self, batch: &mut Batch) -> io::Result<()> {
-    batch.validate()?;
-    let submitted = batch.reply_count;
-    // SAFETY: Batch matches bridge_uapi.h and remains writable until
-    // ioctl completes.
-    if unsafe {
-      libc::ioctl(
-        self.ready.as_fd().as_raw_fd(),
-        Batch::IOCTL,
-        &mut *batch,
-      )
-    } < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-    batch.validate()?;
-    // Each submitted reply has exactly one zero-or-negative errno
-    // result. Reject malformed results here, before scheduling events
-    // or converting a negative status to its positive errno.
-    if batch.reply_count != submitted
-      || batch.results[..submitted as usize]
-        .iter()
-        .any(|status| !(-4095..=0).contains(status))
-    {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "invalid exchange response",
-      ));
-    }
-    Ok(())
+    io::Error::other("kernel transport executor terminated")
   }
 
-  pub fn register(
-    &self,
-    direction: Direction,
-    epoch: u64,
-    id: u32,
-  ) -> io::Result<RegisteredPool> {
-    let mut pool = Pool {
-      version: VERSION,
-      kind: direction as u32,
-      epoch,
-      pool_id: id,
-      ..Default::default()
+  pub async fn accept(&mut self) -> io::Result<Admission<Session>> {
+    if self.accepting.is_none() {
+      tokio::select! {
+        result=self.acceptors.terminated()=>return Err(self.failed(result)),
+        result=self.channels.terminated()=>return Err(self.failed(result)),
+        result=self.ready.wait()=>result?,
+      }
+      let lease = self.ready.lease();
+      self.accepting = Some(
+        self
+          .acceptor
+          .schedule(|| move |_| ioctl::accept(lease))
+          .await?,
+      );
+    }
+    let result = tokio::select! {
+      result=self.acceptors.terminated()=>return Err(self.failed(result)),
+      result=self.channels.terminated()=>return Err(self.failed(result)),
+      result=self.accepting.as_mut().unwrap()=>result,
     };
-    // SAFETY: REGISTER_POOL installs fresh fds only on successful
-    // copyout.
-    if unsafe {
-      libc::ioctl(
-        self.ready.as_fd().as_raw_fd(),
-        Pool::IOCTL,
-        &mut pool,
-      )
-    } < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the successful REGISTER_POOL above transferred unique
-    // kernel-exported descriptors into this response. No other Rust
-    // owner has been constructed for them.
-    unsafe { registration::adopt(pool, direction, epoch, id) }
+    self.accepting = None;
+    Ok(match result? {
+      Admission::Accepted(fd) => Admission::Accepted(Session::new(
+        fd,
+        self.channels.router().lane(),
+      )?),
+      Admission::Idle => Admission::Idle,
+      Admission::Rejected(error) => Admission::Rejected(error),
+      Admission::Pressure(error) => Admission::Pressure(error),
+    })
   }
 
-  pub async fn wait(
-    &self,
-    notify: &Notify,
-    notification: &Readable,
-    shutdown: &Shutdown,
-  ) -> io::Result<bool> {
-    tokio::select! {
-      result = self.ready.wait() => { result?; Ok(true) },
-      result = notification.wait() => { result?; notify.drain()?; Ok(false) },
-      () = shutdown.cancelled() => Ok(false),
+  pub async fn close(self) -> std::thread::Result<()> {
+    let first = self.acceptors.close().await;
+    let second = self.channels.close().await;
+    match self.panic {
+      Some(payload) => Err(payload),
+      None => first.and(second),
     }
   }
 }

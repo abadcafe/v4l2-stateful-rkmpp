@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include "capture.h"
+#include "../bridge_uapi.h"
 #include <linux/errno.h>
 #include <linux/slab.h>
 enum phase { PREPARED, ACTIVE, DRAINING, STOPPED };
@@ -11,13 +12,14 @@ struct rb_capture *rb_capture_new(u32 size) {
   struct rb_capture *c = kzalloc(sizeof(*c), GFP_KERNEL);
   if (c) {
     c->required = c->active = size;
-    c->minimum = 18;
+    c->minimum = RB_MIN_CAPTURE;
     c->phase = PREPARED;
   }
   return c;
 }
 void rb_capture_free(struct rb_capture *c) { kfree(c); }
-void rb_capture_update(struct rb_capture *c, u32 size, u32 minimum, bool allocated) {
+void rb_capture_update(struct rb_capture *c, u32 size, u32 minimum,
+                       bool allocated) {
   c->required = size;
   c->minimum = minimum;
   c->phase = allocated ? DRAINING : PREPARED;

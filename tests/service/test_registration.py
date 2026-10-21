@@ -4,14 +4,12 @@ operations: pytest cases; entities: InvalidField;
 tests: malformed pools close every installed fd; stale/error registration is isolated.
 """
 
-import ctypes
 import errno
 import time
 from typing import Literal
 
 import pytest
-
-from tests.support.bridge_abi import (
+from rkmpp_bridge_uapi import (
     EXCHANGE,
     REGISTER_POOL,
     VERSION,
@@ -22,12 +20,13 @@ from tests.support.bridge_abi import (
     Pool,
     Reply,
 )
+
 from tests.support.diagnostics import query
 from tests.support.dma_heap import Buffer
 from tests.support.mock_process import Process
 from tests.support.mock_wire import Patch, Request
 from tests.support.mock_wire import Reply as Response
-from tests.support.outcome import accepted
+from tests.support.outcome import accepted, present
 from tests.support.stream import Codec
 
 type InvalidField = Literal[
@@ -76,37 +75,39 @@ def test_register_invalid_pool_response_closes_all_transferred_descriptors(
 
         def handle(request: Request) -> Response:
             if request.command == EXCHANGE:
-                batch = Batch.from_buffer_copy(request.body)
+                batch = present(Batch.decode(request.body))
                 if batch.reply_count:
                     failed.extend(
-                        Message.from_buffer_copy(
-                            batch.replies, i * ctypes.sizeof(Message)
-                        ).kind
-                        for i in range(batch.reply_count)
+                        present(batch.reply(i)).kind for i in range(batch.reply_count)
                     )
                     return Response(code=errno.EPIPE)
                 batch.event_count = 1
-                batch.events[0] = Message(
-                    version=VERSION,
-                    kind=Event.PACKET,
-                    count=1,
-                    epoch=1,
-                    pool_id=1,
-                    codec=Codec.H264.fourcc,
-                    bytesused=16,
+                assert batch.set_event(
+                    0,
+                    Message(
+                        version=VERSION,
+                        kind=Event.PACKET,
+                        count=1,
+                        epoch=1,
+                        pool_id=1,
+                        codec=Codec.H264.fourcc,
+                        bytesused=16,
+                    ),
                 )
                 return Response(body=bytes(batch))
             assert request.command == REGISTER_POOL
-            pool = Pool.from_buffer_copy(request.body)
+            pool = present(Pool.decode(request.body))
             assert (pool.kind, pool.epoch, pool.pool_id) == (10, 1, 1)
             pool.count = 2
             for index in range(32):
-                descriptor = Descriptor.from_buffer(
-                    pool.buffers, index * ctypes.sizeof(Descriptor)
-                )
+                descriptor = present(pool.descriptor(index))
                 descriptor.fd, descriptor.size = -1, 4096 if index < 2 else 0
+                assert pool.set_descriptor(index, descriptor)
             fds = (first.fd, second.fd)
-            patches = (Patch(32, 0), Patch(40, 1))
+            patches = (
+                Patch(present(Pool.descriptor_offset(0)), 0),
+                Patch(present(Pool.descriptor_offset(1)), 1),
+            )
             if field == "version":
                 pool.version += 1
             elif field == "kind":
@@ -116,24 +117,33 @@ def test_register_invalid_pool_response_closes_all_transferred_descriptors(
             elif field == "pool_id":
                 pool.pool_id += 1
             elif field == "reserved":
-                pool.reserved[0] = 1
+                pool.reserved = [1, 0]
             elif field == "count_zero":
                 pool.count, fds, patches = 0, (), ()
             elif field == "count_overflow":
                 pool.count = 33
             elif field == "missing_fd":
-                fds, patches = (first.fd,), (Patch(32, 0),)
+                fds, patches = (
+                    (first.fd,),
+                    (Patch(present(Pool.descriptor_offset(0)), 0),),
+                )
             elif field == "duplicate_fd":
-                fds, patches = (first.fd,), (Patch(32, 0), Patch(40, 0))
+                fds, patches = (
+                    (first.fd,),
+                    (
+                        Patch(present(Pool.descriptor_offset(0)), 0),
+                        Patch(present(Pool.descriptor_offset(1)), 0),
+                    ),
+                )
             elif field == "aliased_storage":
                 # SCM_RIGHTS installs two distinct descriptor numbers, both
                 # referring to the same allocation. Numeric fd checks alone
                 # cannot enforce disjoint slot ownership.
                 fds = (first.fd, first.fd)
             elif field == "size_zero":
-                Descriptor.from_buffer(pool.buffers).size = 0
+                assert pool.set_descriptor(0, Descriptor(fd=-1, size=0))
             else:
-                Descriptor.from_buffer(pool.buffers).size = 8192
+                assert pool.set_descriptor(0, Descriptor(fd=-1, size=8192))
             return Response(body=bytes(pool), fds=fds, patches=patches)
 
         peer = accepted(mock_service.session(handle))
@@ -160,24 +170,24 @@ def test_register_errno_discards_stale_event_or_reports_failed(
             return Response(code=code)
         assert request.command == EXCHANGE
         exchanges += 1
-        batch = Batch.from_buffer_copy(request.body)
-        failed.extend(
-            Message.from_buffer_copy(batch.replies, i * ctypes.sizeof(Message)).kind
-            for i in range(batch.reply_count)
-        )
+        batch = present(Batch.decode(request.body))
+        failed.extend(present(batch.reply(i)).kind for i in range(batch.reply_count))
         if exchanges != 1:
             return Response(code=errno.EPIPE)
         batch.event_count = 2
-        batch.events[0] = Message(
-            version=VERSION,
-            kind=Event.PACKET,
-            count=1,
-            epoch=1,
-            pool_id=1,
-            codec=Codec.H264.fourcc,
-            bytesused=16,
+        assert batch.set_event(
+            0,
+            Message(
+                version=VERSION,
+                kind=Event.PACKET,
+                count=1,
+                epoch=1,
+                pool_id=1,
+                codec=Codec.H264.fourcc,
+                bytesused=16,
+            ),
         )
-        batch.events[1] = Message(version=VERSION, kind=Event.CLOSE, epoch=1)
+        assert batch.set_event(1, Message(version=VERSION, kind=Event.CLOSE, epoch=1))
         return Response(body=bytes(batch))
 
     peer = accepted(mock_service.session(handle))

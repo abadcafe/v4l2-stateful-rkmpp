@@ -6,11 +6,11 @@ use crate::notify::Notify;
 #[test]
 fn test_ready_preserves_completed_dma_fence_and_shared_descriptor_lifetime()
  {
-  let buffer = crate::dma::Buffer::allocate(4096).unwrap();
-  let fence = Fence::new(Some(
-    crate::dma::system::export_read(buffer.as_fd()).unwrap(),
-  ));
+  let buffer = dma_buf::Buffer::allocate(4096).unwrap();
+  let fence =
+    Fence::new(Some(dma_buf::export_read(buffer.as_fd()).unwrap()));
   let lease = fence.lease().unwrap();
+  fence.wait().unwrap();
   assert!(fence.ready().unwrap());
   assert!(fence.ready().unwrap());
   drop(fence);
@@ -29,6 +29,7 @@ fn test_ready_rejects_readability_without_sync_file_completion_status()
 #[test]
 fn test_ready_completed_export_needs_no_descriptor() {
   let fence = Fence::new(None);
+  fence.wait().unwrap();
   assert!(fence.ready().unwrap());
   assert!(fence.lease().is_none());
 }

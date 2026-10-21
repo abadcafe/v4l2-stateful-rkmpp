@@ -15,6 +15,32 @@ from tests.support.reference import frame_hashes
 from tests.support.stream import Codec, Packet, load
 
 
+def test_h264_invalid_sei_escape_rejects_only_its_submission(
+    mock_service: Process, artifacts: Path
+) -> None:
+    source = artifacts / "h264-yuv420p.h264"
+    good = accepted(load(Codec.H264, source))
+    # H.264 7.4.1 forbids 00 00 03 followed by a byte above 03.
+    # Reserved SEI payload types still have to obey NAL byte syntax.
+    damaged = Packet(data=bytes.fromhex("0000010680030000030480"), timestamp=0)
+    result = accepted(
+        play(
+            mock_service,
+            Codec.H264,
+            source,
+            input_count=1,
+            submissions=(damaged,) + good,
+        )
+    )
+    assert result.eos and not result.errors
+    assert [done.flags & 2 for done in result.input_completions] == [2] + [0] * len(
+        good
+    )
+    assert tuple(frame.digest for frame in result.frames) == accepted(
+        frame_hashes(source, 8, 256, 128)
+    )
+
+
 @pytest.mark.parametrize(
     "codec,damaged,file",
     [

@@ -8,8 +8,9 @@
 //! test_event_old_capture_recycle_cannot_acknowledge_new_layout
 use std::time::{Duration, Instant};
 
+use dma_buf::Buffer;
+
 use crate::backend::Backend;
-use crate::dma::Buffer;
 use crate::pool::{Direction, Pool};
 use crate::protocol::{Event, Message, Reply, VERSION};
 
@@ -18,6 +19,55 @@ fn dispatch(
   message: Message,
 ) -> std::io::Result<()> {
   backend.event(crate::protocol::command::Command::try_from(message)?)
+}
+
+#[test]
+fn test_step_completes_inputs_in_submission_order_across_slot_reuse() {
+  let buffers = (0..3)
+    .map(|_| {
+      let buffer = Buffer::allocate(4096).unwrap();
+      let mut access = buffer.write().unwrap();
+      access[0] = 0xff;
+      access.finish().unwrap();
+      buffer
+    })
+    .collect();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
+  backend
+    .register(Pool::new(Direction::Output, 1, buffers).unwrap())
+    .unwrap();
+  let packet = |index, count| Message {
+    version: VERSION,
+    kind: Event::Packet as u32,
+    epoch: 1,
+    pool_id: 1,
+    index,
+    count,
+    bytesused: 1,
+    codec: u32::from_le_bytes(*b"H264"),
+    ..Default::default()
+  };
+  for (index, count) in [(2, 7), (0, 8), (1, 9)] {
+    dispatch(&mut backend, packet(index, count)).unwrap();
+  }
+  for (index, count) in [(2, 7), (0, 8), (1, 9), (0, 10)] {
+    if count == 10 {
+      dispatch(&mut backend, packet(index, count)).unwrap();
+    }
+    let reply = (0..128)
+      .find_map(|_| {
+        backend.step().unwrap();
+        backend.take_reply()
+      })
+      .expect("every admitted input must complete");
+    assert_eq!(
+      (reply.kind, reply.index, reply.count),
+      (Reply::InputDone as u32, index, count)
+    );
+    assert_eq!(reply.flags, Message::FRAME_ERROR);
+  }
+  assert!(backend.take_reply().is_none());
 }
 
 #[test]
@@ -34,7 +84,8 @@ fn test_invalid_input_completion_cannot_overtake_initial_picture() {
   let mut access = buffers[1].write().unwrap();
   access[0] = 0;
   access.finish().unwrap();
-  let mut backend = Backend::new().unwrap();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
   backend
     .register(Pool::new(Direction::Output, 1, buffers).unwrap())
     .unwrap();
@@ -60,7 +111,8 @@ fn test_invalid_input_completion_cannot_overtake_initial_picture() {
 
 #[test]
 fn test_event_drains_and_resets_without_decoder() {
-  let mut backend = Backend::new().unwrap();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
   assert!(backend.take_reply().is_none());
   assert!(!backend.step().unwrap());
   let mut event = Message {
@@ -86,7 +138,8 @@ fn test_event_drains_and_resets_without_decoder() {
 #[test]
 fn test_register_accepts_early_capture_but_rejects_duplicate_pool() {
   for kind in [Event::Packet, Event::Recycle] {
-    let mut backend = Backend::new().unwrap();
+    let mut backend =
+      Backend::new(crate::quantize::Factory::default()).unwrap();
     assert!(
       dispatch(
         &mut backend,
@@ -102,7 +155,8 @@ fn test_register_accepts_early_capture_but_rejects_duplicate_pool() {
     );
     assert!(backend.take_reply().is_none());
   }
-  let mut backend = Backend::new().unwrap();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
   backend
     .register(
       Pool::new(
@@ -131,6 +185,7 @@ fn test_register_accepts_early_capture_but_rejects_duplicate_pool() {
       Message {
         version: VERSION,
         kind: Event::Reset as u32,
+        count: 1,
         flags: Message::RESET_CAPTURE_ONLY,
         ..Default::default()
       }
@@ -168,7 +223,8 @@ fn test_register_defers_undersized_capture_until_layout_reset() {
     u32::from_le_bytes(bytes[32..36].try_into().unwrap()) as usize;
   let input = Buffer::allocate(size).unwrap();
   input.write().unwrap().copy_from_slice(&bytes[44..44 + size]);
-  let mut backend = Backend::new().unwrap();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
   backend
     .register(Pool::new(Direction::Output, 1, vec![input]).unwrap())
     .unwrap();
@@ -244,6 +300,7 @@ fn test_register_defers_undersized_capture_until_layout_reset() {
     &mut backend,
     Message {
       kind: Event::Reset as u32,
+      count: 1,
       flags: Message::RESET_CAPTURE_ONLY,
       generation: 1,
       ..base
@@ -309,7 +366,8 @@ fn test_register_defers_undersized_capture_until_layout_reset() {
 
 #[test]
 fn test_event_packet_rejects_pool_slot_length_and_duplicate_leases() {
-  let mut backend = Backend::new().unwrap();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
   let input = Buffer::allocate(8192).unwrap();
   let stream = include_bytes!("../tests/artifacts/vp9-yuv420p.ivf");
   let size =
@@ -357,6 +415,7 @@ fn test_event_packet_rejects_pool_slot_length_and_duplicate_leases() {
     Message {
       version: VERSION,
       kind: Event::Reset as u32,
+      count: 1,
       epoch: 2,
       generation: 3,
       ..Default::default()
@@ -388,7 +447,8 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
   }
   assert_eq!(packets.len(), 48);
   let input = Buffer::allocate(65536).unwrap();
-  let mut backend = Backend::new().unwrap();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
   backend
     .register(
       Pool::new(Direction::Output, 1, vec![input.clone()]).unwrap(),
@@ -487,7 +547,7 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
               );
               input_free = true;
             }
-            wake.wait(Duration::from_millis(10)).unwrap();
+            wait_wakeup(&wake, Duration::from_millis(10));
             wake.drain().unwrap();
           }
           generation += 1;
@@ -495,6 +555,7 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
             &mut backend,
             Message {
               kind: Event::Reset as u32,
+              count: 1,
               flags: Message::RESET_CAPTURE_ONLY,
               ..base(generation)
             },
@@ -544,7 +605,7 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
         assert_eq!(reply.kind, Reply::Stopped as u32);
       }
     }
-    wake.wait(Duration::from_millis(1)).unwrap();
+    wait_wakeup(&wake, Duration::from_millis(1));
     wake.drain().unwrap();
   }
   assert_eq!((layouts, frames), (2, 48));
@@ -562,7 +623,8 @@ fn test_event_drain_accepts_maximum_registered_inputs() {
       buffer
     })
     .collect();
-  let mut backend = Backend::new().unwrap();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
   backend
     .register(Pool::new(Direction::Output, 1, buffers).unwrap())
     .unwrap();
@@ -597,7 +659,8 @@ fn test_event_drain_accepts_maximum_registered_inputs() {
 fn test_event_input_completion_echoes_the_queue_token_even_on_damage() {
   let input = Buffer::allocate(4096).unwrap();
   input.write().unwrap()[0] = 0xff;
-  let mut backend = Backend::new().unwrap();
+  let mut backend =
+    Backend::new(crate::quantize::Factory::default()).unwrap();
   backend
     .register(Pool::new(Direction::Output, 1, vec![input]).unwrap())
     .unwrap();
@@ -627,4 +690,23 @@ fn test_event_input_completion_echoes_the_queue_token_even_on_damage() {
     }
   }
   panic!("damaged input must be completed");
+}
+
+fn wait_wakeup(
+  notify: &crate::notify::Notify,
+  timeout: Duration,
+) -> bool {
+  use std::os::fd::{AsFd, AsRawFd};
+  let mut poll = libc::pollfd {
+    fd: notify.as_fd().as_raw_fd(),
+    events: libc::POLLIN,
+    revents: 0,
+  };
+  // SAFETY: one live descriptor and one writable native poll record.
+  assert!(
+    unsafe {
+      libc::poll(&mut poll, 1, timeout.as_millis().try_into().unwrap())
+    } >= 0
+  );
+  poll.revents & libc::POLLIN != 0
 }

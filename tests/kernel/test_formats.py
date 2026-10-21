@@ -18,12 +18,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from rkmpp_bridge_uapi import Reply
 
-from tests.support.bridge_abi import Message, Reply
 from tests.support.format_abi import Capability, Format, FormatDescription, Selection
 from tests.support.framesize_abi import FrameSize
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import Rejected, accepted
+from tests.support.outcome import Rejected, accepted, present
 from tests.support.queue import Queue, QueueType
 from tests.support.stream import Codec
 from tests.support.syscalls import command, ioctl
@@ -135,9 +135,12 @@ def test_queue_invalid_slot_export_and_empty_dequeue_return_specific_errors(
                 break
             assert time.monotonic() < deadline
             time.sleep(0.001)
-        acknowledgement = Message.from_buffer_copy(batch.events)
+        acknowledgement = present(batch.event(0))
         acknowledgement.kind = Reply.STOPPED
-        assert accepted(raw_session.service.exchange([acknowledgement])).results[0] == 0
+        assert (
+            present(accepted(raw_session.service.exchange([acknowledgement])).result(0))
+            == 0
+        )
         accepted(stopped.result(timeout=5))
     with accepted(queue.export(0)) as owner:
         assert (

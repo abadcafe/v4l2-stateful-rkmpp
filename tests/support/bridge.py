@@ -5,8 +5,9 @@ tests: kernel/test_batch, test_pool, test_copyout_faults, test_lifecycle.
 """
 
 from collections.abc import Sequence
+from types import TracebackType
 
-from tests.support.bridge_abi import (
+from rkmpp_bridge_uapi import (
     EXCHANGE,
     REGISTER_POOL,
     VERSION,
@@ -14,6 +15,7 @@ from tests.support.bridge_abi import (
     Message,
     Pool,
 )
+
 from tests.support.outcome import Ok, Result
 from tests.support.syscalls import OwnedFd, ioctl
 
@@ -29,11 +31,22 @@ class Session:
     def close(self) -> None:
         self._control.close()
 
+    def __enter__(self) -> Session:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
     def exchange(self, replies: Sequence[Message] = ()) -> Result[Batch]:
         assert len(replies) <= 16
         batch = Batch(version=VERSION, reply_count=len(replies))
         for index, reply in enumerate(replies):
-            batch.replies[index] = reply
+            assert batch.set_reply(index, reply)
         status = ioctl(self.fd, EXCHANGE, batch)
         return Ok(batch) if isinstance(status, Ok) else status
 

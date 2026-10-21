@@ -7,8 +7,8 @@ The kernel endpoint is simulated; production MPP/Vulkan execution is real.
 from pathlib import Path
 
 import pytest
+from rkmpp_bridge_uapi import Reply
 
-from tests.support.bridge_abi import Reply
 from tests.support.mock_decode import play
 from tests.support.mock_process import Process
 from tests.support.outcome import accepted
@@ -29,8 +29,8 @@ from tests.support.stream import Codec, load
         (Codec.AV1, "av1-yuv420p10le.ivf", 10, 256, 128, 36),
     ],
 )
-@pytest.mark.parametrize("capture_count", [18, 32])
-@pytest.mark.parametrize("capture_delay", [0, 2])
+@pytest.mark.parametrize("capture_count", [2, 32])
+@pytest.mark.parametrize("capture_delay", [0, 1])
 def test_decode_all_pixels_timestamps_color_and_eos_use_mock_kernel(
     executable: Path,
     artifacts: Path,
@@ -45,9 +45,7 @@ def test_decode_all_pixels_timestamps_color_and_eos_use_mock_kernel(
     capture_delay: int,
 ) -> None:
     expected = accepted(frame_hashes(artifacts / file, depth, width, height))
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         result = accepted(
             play(
@@ -111,9 +109,7 @@ def test_decode_replaces_capture_started_before_first_packet(
     height: int,
 ) -> None:
     expected = accepted(frame_hashes(artifacts / file, depth, width, height))
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         result = accepted(
             play(process, codec, artifacts / file, initial_capture_size=6144)
@@ -145,9 +141,7 @@ def test_decode_reuses_preallocated_capture_after_source_change(
     depth: int,
 ) -> None:
     expected = accepted(frame_hashes(artifacts / file, depth, 256, 128))
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         result = accepted(
             play(
@@ -156,6 +150,7 @@ def test_decode_reuses_preallocated_capture_after_source_change(
                 artifacts / file,
                 initial_capture_size=256 * 128 * 3,
                 reuse_capture=True,
+                capture_count=32,
             )
         )
         assert result.eos

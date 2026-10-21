@@ -1,6 +1,8 @@
 //! Public H.264 8.2.1 picture order contract; no decoder implementation
 //! access.
-use super::poc::{Counter, Field, Parameters, Picture};
+use codec_parser::syntax::h264::Poc as Parameters;
+
+use super::poc::{Counter, Field, Picture};
 fn frame(number: u32, lsb: u32) -> Picture {
   Picture {
     frame: number,

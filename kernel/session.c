@@ -9,15 +9,13 @@
 #include "memory.h"
 #include "session/broker.h"
 #include "session/capture.h"
-#include <linux/anon_inodes.h>
+#include "session/endpoint.h"
 #include <linux/dma-buf.h>
-#include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/kref.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/poll.h>
-#include <linux/pagemap.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <media/v4l2-ctrls.h>
@@ -58,20 +56,13 @@ struct rb_session {
   u32 reset_serial;
   u32 unpaired_field;
 };
-/* An endpoint belongs to one decoder incarnation, not the lifetime of the
- * video fd. Old DMA-BUF exports retain old storage but cannot acquire new work. */
-struct rb_endpoint {
-  struct rb_session *session;
-  u64 incarnation;
-  struct rb_batch batch; /* Serialized by session.lock; no per-exchange allocation. */
-};
 static bool drain_busy(const struct rb_session *s) {
   return s->flow == RB_FLOW_DRAINING || s->flow == RB_FLOW_DRAINED;
 }
 static bool drain_complete(const struct rb_session *s) {
   return s->flow == RB_FLOW_DRAINED || s->flow == RB_FLOW_RESTARTABLE;
 }
-static int attach_service(void *owner);
+static int attach_service(struct rb_session *s);
 static struct rb_session *session(void *priv) {
   return container_of(priv, struct rb_session, fh);
 }
@@ -220,7 +211,8 @@ static void queued(struct vb2_buffer *b) {
         if (!s->available[b->index])
           return;
       }
-      push(s, (struct rb_message){.type = RB_RECYCLE, .index = b->index,
+      push(s, (struct rb_message){.type = RB_RECYCLE,
+                                  .index = b->index,
                                   .count = s->capture_token[b->index]});
     }
   }
@@ -250,7 +242,8 @@ static void activate_capture(struct rb_session *s) {
                               .flags = RB_CAPTURE_REUSE});
   for (unsigned i = 0; i < s->capture.num_buffers; i++)
     if (s->available[i])
-      push(s, (struct rb_message){.type = RB_RECYCLE, .index = i,
+      push(s, (struct rb_message){.type = RB_RECYCLE,
+                                  .index = i,
                                   .count = s->capture_token[i]});
 }
 static int start(struct vb2_queue *q, unsigned count) {
@@ -281,8 +274,9 @@ static int start(struct vb2_queue *q, unsigned count) {
     push(s, (struct rb_message){.type = RB_CAPTURE, .count = q->num_buffers});
     for (i = 0; i < q->num_buffers; i++)
       if (s->available[i])
-        push(s, (struct rb_message){.type = RB_RECYCLE, .index = i,
-                                  .count = s->capture_token[i]});
+        push(s, (struct rb_message){.type = RB_RECYCLE,
+                                    .index = i,
+                                    .count = s->capture_token[i]});
     if (drain_complete(s)) {
       s->flow = RB_FLOW_RUNNING;
       memset(s->before_stop, 0, sizeof(s->before_stop));
@@ -316,7 +310,7 @@ static void stop(struct vb2_queue *q) {
       push(s, (struct rb_message){
                   .type = RB_RESET,
                   .count = ++s->reset_serial,
-                  .flags = q->type | (capture_only ? RB_RESET_CAPTURE_ONLY : 0) |
+                  .flags = (capture_only ? RB_RESET_CAPTURE_ONLY : 0) |
                            (abort_drain ? RB_RESET_ABORT_DRAIN : 0)});
     mutex_unlock(&s->lock);
     waited = wait_event_timeout(s->wait,
@@ -376,7 +370,8 @@ static void format_changed(struct rb_session *s, bool allocated) {
   const struct rb_message *layout = rb_format_layout(s->format);
   v4l2_ctrl_s_ctrl(v4l2_ctrl_find(&s->ctrls, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE),
                    layout->count);
-  rb_capture_update(s->capture_contract, layout->size, layout->count, allocated);
+  rb_capture_update(s->capture_contract, layout->size, layout->count,
+                    allocated);
 }
 static int get_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
   struct rb_session *s = session(p);
@@ -609,8 +604,8 @@ static int video_open(struct file *f) {
   v4l2_fh_init(&s->fh, video_devdata(f));
   f->private_data = &s->fh;
   v4l2_ctrl_handler_init(&s->ctrls, 1);
-  v4l2_ctrl_new_std(&s->ctrls, NULL, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, 18, RB_MAX_BUFFERS,
-                    1, 18);
+  v4l2_ctrl_new_std(&s->ctrls, NULL, V4L2_CID_MIN_BUFFERS_FOR_CAPTURE,
+                    RB_MIN_CAPTURE, RB_MAX_BUFFERS, 1, RB_MIN_CAPTURE);
   v4l2_ctrl_new_std_menu(&s->ctrls, NULL, V4L2_CID_MPEG_VIDEO_H264_PROFILE,
                          V4L2_MPEG_VIDEO_H264_PROFILE_HIGH,
                          BIT(V4L2_MPEG_VIDEO_H264_PROFILE_EXTENDED),
@@ -812,8 +807,8 @@ static int admit_reply(const struct rb_session *s, u32 type) {
   case RB_LAYOUT:
   case RB_FRAME:
   case RB_DRAINING:
-    return s->flow == RB_FLOW_RUNNING || s->flow == RB_FLOW_DRAINING
-               ? 0 : -EBUSY;
+    return s->flow == RB_FLOW_RUNNING || s->flow == RB_FLOW_DRAINING ? 0
+                                                                     : -EBUSY;
   default:
     return 0;
   }
@@ -864,8 +859,7 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
     if (rb_capture_pending(s->capture_contract) ||
         m->pool_id != s->capture_pool || m->generation != s->generation ||
         m->index >= s->capture.num_buffers || !s->available[m->index] ||
-        !s->cap_started || !m->count ||
-        m->count != s->capture_token[m->index])
+        !s->cap_started || !m->count || m->count != s->capture_token[m->index])
       return -ESTALE;
     b = s->capture.bufs[m->index];
     if (m->field > 5 ||
@@ -922,180 +916,101 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
     return -EINVAL;
   }
 }
-static long register_pool(struct rb_session *s, void __user *arg) {
-  struct rb_pool pool;
-  struct vb2_queue *q;
-  unsigned i, exported = 0;
-  int r;
-  if (copy_from_user(&pool, arg, sizeof(pool)))
-    return -EFAULT;
-  if (pool.version != RB_VERSION ||
-      memchr_inv(pool.reserved, 0, sizeof(pool.reserved)))
-    return -EINVAL;
-  q = queue_for(s, pool.type);
+static int export_pool(struct rb_session *s, struct rb_pool *pool,
+                       struct file **files) {
+  struct vb2_queue *q = queue_for(s, pool->type);
+  unsigned i;
   if (!q)
     return -EINVAL;
   if (s->closed || s->failed || s->stopping)
     return -EPIPE;
-  if (!pool.pool_id || pool.epoch != s->epoch ||
-      pool.pool_id !=
-          (V4L2_TYPE_IS_OUTPUT(pool.type) ? s->output_pool : s->capture_pool))
+  if (!pool->pool_id || pool->epoch != s->epoch ||
+      pool->pool_id !=
+          (V4L2_TYPE_IS_OUTPUT(pool->type) ? s->output_pool : s->capture_pool))
     return -ESTALE;
-  pool.count = q->num_buffers;
-  if (!pool.count || pool.count > RB_MAX_BUFFERS)
+  pool->count = q->num_buffers;
+  if (!pool->count || pool->count > RB_MAX_BUFFERS)
     return -EINVAL;
-  for (i = 0; i < RB_MAX_BUFFERS; i++)
-    pool.buffers[i] = (struct rb_registered_buffer){.fd = -1};
-  for (i = 0; i < pool.count; i++) {
-    struct v4l2_exportbuffer e = {
-        .type = pool.type, .index = i, .flags = O_RDWR | O_CLOEXEC};
-    r = vb2_expbuf(q, &e);
-    if (r)
-      goto rollback;
-    pool.buffers[i].fd = e.fd;
-    pool.buffers[i].size = vb2_plane_size(q->bufs[i], 0);
-    exported++;
+  for (i = 0; i < pool->count; i++) {
+    files[i] = rb_memory_export(q->bufs[i]);
+    pool->buffers[i].size = vb2_plane_size(q->bufs[i], 0);
   }
-  if (!copy_to_user(arg, &pool, sizeof(pool)))
-    return 0;
-  r = -EFAULT;
-rollback:
-  for (i = 0; i < exported; i++)
-    close_fd(pool.buffers[i].fd);
-  return r;
-}
-static long exchange(struct rb_session *s, void __user *arg,
-                     struct rb_batch *batch) {
-  unsigned i;
-  struct rb_batch __user *out = arg;
-  if (batch->version != RB_VERSION || batch->reply_count > RB_BATCH_MAX ||
-      batch->event_count > RB_BATCH_MAX ||
-      batch->reserved)
-    return -EINVAL;
-  /* Probe copyout before any mutation; a later concurrent unmap fails closed.
-   */
-  if (fault_in_safe_writeable(arg, sizeof(*batch)))
-    return -EFAULT;
-  for (i = 0; i < batch->reply_count; i++)
-    batch->results[i] = reply(s, &batch->replies[i]);
-  batch->event_count = min_t(unsigned, s->head - s->tail, RB_BATCH_MAX);
-  for (i = 0; i < batch->event_count; i++)
-    batch->events[i] = s->events[(s->tail + i) % RB_EVENTS];
-  if (copy_to_user(out, batch, offsetof(struct rb_batch, replies)) ||
-      copy_to_user(out->events, batch->events,
-                   batch->event_count * sizeof(batch->events[0])) ||
-      copy_to_user(out->results, batch->results,
-                   batch->reply_count * sizeof(batch->results[0]))) {
-    if (batch->reply_count)
-      fail(s);
-    return -EFAULT;
-  }
-  s->tail += batch->event_count;
-  if (!batch->event_count && (s->closed || s->failed))
-    return -EPIPE;
   return 0;
 }
-static long service_ioctl(struct file *f, unsigned cmd, unsigned long arg) {
-  struct rb_endpoint *endpoint = f->private_data;
-  struct rb_session *s = endpoint->session;
-  long r;
-  if (cmd != RB_EXCHANGE && cmd != RB_REGISTER_POOL)
-    return -ENOTTY;
+static int endpoint_begin(struct rb_session *s, u64 incarnation) {
   if (mutex_lock_interruptible(&s->lock))
     return -ERESTARTSYS;
-  if (endpoint->incarnation != s->incarnation)
-    r = -EPIPE;
-  else if (cmd == RB_EXCHANGE) {
-    struct rb_batch *batch = &endpoint->batch;
-    struct rb_batch __user *in = (void __user *)arg;
-    if (copy_from_user(batch, in, offsetof(struct rb_batch, replies)))
-      r = -EFAULT;
-    else if (batch->reply_count > RB_BATCH_MAX)
-      r = -EINVAL;
-    else if (copy_from_user(batch->replies, in->replies,
-                           batch->reply_count * sizeof(batch->replies[0])))
-      r = -EFAULT;
-    else
-      r = exchange(s, (void __user *)arg, &endpoint->batch);
-  } else
-    r = register_pool(s, (void __user *)arg);
-  mutex_unlock(&s->lock);
-  return r;
+  if (incarnation != s->incarnation) {
+    mutex_unlock(&s->lock);
+    return -EPIPE;
+  }
+  return 0;
 }
-static __poll_t service_poll(struct file *f, poll_table *wait) {
-  struct rb_endpoint *endpoint = f->private_data;
-  struct rb_session *s = endpoint->session;
+static void endpoint_end(struct rb_session *s) { mutex_unlock(&s->lock); }
+static unsigned endpoint_events(struct rb_session *s,
+                                struct rb_message *messages) {
+  unsigned i, count = min_t(unsigned, s->head - s->tail, RB_BATCH_MAX);
+  for (i = 0; i < count; i++)
+    messages[i] = s->events[(s->tail + i) % RB_EVENTS];
+  return count;
+}
+static int endpoint_commit(struct rb_session *s, unsigned count) {
+  s->tail += count;
+  return !count && (s->closed || s->failed) ? -EPIPE : 0;
+}
+static __poll_t endpoint_poll(struct rb_session *s, u64 incarnation,
+                              struct file *f, poll_table *wait) {
   __poll_t mask = 0;
   poll_wait(f, &s->wait, wait);
-  mutex_lock(&s->lock);
-  if (endpoint->incarnation != s->incarnation) {
-    mask = EPOLLHUP | EPOLLERR;
-    goto out;
-  }
-  if (s->head != s->tail)
+  /* The endpoint pins s. Only scalar readiness facts are observed here;
+   * never sleep behind allocations or user-memory faults in video ioctls. */
+  if (incarnation != READ_ONCE(s->incarnation))
+    return EPOLLHUP | EPOLLERR;
+  if (READ_ONCE(s->head) != READ_ONCE(s->tail))
     mask |= EPOLLIN;
-  if (s->closed)
+  if (READ_ONCE(s->closed))
     mask |= EPOLLHUP;
-  if (s->failed)
+  if (READ_ONCE(s->failed))
     mask |= EPOLLERR;
-out:
-  mutex_unlock(&s->lock);
   return mask;
 }
-static int service_release(struct inode *inode, struct file *f) {
-  struct rb_endpoint *endpoint = f->private_data;
-  struct rb_session *s = endpoint->session;
+static void endpoint_release(struct rb_session *s, u64 incarnation) {
   mutex_lock(&s->lock);
-  if (endpoint->incarnation == s->incarnation) {
+  if (incarnation == s->incarnation) {
     s->attached = false;
     if (!s->closed)
       fail(s);
   }
   mutex_unlock(&s->lock);
-  kfree(endpoint);
   kref_put(&s->ref, destroy);
-  return 0;
 }
-static const struct file_operations service_fops = {
-    .owner = THIS_MODULE,
-    .unlocked_ioctl = service_ioctl,
-    .compat_ioctl = service_ioctl,
-    .poll = service_poll,
-    .release = service_release,
-    .llseek = no_llseek};
-static int attach_service(void *owner) {
-  struct rb_session *s = owner;
-  struct rb_endpoint *endpoint;
+static const struct rb_endpoint_ops endpoint_ops = {
+    .begin = endpoint_begin,
+    .end = endpoint_end,
+    .reply = reply,
+    .events = endpoint_events,
+    .commit = endpoint_commit,
+    .poison = fail,
+    .export = export_pool,
+    .poll = endpoint_poll,
+    .release = endpoint_release,
+};
+static int attach_service(struct rb_session *s) {
   int fd;
   mutex_lock(&s->lock);
   if (s->closed || s->failed || s->attached) {
     mutex_unlock(&s->lock);
     return -EPIPE;
   }
-  endpoint = kmalloc(sizeof(*endpoint), GFP_KERNEL);
-  if (!endpoint) {
-    fd = -ENOMEM;
-    goto failed;
-  }
   kref_get(&s->ref);
-  endpoint->session = s;
-  endpoint->incarnation = s->incarnation;
   s->attached = true;
-  fd = anon_inode_getfd("v4l2-rkmpp-session", &service_fops, endpoint,
-                        O_RDWR | O_CLOEXEC);
-  if (fd < 0)
-    goto failed;
-  mutex_unlock(&s->lock);
-  return fd;
-failed:
-  /* The broker has consumed this offer. Every allocation failure must
-   * terminate the client queues, including failure before taking a ref. */
-  s->attached = false;
-  fail(s);
-  mutex_unlock(&s->lock);
-  if (endpoint) {
-    kfree(endpoint);
-    kref_put(&s->ref, destroy);
+  fd = rb_endpoint_open(s, s->incarnation, &endpoint_ops);
+  if (fd < 0) {
+    s->attached = false;
+    fail(s);
   }
+  mutex_unlock(&s->lock);
+  if (fd < 0)
+    kref_put(&s->ref, destroy);
   return fd;
 }

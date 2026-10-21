@@ -3,10 +3,11 @@
 operations: pytest cases; entities: none; tests: layout, export, mapping lifetime.
 """
 
-from tests.support.bridge_abi import VERSION, Message, Reply
+from rkmpp_bridge_uapi import VERSION, Message, Reply
+
 from tests.support.dmabuf import read_bytes
 from tests.support.kernel_peer import Peer
-from tests.support.outcome import accepted
+from tests.support.outcome import accepted, present
 from tests.support.queue import Queue, QueueType
 from tests.support.video_formats import get_format
 
@@ -17,7 +18,7 @@ def test_layout_p010_exports_contiguous_luma_and_chroma(raw_session: Peer) -> No
         coded_height=64,
         version=VERSION,
         kind=Reply.LAYOUT,
-        count=18,
+        count=2,
         epoch=1,
         width=128,
         height=64,
@@ -26,11 +27,11 @@ def test_layout_p010_exports_contiguous_luma_and_chroma(raw_session: Peer) -> No
         size=24576,
         format=2,
     )
-    assert accepted(raw_session.service.exchange([layout])).results[0] == 0
+    assert present(accepted(raw_session.service.exchange([layout])).result(0)) == 0
     format = accepted(get_format(raw_session.video.fd, QueueType.CAPTURE))
     assert (format.planes, format.strides, format.sizes) == (1, (256,), (24576,))
     capture = Queue(raw_session.video.fd, QueueType.CAPTURE)
-    assert accepted(capture.request(1)) == 18
+    assert accepted(capture.request(1)) == 2
     assert not accepted(capture.query(0)).flags & 1
     with accepted(capture.map(0)) as mapping:
         assert accepted(capture.query(0)).flags & 1

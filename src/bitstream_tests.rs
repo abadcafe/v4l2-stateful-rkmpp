@@ -1,7 +1,8 @@
 //! module: bitstream_tests; responsibility: framed Annex B semantic
 //! admission, geometry, configuration and restart contracts.
+use rkmpp::Payload;
+
 use crate::bitstream::Parser;
-use crate::submission::Payload;
 fn samples() -> [([u8; 4], &'static [u8], usize, usize); 2] {
   [
     (

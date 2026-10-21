@@ -3,9 +3,10 @@
 #define V4L2_RKMPP_BRIDGE_UAPI_H
 #include <linux/ioctl.h>
 #include <linux/types.h>
-#define RB_VERSION 10
+#define RB_VERSION 11
 #define RB_BATCH_MAX 16
 #define RB_MAX_BUFFERS 32
+#define RB_MIN_CAPTURE 2
 /* field: 0 progressive, 1 interlaced top first, 2 interlaced bottom first,
  * 3 top only, 4 bottom only, 5 interlaced with unspecified order. */
 /* All reserved fields must be zero. No pointer-valued protocol fields. */
@@ -34,8 +35,9 @@ struct rb_pool {
 };
 /* Replies are applied in order, with one errno result each. Events are consumed
  * only after copyout. A copyout fault after applying replies poisons the
- * session; never retry that exchange. Registration closes all new fds on
- * copyout failure. */
+ * session; never retry that exchange. Registration installs new fds only after
+ * successful copyout; failures release uninstalled slots and file references.
+ */
 /* Only header, results[0..reply_count) and events[0..event_count) are
  * written back. Unused array storage is not an output of RB_EXCHANGE. */
 struct rb_batch {
@@ -81,7 +83,8 @@ enum rb_reply {
  * already-inflight replies may precede that acknowledgement. Failed endpoints
  * never regain access: after both queues are stopped and freed, ACCEPT supplies
  * a new endpoint for the video fd's new decoder incarnation. */
-/* Broker ACCEPT returns a per-incarnation anonymous fd as ioctl return value. */
+/* Broker ACCEPT returns a per-incarnation anonymous fd as ioctl return value.
+ */
 #define RB_ACCEPT _IO('R', 0x80)
 #define RB_EXCHANGE _IOWR('R', 0x84, struct rb_batch)
 #define RB_REGISTER_POOL _IOWR('R', 0x85, struct rb_pool)

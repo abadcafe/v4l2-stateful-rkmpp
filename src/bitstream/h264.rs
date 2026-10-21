@@ -24,8 +24,11 @@ impl Default for H264 {
   }
 }
 impl Syntax for H264 {
-  fn configuration(&self) -> Vec<u8> {
-    self.order.configuration()
+  fn seek(&mut self) {
+    self.order.reset();
+    self.recovery = Recovery::default();
+    self.pending = None;
+    self.seeking = true;
   }
 
   fn boundary(&mut self) {
@@ -36,7 +39,7 @@ impl Syntax for H264 {
   fn inspect(
     &mut self,
     bytes: &[u8],
-    header: Option<&crate::packet_syntax::header::Header>,
+    header: Option<&codec_parser::header::Header>,
   ) -> io::Result<Option<Picture>> {
     let mut point = self.pending.take();
     for nal in nals(bytes) {
@@ -45,10 +48,8 @@ impl Syntax for H264 {
       if kind == 6 {
         point = Point::parse(data)?.or(point);
       }
-      self.order.configure(nal)?;
     }
-    let Some(crate::packet_syntax::header::Header::H264(header)) =
-      header
+    let Some(codec_parser::header::Header::H264(header)) = header
     else {
       self.pending = point;
       return Ok(None);
@@ -91,10 +92,6 @@ impl Syntax for H264 {
     }))
   }
 }
-
-mod sequence;
-#[cfg(test)]
-mod sequence_tests;
 
 mod order;
 #[cfg(test)]

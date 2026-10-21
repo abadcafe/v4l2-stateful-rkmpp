@@ -5,13 +5,9 @@
 //! OUTPUT buffers.
 use std::io;
 
-mod bits;
-#[cfg(test)]
-mod bits_tests;
 mod codec;
 #[cfg(test)]
 mod codec_tests;
-mod geometry;
 mod h264;
 #[cfg(test)]
 mod h264_tests;
@@ -21,15 +17,9 @@ mod hevc_rps;
 mod hevc_rps_tests;
 #[cfg(test)]
 mod hevc_tests;
-mod parameters;
-#[cfg(test)]
-mod parameters_tests;
 mod recovery;
 #[cfg(test)]
 mod recovery_tests;
-mod restriction;
-#[cfg(test)]
-mod restriction_tests;
 use codec::Syntax;
 pub mod report;
 pub use report::AccessUnit;
@@ -38,7 +28,7 @@ use report::Report;
 use crate::submission::Prefix;
 pub struct Parser {
   syntax: Box<dyn Syntax>,
-  validator: crate::packet_syntax::Validator,
+  validator: codec_parser::Validator,
   codec: u32,
   restore_configuration: bool,
   metadata: Prefix,
@@ -57,7 +47,7 @@ impl Parser {
     };
     Ok(Self {
       syntax,
-      validator: crate::packet_syntax::Validator::new(codec)?,
+      validator: codec_parser::Validator::new(codec)?,
       codec,
       restore_configuration: false,
       metadata: Prefix::default(),
@@ -78,7 +68,7 @@ impl Parser {
   }
 
   fn inspect(&mut self, bytes: &[u8]) -> io::Result<Report> {
-    let validated = self.validator.validate(bytes)?;
+    let validated = self.validator.validate(bytes, 1)?;
     let unit = validated
       .into_iter()
       .next()
@@ -91,7 +81,7 @@ impl Parser {
       unit.header.as_ref(),
     )? {
       let configuration = if self.restore_configuration {
-        self.syntax.configuration()
+        self.validator.configuration()
       } else {
         Vec::new()
       };
@@ -150,21 +140,22 @@ impl Parser {
       self.restore_configuration = true;
       return Ok(Report {
         units,
-        end: boundary == crate::packet_syntax::unit::Boundary::Stream,
+        end: boundary == codec_parser::unit::Boundary::Stream,
       });
     }
     Ok(Report { units, end: false })
   }
 
   pub fn seek(&mut self) -> io::Result<()> {
-    let configuration = self.syntax.configuration();
-    let mut next = Self::new(self.codec)?;
+    let configuration = self.validator.configuration();
+    let mut validator = codec_parser::Validator::new(self.codec)?;
     if !configuration.is_empty() {
-      next.validator.validate(&configuration)?;
-      next.syntax.inspect(&configuration, None)?;
+      validator.validate(&configuration, 1)?;
     }
-    next.restore_configuration = true;
-    *self = next;
+    self.validator = validator;
+    self.syntax.seek();
+    self.metadata.clear();
+    self.restore_configuration = true;
     Ok(())
   }
 }

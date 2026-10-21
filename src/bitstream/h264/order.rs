@@ -1,23 +1,20 @@
 //! module: bitstream::h264::order; responsibility: detect H264
-//! picture-order reset boundaries. operations: configure, observe,
-//! configuration; entities: Order, Marking; tests: h264_order_tests,
+//! picture-order reset boundaries. operations: observe;
+//! entities: Order, Marking; tests: h264_order_tests,
 //! bitstream_tests.
-use std::collections::BTreeMap;
 use std::io;
+
+use codec_parser::header::{
+  H264, Marking as HeaderMarking, Operation as HeaderOperation,
+};
 
 use super::reference::{
   Marking as ReferenceMarking, Memory, Operation,
   Picture as ReferencePicture,
 };
-use super::sequence::Sequence;
-use crate::bitstream::bits::Bits;
-use crate::bitstream::parameters::Parameters;
-use crate::packet_syntax::header::{
-  H264, Marking as HeaderMarking, Operation as HeaderOperation,
-};
 #[derive(Debug, Default)]
 pub(super) struct Marking {
-  pub geometry: crate::bitstream::geometry::Geometry,
+  pub geometry: codec_parser::syntax::geometry::Geometry,
   pub reset: bool,
   pub poc: i32,
   pub discard: bool,
@@ -32,53 +29,20 @@ pub(super) struct Marking {
 }
 #[derive(Default)]
 pub(super) struct Order {
-  sequence: BTreeMap<u32, Sequence>,
-  picture: BTreeMap<u32, u32>,
   memory: Memory,
   poc: super::poc::Counter,
-  sets: Parameters,
 }
 impl Order {
-  pub(super) fn configuration(&self) -> Vec<u8> {
-    self.sets.configuration()
-  }
-
-  pub(super) fn configure(&mut self, nal: &[u8]) -> io::Result<()> {
-    let Some((&header, data)) = nal.split_first() else {
-      return Ok(());
-    };
-    let kind = header & 31;
-    if kind == 7 {
-      let s = super::sequence::parse(data)?;
-      self.sets.insert(kind, s.geometry.id, nal)?;
-      self.sequence.insert(s.geometry.id, s);
-    } else if kind == 8 {
-      let mut bits = Bits::new(data);
-      let id = bits.ue()?;
-      let sequence = bits.ue()?;
-      if id > 255 || sequence > 31 {
-        return Err(io::Error::other(
-          "invalid H264 parameter identity",
-        ));
-      }
-      self.sets.insert(kind, id, nal)?;
-      self.picture.insert(id, sequence);
-    }
-    Ok(())
+  pub(super) fn reset(&mut self) {
+    self.memory.reset();
+    self.poc = super::poc::Counter::default();
   }
 
   pub(super) fn observe(
     &mut self,
     header: &H264,
   ) -> io::Result<Marking> {
-    let sequence = self
-      .picture
-      .get(&header.pps)
-      .ok_or_else(|| io::Error::other("unknown PPS"))?;
-    let s = self
-      .sequence
-      .get(sequence)
-      .ok_or_else(|| io::Error::other("unknown SPS"))?;
+    let s = &header.sequence;
     let reference_marking = match &header.marking {
       HeaderMarking::Disposable => ReferenceMarking::Disposable,
       HeaderMarking::Idr { long, .. } => {
@@ -175,7 +139,7 @@ impl Order {
 fn record(
   memory: &mut Memory,
   counter: &mut super::poc::Counter,
-  parameters: &super::poc::Parameters,
+  parameters: &codec_parser::syntax::h264::Poc,
   mut poc: super::poc::Picture,
   mut marking: Marking,
   reference: ReferencePicture,

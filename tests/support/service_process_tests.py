@@ -4,7 +4,10 @@ operations: pytest cases; entities: none; tests: borrowed ownership and startup 
 Real successful starts are exercised by the browser acceptance fixture.
 """
 
+import errno
 from pathlib import Path
+
+import pytest
 
 from tests.support.diagnostics import query
 from tests.support.mock_process import Process
@@ -13,12 +16,28 @@ from tests.support.service_process import Lease
 from tests.support.service_runtime import Running
 
 
+@pytest.mark.parametrize(
+    "timeout", [0.0, -1.0, float("nan"), float("inf"), -float("inf")]
+)
+def test_start_invalid_deadline_rejects_before_opening_log(
+    tmp_path: Path, timeout: float
+) -> None:
+    log = tmp_path / "service.log"
+    result = Lease.start(
+        tmp_path / "missing",
+        Path("/dev/null"),
+        tmp_path / "status",
+        log,
+        startup_timeout=timeout,
+    )
+    assert isinstance(result, Rejected) and result.code == errno.EINVAL
+    assert not log.exists()
+
+
 def test_borrow_close_preserves_the_running_service(
     executable: Path, tmp_path: Path
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         running = Running(
             identity=accepted(query(process.diagnostics)).identity,
@@ -33,9 +52,7 @@ def test_borrow_close_preserves_the_running_service(
 def test_borrow_disappeared_process_returns_error(
     executable: Path, tmp_path: Path
 ) -> None:
-    library = (
-        executable.parent.parent / "kernel-mock/debug/libv4l2_rkmpp_kernel_mock.so"
-    )
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     with accepted(Process.open(executable, library, tmp_path / "mock")) as process:
         running = Running(
             identity=accepted(query(process.diagnostics)).identity,

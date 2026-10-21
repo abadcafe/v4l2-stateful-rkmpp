@@ -1,6 +1,27 @@
 //! module: bitstream::reference_tests; responsibility: reference
 //! identity contract.
 use super::reference::{Marking, Memory, Operation, Picture};
+
+#[test]
+fn test_reset_clears_reference_and_field_state_but_preserves_identity()
+{
+  let mut memory = Memory::default();
+  let mut first = picture(8);
+  first.field = Some(false);
+  let old = memory.apply(first.into()).unwrap();
+  memory.reset();
+  let mut second = picture(8);
+  second.field = Some(true);
+  second.gaps_allowed = false;
+  let next = memory.apply(second.into()).unwrap();
+  assert!(next.id > old.id);
+  assert!(!next.continuation);
+  assert_eq!(next.references, [next.id]);
+  memory.reset();
+  let mut unrelated = picture(3);
+  unrelated.gaps_allowed = false;
+  assert!(memory.apply(unrelated.into()).unwrap().id > next.id);
+}
 #[derive(Default)]
 struct Input {
   frame: u32,
@@ -47,6 +68,44 @@ fn picture(frame: u32) -> Input {
     adaptive: false,
     operations: vec![],
   }
+}
+
+#[test]
+fn test_apply_large_gap_retains_only_final_synthetic_references() {
+  for maximum in [0, 1, 2, 16] {
+    let mut memory = Memory::default();
+    let mut first = picture(0);
+    first.modulus = 65536;
+    first.maximum = maximum;
+    first.idr = true;
+    memory.apply(first.into()).unwrap();
+    let mut next = picture(65535);
+    next.modulus = 65536;
+    next.maximum = maximum;
+    let result = memory.apply(next.into()).unwrap();
+    assert_eq!(result.id, 65536);
+    assert_eq!(result.references.len(), maximum as usize);
+    if maximum != 0 {
+      assert_eq!(
+        result.references,
+        ((65537 - u64::from(maximum))..=65536).collect::<Vec<_>>()
+      );
+    }
+  }
+}
+
+#[test]
+fn test_apply_gap_cannot_overcommit_a_pool_of_long_term_references() {
+  let mut memory = Memory::default();
+  let mut first = picture(0);
+  first.maximum = 1;
+  first.idr = true;
+  first.long_idr = true;
+  memory.apply(first.into()).unwrap();
+  let mut next = picture(3);
+  next.maximum = 1;
+  next.reference = false;
+  assert!(memory.apply(next.into()).is_err());
 }
 #[test]
 fn test_sliding_window_retains_only_newest_short_references() {

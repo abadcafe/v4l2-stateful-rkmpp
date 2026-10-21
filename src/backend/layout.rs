@@ -17,7 +17,7 @@ pub(super) struct Requirements {
   pub top: u32,
 }
 impl Requirements {
-  pub(super) fn from_frame(info: crate::mpp::FrameInfo) -> Self {
+  pub(super) fn from_frame(info: rkmpp::FrameInfo) -> Self {
     Self {
       width: info.width,
       height: info.height,
@@ -43,7 +43,11 @@ pub(super) struct Layouts {
   serial: u64,
 }
 impl Layouts {
-  pub(super) fn push(&mut self, unit: &Descriptor) -> io::Result<u64> {
+  pub(super) fn budget(&self) -> usize {
+    4096usize.saturating_sub(self.pending.len()).min(32)
+  }
+
+  pub(super) fn push(&mut self, unit: Descriptor) -> io::Result<u64> {
     let requirements = if let Some(g) = unit.geometry {
       if g.width == 0
         || g.height == 0
@@ -85,19 +89,21 @@ impl Layouts {
       .serial
       .checked_add(1)
       .ok_or_else(|| io::Error::other("frame serial exhausted"))?;
+    let part = unit.plan.part();
+    let identity_of_unit = unit.plan.id();
     self.pending.insert(
       self.serial,
       Picture {
         requirements,
         timestamp: unit.timestamp,
         source: unit.source,
-        plan: unit.plan.clone(),
+        plan: unit.plan,
       },
     );
-    match unit.plan.part() {
+    match part {
       crate::picture::Part::Continuation => {
         if let Some((identity, id)) = self.unpaired.take()
-          && identity == unit.plan.id()
+          && identity == identity_of_unit
           && self.pending.contains_key(&id)
         {
           self.pairs.insert(id, self.serial);
@@ -105,11 +111,22 @@ impl Layouts {
         }
       }
       crate::picture::Part::FirstField => {
-        self.unpaired = Some((unit.plan.id(), self.serial))
+        self.unpaired = Some((identity_of_unit, self.serial))
       }
       crate::picture::Part::Frame => self.unpaired = None,
     }
     Ok(self.serial)
+  }
+
+  pub(super) fn plan(
+    &self,
+    id: u64,
+  ) -> io::Result<&crate::picture::Plan> {
+    self
+      .pending
+      .get(&id)
+      .map(|picture| &picture.plan)
+      .ok_or_else(|| io::Error::other("unknown coded task"))
   }
 
   pub(super) fn peek(
@@ -158,15 +175,15 @@ impl Layouts {
   /// the ledger intact.
   pub(super) fn complete(
     &mut self,
-    info: &mut crate::mpp::FrameInfo,
+    info: &mut rkmpp::FrameInfo,
     image: bool,
   ) -> io::Result<Option<Picture>> {
     if info.info_change || (!image && !info.failed) {
       return Ok(None);
     }
-    let picture = self.take(info.timestamp)?;
-    info.timestamp = picture.timestamp;
-    info.timestamp_source = picture.source as u32;
+    let picture = self.take(info.pts as u64)?;
+    info.pts = picture.timestamp as i64;
+    info.dts = picture.source as i64;
     Ok(Some(picture))
   }
 

@@ -9,7 +9,8 @@
 struct rb_capture;
 struct rb_capture *rb_capture_new(u32 size);
 void rb_capture_free(struct rb_capture *c);
-void rb_capture_update(struct rb_capture *c, u32 size, u32 minimum, bool allocated);
+void rb_capture_update(struct rb_capture *c, u32 size, u32 minimum,
+                       bool allocated);
 void rb_capture_stop(struct rb_capture *c);
 int rb_capture_activate(struct rb_capture *c, unsigned count,
                         unsigned long capacity);
