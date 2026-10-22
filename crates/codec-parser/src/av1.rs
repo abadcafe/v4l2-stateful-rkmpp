@@ -63,6 +63,7 @@ impl Validator {
     let mut start = 0;
     let mut ranges: Vec<super::unit::Unit> = Vec::new();
     let mut sequence = None;
+    let mut configures_decoder = false;
     // A framed submission owns its whole unfinished picture. Header
     // borrows cannot escape this call or survive failed admission.
     let mut pending = None;
@@ -107,6 +108,7 @@ impl Validator {
         }
         let end = total - bytes.len() + consumed as usize;
         ranges.push(super::unit::Unit {
+          configures_decoder: std::mem::take(&mut configures_decoder),
           prefix: 0,
           header: None,
           boundary: None,
@@ -116,6 +118,7 @@ impl Validator {
         start = end;
       }
       if obu.obu_type == 1 {
+        configures_decoder = true;
         sequence = Some(bytes[..consumed as usize].to_vec());
       }
       bytes = &bytes[consumed as usize..];

@@ -5,6 +5,28 @@ use crate::frontend::Frontend;
 use crate::timestamp::Source;
 
 #[test]
+fn test_admit_av1_self_configuring_recovery_keeps_input_borrowed() {
+  let stream = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
+  let size =
+    u32::from_le_bytes(stream[32..36].try_into().unwrap()) as usize;
+  let packet = &stream[44..44 + size];
+  let mut frontend =
+    Frontend::new(u32::from_le_bytes(*b"AV01")).unwrap();
+  frontend.admit(packet, 0, Source::End, 32).unwrap();
+  for damaged in [false, true] {
+    if damaged {
+      assert!(frontend.admit(&[0xff], 1, Source::End, 32).is_err());
+    } else {
+      frontend.seek().unwrap();
+    }
+    let admission = frontend.admit(packet, 2, Source::End, 32).unwrap();
+    assert_eq!(admission.tasks.len(), 1);
+    assert!(matches!(&admission.tasks[0].payload,
+      Payload::Input(range) if *range == (0..packet.len())));
+  }
+}
+
+#[test]
 fn test_admit_recovery_and_seek_never_reuse_picture_identity() {
   let h264 =
     &include_bytes!("../tests/artifacts/h264-yuv420p.h264")[..4454];

@@ -15,10 +15,8 @@ pub unsafe extern "C" fn pthread_create(
   start: Start,
   argument: *mut c_void,
 ) -> libc::c_int {
-  let marker =
-    unsafe { libc::getenv(c"RKMPP_TEST_THREAD_FAILURE".as_ptr()) };
-  if !marker.is_null()
-    && unsafe { libc::access(marker, libc::F_OK) } == 0
+  if std::env::var_os("RKMPP_TEST_THREAD_FAILURE")
+    .is_some_and(|marker| std::path::Path::new(&marker).exists())
   {
     return libc::EAGAIN;
   }

@@ -4,6 +4,29 @@
 use super::av1::Validator;
 
 #[test]
+fn test_validate_configuration_belongs_to_the_following_coded_task() {
+  let stream = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/av1-yuv420p.ivf"
+  ));
+  let size =
+    u32::from_le_bytes(stream[32..36].try_into().unwrap()) as usize;
+  let packet = &stream[44..44 + size];
+  let mut parser = Validator::new().unwrap();
+  let mut combined = packet.to_vec();
+  combined.extend_from_slice(&packet[15..]);
+  let units = parser.validate(&combined, 32).unwrap();
+  assert_eq!(units.len(), 2);
+  assert!(units[0].configures_decoder);
+  assert!(!units[1].configures_decoder);
+  let mut trailing = packet[15..].to_vec();
+  trailing.extend_from_slice(&packet[..15]);
+  let units = parser.validate(&trailing, 32).unwrap();
+  assert_eq!(units.len(), 1);
+  assert!(!units[0].configures_decoder);
+}
+
+#[test]
 fn test_validate_preserves_sequence_state_and_recovers_at_keyframe() {
   let stream = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),

@@ -9,6 +9,9 @@ pub enum Boundary {
   Stream,
 }
 pub struct Unit {
+  /// The task supplies decoder configuration before its coded picture.
+  /// False makes no promise about whether configuration is present.
+  pub configures_decoder: bool,
   pub prefix: usize,
   pub header: Option<super::header::Header>,
   pub range: std::ops::Range<usize>,
@@ -18,6 +21,7 @@ pub struct Unit {
 impl Unit {
   pub(super) fn annexb(size: usize) -> Self {
     Self {
+      configures_decoder: false,
       prefix: size,
       header: None,
       range: 0..size,

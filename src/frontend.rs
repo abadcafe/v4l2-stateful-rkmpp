@@ -25,6 +25,7 @@ pub(crate) struct Frontend {
   fourcc: u32,
   serial: u64,
   metadata: crate::submission::Prefix,
+  configuration: Vec<u8>,
 }
 impl Frontend {
   pub(crate) fn new(fourcc: u32) -> io::Result<Self> {
@@ -39,6 +40,7 @@ impl Frontend {
       fourcc,
       serial: 0,
       metadata: crate::submission::Prefix::default(),
+      configuration: Vec::new(),
     })
   }
 
@@ -121,8 +123,14 @@ impl Frontend {
             false,
             Output { display: unit.display, ..Output::default() },
           );
+          let configuration = if unit.configures_decoder {
+            &[][..]
+          } else {
+            self.configuration.as_slice()
+          };
           let payload =
-            self.metadata.compose(&[], bytes, unit.range)?;
+            self.metadata.compose(configuration, bytes, unit.range)?;
+          self.configuration.clear();
           tasks.push(Task {
             payload,
             descriptor: Descriptor {
@@ -143,12 +151,13 @@ impl Frontend {
       Codec::Annexb(parser) => parser.seek(),
       Codec::Framed(validator) => {
         let configuration = validator.configuration();
-        let mut next = Self::new(self.fourcc)?;
+        let mut validator = codec_parser::Validator::new(self.fourcc)?;
         if !configuration.is_empty() {
-          next.admit(&configuration, 0, Source::End, 0)?;
+          validator.validate(&configuration, 0)?;
         }
-        next.serial = self.serial;
-        *self = next;
+        self.codec = Codec::Framed(validator);
+        self.metadata.clear();
+        self.configuration = configuration;
         Ok(())
       }
     }

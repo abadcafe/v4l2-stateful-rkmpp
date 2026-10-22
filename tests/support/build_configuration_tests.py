@@ -25,6 +25,11 @@ class CargoMessage(BaseModel):
     filenames: tuple[Path, ...] = ()
 
 
+class WorkspaceMetadata(BaseModel):
+    workspace_members: tuple[str, ...]
+    workspace_default_members: tuple[str, ...]
+
+
 def _run(
     arguments: list[str],
     directory: Path,
@@ -41,6 +46,13 @@ def _run(
     )
     assert process.returncode == 0, process.stdout + process.stderr
     return process
+
+
+def test_workspace_default_commands_cover_every_member() -> None:
+    metadata = WorkspaceMetadata.model_validate_json(
+        _run(["cargo", "metadata", "--no-deps", "--format-version=1"], ROOT).stdout
+    )
+    assert set(metadata.workspace_default_members) == set(metadata.workspace_members)
 
 
 def _metadata(

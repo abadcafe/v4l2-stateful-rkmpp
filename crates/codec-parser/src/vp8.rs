@@ -47,6 +47,7 @@ impl Validator {
     };
     self.needs_keyframe = false;
     Ok(super::unit::Unit {
+      configures_decoder: false,
       prefix: 0,
       header: None,
       boundary: None,
