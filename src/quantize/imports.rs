@@ -14,6 +14,7 @@ use std::sync::Arc;
 use ash::vk;
 
 use super::device::Device;
+use super::layout::Layout;
 struct Imported {
   gpu: Arc<Device>,
   buffer: vk::Buffer,
@@ -109,8 +110,23 @@ impl Reservation {
   pub(super) fn descriptors(
     &self,
     gpu: &Device,
+    layout: Layout,
   ) -> io::Result<[vk::DescriptorBufferInfo; 2]> {
-    self.pair.descriptors(gpu)
+    let ranges = layout.ranges(gpu.storage_range())?;
+    let mut buffers = self.pair.descriptors(gpu)?;
+    for (buffer, range) in buffers.iter_mut().zip(ranges) {
+      if range > buffer.range {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidInput,
+          "conversion exceeds imported storage",
+        ));
+      }
+      // Import capacity is independent of this dispatch's shader view.
+      // In particular, a large reusable allocation must not enlarge the
+      // descriptor beyond maxStorageBufferRange.
+      buffer.range = range;
+    }
+    Ok(buffers)
   }
 }
 impl Pair {

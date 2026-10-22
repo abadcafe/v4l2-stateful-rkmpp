@@ -113,11 +113,16 @@ fn test_validate_budget_rejection_cannot_initialize_prediction() {
       u32::from_le_bytes(ivf[next..next + 4].try_into().unwrap())
         as usize;
     let predicted = &ivf[next + 12..next + 12 + size];
-    let mut validator =
-      Validator::new(u32::from_le_bytes(codec)).unwrap();
-    assert!(validator.validate(key, 0).is_err());
-    assert!(validator.validate(predicted, 1).is_err());
-    validator.validate(key, 1).unwrap();
-    validator.validate(predicted, 1).unwrap();
+    for established in [false, true] {
+      let mut validator =
+        Validator::new(u32::from_le_bytes(codec)).unwrap();
+      if established {
+        validator.validate(key, 1).unwrap();
+      }
+      assert!(validator.validate(key, 0).is_err());
+      assert!(validator.validate(predicted, 1).is_err());
+      validator.validate(key, 1).unwrap();
+      validator.validate(predicted, 1).unwrap();
+    }
   }
 }

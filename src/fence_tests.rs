@@ -25,6 +25,10 @@ fn test_ready_rejects_readability_without_sync_file_completion_status()
   assert!(!fence.ready().unwrap());
   notify.signal().unwrap();
   assert!(fence.ready().is_err());
+  assert_eq!(
+    fence.wait().unwrap_err().raw_os_error(),
+    Some(libc::ENOTTY)
+  );
 }
 #[test]
 fn test_ready_completed_export_needs_no_descriptor() {

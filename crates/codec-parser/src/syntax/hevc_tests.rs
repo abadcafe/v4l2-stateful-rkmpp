@@ -132,6 +132,25 @@ fn test_parse_rejects_reorder_above_hevc_buffering_minus_one() {
 }
 
 #[test]
+fn test_parse_temporal_buffering_and_reorder_never_decrease() {
+  for layers in [
+    [(4, 0, 0), (3, 0, 0)],
+    [(4, 2, 0), (4, 1, 0)],
+    [(4, 2, 0), (3, 1, 0)],
+  ] {
+    assert!(super::hevc::parse(&sequence(&layers, true)).is_err());
+  }
+  for layers in [
+    [(4, 2, 0), (4, 2, 0)],
+    [(3, 1, 0), (4, 2, 0)],
+    // Latency increase has no monotonicity requirement.
+    [(3, 1, 100), (4, 2, 1)],
+  ] {
+    assert!(super::hevc::parse(&sequence(&layers, true)).is_ok());
+  }
+}
+
+#[test]
 fn test_parse_accepts_full_legal_latency_domain_without_arithmetic_truncation()
  {
   for increase in [(1u32 << 31) - 1, u32::MAX - 1] {

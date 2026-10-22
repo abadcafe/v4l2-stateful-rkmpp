@@ -1,8 +1,8 @@
 //! module: codec_parser; responsibility: admit framed compressed input
-//! using codec-specific syntax state. operations: new, validate;
-//! entities: Validator; tests: packet_syntax_tests and codec child
-//! tests. This parses headers/partition bounds, never reconstructs
-//! pixels.
+//! using codec-specific syntax state. operations: new, validate,
+//! configuration; entities: Validator; tests: packet_syntax_tests and
+//! codec child tests. This parses headers/partition bounds, never
+//! reconstructs pixels.
 use std::io;
 mod av1;
 #[cfg(test)]
@@ -47,15 +47,22 @@ impl Validator {
     }
   }
 
+  /// Admit one framed submission. Invalid syntax discards prediction
+  /// state while retaining the last committed decoder configuration;
+  /// callers can admit a new resume point without rebuilding this
+  /// owner. Budget rejection has the same prediction recovery policy.
+  /// Resource failures are fatal and may prevent native restoration.
   pub fn validate(
     &mut self,
     bytes: &[u8],
     budget: usize,
   ) -> io::Result<Vec<unit::Unit>> {
-    // Every non-AV1 admission returns at least one unit. Reject an
-    // exhausted budget before mutating any codec state. AV1 may admit
-    // metadata without a frame and checks its budget transactionally.
-    if budget == 0 && !matches!(&self.0, Codec::Av1(_)) {
+    // Annex B always returns a unit, including metadata. Budget
+    // rejection cannot commit its parameter changes. Framed codecs
+    // own their prediction recovery even on an exhausted budget; AV1
+    // may still admit metadata without a frame.
+    if budget == 0 && matches!(&self.0, Codec::H264(_) | Codec::Hevc(_))
+    {
       return Err(io::Error::new(
         io::ErrorKind::InvalidData,
         "coded frame budget exhausted",
@@ -69,7 +76,7 @@ impl Validator {
         parser.validate(bytes).map(|unit| vec![unit])
       }
       Codec::Vp8(parser) => {
-        parser.validate(bytes).map(|unit| vec![unit])
+        parser.validate(bytes, budget).map(|unit| vec![unit])
       }
       Codec::Vp9(parser) => parser.validate(bytes, budget),
       Codec::Av1(parser) => parser.validate(bytes, budget),

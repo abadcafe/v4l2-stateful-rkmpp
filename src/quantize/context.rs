@@ -181,17 +181,7 @@ impl Context {
         "Vulkan submission has not been retired",
       ));
     }
-    let buffers = imports.descriptors(&self.gpu)?;
-    if buffers.iter().any(|b| b.buffer == vk::Buffer::null())
-      || buffers[0].buffer == buffers[1].buffer
-      || buffers[0].range < layout.source_size()
-      || buffers[1].range < layout.destination_size()
-    {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "invalid conversion descriptors",
-      ));
-    }
+    let buffers = imports.descriptors(&self.gpu, layout)?;
     let parameters = layout.parameters();
     // Any failed Vulkan call latches the context. No later dispatch
     // can recycle resources whose submission status is uncertain.

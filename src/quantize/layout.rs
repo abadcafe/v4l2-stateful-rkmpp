@@ -1,7 +1,7 @@
 //! module: quantize::layout; responsibility: validate linear
 //! eight/ten-bit-to-NV12 conversion geometry. operations: new,
-//! parameters, source_size, destination_size; entities: Layout; tests:
-//! layout_tests.
+//! parameters, source_size, destination_size, ranges; entities: Layout;
+//! tests: layout_tests.
 use std::io;
 
 use dma_buf::image::{Depth, Plane};
@@ -63,5 +63,16 @@ impl Layout {
   pub(super) fn destination_size(self) -> u64 {
     self.parameters[4] as u64
       * (self.parameters[5] + self.parameters[1].div_ceil(2)) as u64
+  }
+
+  pub(super) fn ranges(self, maximum: u64) -> io::Result<[u64; 2]> {
+    let ranges = [self.source_size(), self.destination_size()];
+    if ranges.iter().any(|&range| range > maximum) {
+      return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "conversion exceeds Vulkan storage buffer range",
+      ));
+    }
+    Ok(ranges)
   }
 }

@@ -59,6 +59,12 @@ def test_stop_start_preserves_framed_codec_references(
             digest for pos, digest in frames if pos >= offset
         )
     assert result.drain_frames == (before_stop, len(expected))
+    # An AV1/8-bit boundary=1 run on 2026-10-23 completed all 36
+    # presentations with wrong pixels. At the same instant the vendor
+    # kernel logged task 2348 timing out without an IRQ, then an AV1
+    # hardware reset. Evidence: target/review/final-audit/av1-timeout-*.log.
+    # The deeper cause (MPP, driver, hardware or system load) is not
+    # established. Keep exact pixels; a timeout is never a passing case.
     assert tuple(frame.digest for frame in result.frames) == expected
 
 

@@ -72,7 +72,7 @@ pub fn parse(data: &[u8]) -> io::Result<Sequence> {
     return Err(io::Error::other("invalid HEVC POC width"));
   }
   let all = b.get(1)? != 0;
-  let mut limits = Vec::new();
+  let mut limits: Vec<crate::Limits> = Vec::new();
   for _ in if all { 0 } else { layers }..=layers {
     let buffering = b.ue()?;
     let order = b.ue()?;
@@ -80,7 +80,7 @@ pub fn parse(data: &[u8]) -> io::Result<Sequence> {
     if buffering > 15 || order > buffering || increase == u32::MAX {
       return Err(io::Error::other("invalid HEVC reorder bound"));
     }
-    limits.push(crate::Limits::new(
+    let current = crate::Limits::new(
       buffering as usize + 1,
       order as usize,
       if increase == 0 {
@@ -88,7 +88,20 @@ pub fn parse(data: &[u8]) -> io::Result<Sequence> {
       } else {
         Some(u64::from(order) + u64::from(increase) - 1)
       },
-    )?);
+    )?;
+    // H.265 7.4.3.2.1 requires both budgets to be nondecreasing
+    // across temporal layers. Validating each layer independently
+    // would let the highest operating point underbudget the DPB.
+    if limits.last().is_some_and(|previous| {
+      current.capacity() < previous.capacity()
+        || current.reorder() < previous.reorder()
+    }) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "HEVC temporal buffering or reorder budget decreases",
+      ));
+    }
+    limits.push(current);
   }
   if !all {
     limits.resize(layers + 1, limits[0]);

@@ -59,7 +59,17 @@ impl Parser {
   }
 
   pub fn admit(&mut self, bytes: &[u8]) -> io::Result<Report> {
-    match self.inspect(bytes) {
+    let validated = match self.validator.validate(bytes, 1) {
+      Ok(validated) => validated,
+      Err(error) => {
+        // Validator owns native syntax rollback. Its error already
+        // leaves a restored configuration; only our presentation and
+        // unsubmitted metadata still need recovery here.
+        self.reset_syntax();
+        return Err(error);
+      }
+    };
+    match self.inspect(bytes, validated) {
       Ok(report) => Ok(report),
       Err(error) => {
         self.seek()?;
@@ -68,8 +78,11 @@ impl Parser {
     }
   }
 
-  fn inspect(&mut self, bytes: &[u8]) -> io::Result<Report> {
-    let validated = self.validator.validate(bytes, 1)?;
+  fn inspect(
+    &mut self,
+    bytes: &[u8],
+    validated: Vec<codec_parser::unit::Unit>,
+  ) -> io::Result<Report> {
     let unit = validated
       .into_iter()
       .next()
@@ -190,10 +203,14 @@ impl Parser {
       validator.validate(&configuration, 1)?;
     }
     self.validator = validator;
+    self.reset_syntax();
+    Ok(())
+  }
+
+  fn reset_syntax(&mut self) {
     self.syntax.seek();
     self.metadata.clear();
     self.restore_configuration = true;
-    Ok(())
   }
 }
 mod sei;

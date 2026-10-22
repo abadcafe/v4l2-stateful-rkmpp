@@ -17,6 +17,16 @@ fn test_allocate_rejects_zero_size_without_allocating() {
 }
 
 #[test]
+fn test_allocate_rejects_extents_outside_rust_slice_domain() {
+  for size in [isize::MAX as usize + 1, usize::MAX] {
+    assert_eq!(
+      Buffer::allocate(size).unwrap_err().kind(),
+      std::io::ErrorKind::InvalidInput
+    );
+  }
+}
+
+#[test]
 fn test_from_owned_rejects_file_smaller_than_claimed_size() {
   let fd = File::open("/dev/null").unwrap().into();
   assert!(Buffer::from_owned(fd, 4096).is_err());

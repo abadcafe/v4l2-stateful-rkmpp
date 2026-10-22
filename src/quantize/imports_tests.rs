@@ -21,6 +21,43 @@ use dma_buf::memory::Buffer;
 use super::context::Context;
 use super::imports::{Cache, Pair};
 
+#[test]
+fn test_descriptors_binds_only_checked_image_ranges() {
+  use dma_buf::image::Depth;
+
+  use super::layout::Layout;
+  let context = Context::new(&super::Factory::default()).unwrap();
+  let mut cache =
+    Cache::new(context.device(), NonZeroUsize::new(2).unwrap())
+      .unwrap();
+  let source = Buffer::allocate(4096).unwrap();
+  let target = Buffer::allocate(8192).unwrap();
+  let source = Plane::from_buffer(&source, 32, 32);
+  let target = Plane::from_buffer(&target, 64, 32);
+  let pair = cache.pair(source, target).unwrap();
+  let reservation = cache.reserve(pair, || Ok(())).unwrap().0;
+  let layout =
+    Layout::new(Depth::Eight, 32, 32, source, target).unwrap();
+  let buffers =
+    reservation.descriptors(&context.device(), layout).unwrap();
+  assert_eq!(buffers.map(|buffer| buffer.range), [1536, 3072]);
+  let too_large = Layout::new(
+    Depth::Eight,
+    32,
+    32,
+    Plane::new(source.fd(), 128, 32),
+    target,
+  )
+  .unwrap();
+  assert_eq!(
+    reservation
+      .descriptors(&context.device(), too_large)
+      .unwrap_err()
+      .kind(),
+    std::io::ErrorKind::InvalidInput
+  );
+}
+
 // Admit through the public reservation boundary, then retain a fresh
 // candidate so cache eviction cannot recycle the observed Vulkan
 // handles.

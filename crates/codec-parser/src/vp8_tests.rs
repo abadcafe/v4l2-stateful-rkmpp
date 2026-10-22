@@ -16,12 +16,12 @@ fn test_validate_preserves_sequence_state_and_recovers_at_keyframe() {
   ] {
     let mut parser = Validator::new().unwrap();
     for _ in 0..2 {
-      assert!(parser.validate(damaged).is_err());
+      assert!(parser.validate(damaged, 1).is_err());
       let mut bytes = &stream[32..];
       while !bytes.is_empty() {
         let size =
           u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-        parser.validate(&bytes[12..12 + size]).unwrap();
+        parser.validate(&bytes[12..12 + size], 1).unwrap();
         bytes = &bytes[12 + size..];
       }
     }
@@ -34,10 +34,14 @@ fn test_validate_rejects_truncated_header_without_cross_session_state()
   let mut first = Validator::new().unwrap();
   let mut second = Validator::new().unwrap();
   assert!(
-    first.validate(&[0x10, 0, 0, 0x9d, 1, 0x2a, 0, 1, 0, 0]).is_err()
+    first
+      .validate(&[0x10, 0, 0, 0x9d, 1, 0x2a, 0, 1, 0, 0], 1)
+      .is_err()
   );
   assert!(
-    second.validate(&[0x10, 0, 0, 0x9d, 1, 0x2a, 0, 1, 0, 0]).is_err()
+    second
+      .validate(&[0x10, 0, 0, 0x9d, 1, 0x2a, 0, 1, 0, 0], 1)
+      .is_err()
   );
 }
 
@@ -56,12 +60,12 @@ fn test_validate_rejects_bad_dimensions_sync_version_and_partition_bounds()
     let mut damaged = key.to_vec();
     damaged[offset] = value;
     let mut parser = Validator::new().unwrap();
-    assert!(parser.validate(&damaged).is_err(), "byte {offset}");
-    parser.validate(key).unwrap();
+    assert!(parser.validate(&damaged, 1).is_err(), "byte {offset}");
+    parser.validate(key, 1).unwrap();
   }
   for length in 0..10 {
     assert!(
-      Validator::new().unwrap().validate(&key[..length]).is_err()
+      Validator::new().unwrap().validate(&key[..length], 1).is_err()
     );
   }
 }
@@ -82,13 +86,13 @@ fn test_validate_requires_keyframe_for_initialization_and_damage_recovery()
   let key = &stream[44..44 + size];
   let inter = &stream[second + 12..second + 12 + size2];
   let mut parser = Validator::new().unwrap();
-  assert!(parser.validate(inter).is_err());
-  parser.validate(key).unwrap();
-  parser.validate(inter).unwrap();
-  assert!(parser.validate(&[0xff]).is_err());
-  assert!(parser.validate(inter).is_err());
-  parser.validate(key).unwrap();
-  parser.validate(inter).unwrap();
+  assert!(parser.validate(inter, 1).is_err());
+  parser.validate(key, 1).unwrap();
+  parser.validate(inter, 1).unwrap();
+  assert!(parser.validate(&[0xff], 1).is_err());
+  assert!(parser.validate(inter, 1).is_err());
+  parser.validate(key, 1).unwrap();
+  parser.validate(inter, 1).unwrap();
 }
 
 #[test]
@@ -107,7 +111,7 @@ fn test_validate_header_cannot_read_past_declared_first_partition() {
     let tag = (declared << 5) | u32::from(packet[0] & 31);
     packet[..3].copy_from_slice(&tag.to_le_bytes()[..3]);
     let mut parser = Validator::new().unwrap();
-    assert!(parser.validate(&packet).is_err());
-    parser.validate(key).unwrap();
+    assert!(parser.validate(&packet, 1).is_err());
+    parser.validate(key, 1).unwrap();
   }
 }

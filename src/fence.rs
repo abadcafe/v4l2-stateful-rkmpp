@@ -1,6 +1,6 @@
 //! module: fence; responsibility: retain and observe an external GPU
-//! completion. operations: new, ready, lease; entities: Fence; tests:
-//! fence_tests.
+//! completion. operations: new, ready, wait, lease; entities: Fence;
+//! tests: fence_tests.
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
@@ -27,24 +27,9 @@ impl Fence {
     let Some(fd) = &self.descriptor else {
       return Ok(());
     };
-    let mut descriptor = libc::pollfd {
-      fd: fd.as_raw_fd(),
-      events: libc::POLLIN,
-      revents: 0,
-    };
     loop {
-      // SAFETY: the lease retains this descriptor until the terminal
-      // signal.
-      if unsafe { libc::poll(&mut descriptor, 1, -1) } >= 0 {
-        return if descriptor.revents & libc::POLLNVAL != 0 {
-          Err(io::Error::other("invalid GPU completion descriptor"))
-        } else {
-          Ok(())
-        };
-      }
-      let error = io::Error::last_os_error();
-      if error.kind() != io::ErrorKind::Interrupted {
-        return Err(error);
+      if signaled(fd.as_raw_fd(), poll(fd, -1)?)? {
+        return Ok(());
       }
     }
   }
@@ -53,25 +38,7 @@ impl Fence {
     let Some(fd) = &self.descriptor else {
       return Ok(true);
     };
-    let mut poll = libc::pollfd {
-      fd: fd.as_raw_fd(),
-      events: libc::POLLIN,
-      revents: 0,
-    };
-    loop {
-      // SAFETY: one live descriptor, nonblocking readiness query.
-      if unsafe { libc::poll(&mut poll, 1, 0) } >= 0 {
-        break;
-      }
-      let error = io::Error::last_os_error();
-      if error.kind() != io::ErrorKind::Interrupted {
-        return Err(error);
-      }
-    }
-    if poll.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
-      return Err(io::Error::other("GPU completion failed"));
-    }
-    if poll.revents & libc::POLLIN != 0 && completion(fd.as_raw_fd())? {
+    if signaled(fd.as_raw_fd(), poll(fd, 0)?)? {
       return Ok(true);
     }
     if self.submitted.elapsed() >= Duration::from_secs(2) {
@@ -82,6 +49,44 @@ impl Fence {
     }
     Ok(false)
   }
+}
+
+fn poll(fd: &Lease, timeout: i32) -> io::Result<libc::c_short> {
+  let mut descriptor = libc::pollfd {
+    fd: fd.as_raw_fd(),
+    events: libc::POLLIN,
+    revents: 0,
+  };
+  loop {
+    // SAFETY: the lease retains the descriptor for this synchronous
+    // query, and descriptor is one fully initialized writable record.
+    if unsafe { libc::poll(&mut descriptor, 1, timeout) } >= 0 {
+      return Ok(descriptor.revents);
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() != io::ErrorKind::Interrupted {
+      return Err(error);
+    }
+  }
+}
+
+fn signaled(
+  fd: libc::c_int,
+  events: libc::c_short,
+) -> io::Result<bool> {
+  if events & libc::POLLNVAL != 0 {
+    return Err(io::Error::other("invalid GPU completion descriptor"));
+  }
+  if events & (libc::POLLIN | libc::POLLERR) != 0 {
+    return completion(fd);
+  }
+  if events & libc::POLLHUP != 0 {
+    return Err(io::Error::new(
+      io::ErrorKind::BrokenPipe,
+      "GPU completion descriptor closed",
+    ));
+  }
+  Ok(false)
 }
 
 // Linux sync_file_info.status distinguishes a successfully signaled

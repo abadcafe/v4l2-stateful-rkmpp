@@ -47,6 +47,34 @@ fn test_new_layout_accepts_odd_extents_and_inclusive_limits() {
 }
 
 #[test]
+fn test_ranges_respects_device_limit_for_each_image() {
+  let file = std::fs::File::open("/dev/null").unwrap();
+  for (source_stride, destination_stride) in [(64, 32), (32, 64)] {
+    let layout = Layout::new(
+      Depth::Eight,
+      32,
+      32,
+      Plane::new(file.as_fd(), source_stride, 32),
+      Plane::new(file.as_fd(), destination_stride, 32),
+    )
+    .unwrap();
+    for maximum in [0, 1536, 3071] {
+      assert_eq!(
+        layout.ranges(maximum).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+      );
+    }
+    assert_eq!(
+      layout.ranges(3072).unwrap(),
+      [
+        u64::from(source_stride) * 48,
+        u64::from(destination_stride) * 48
+      ]
+    );
+  }
+}
+
+#[test]
 fn test_new_layout_rejects_empty_oversized_misaligned_and_undersized_views()
  {
   let file = std::fs::File::open("/dev/null").unwrap();

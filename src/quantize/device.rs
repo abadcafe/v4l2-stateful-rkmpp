@@ -1,7 +1,7 @@
 //! module: quantize::device; responsibility: own a hardware Vulkan
-//! device. operations: new, api, family, queue, memory_bits,
-//! export_fence; entities: Device, Instance; tests: device_tests,
-//! context_tests.
+//! device. operations: new, api, family, storage_range, submit,
+//! memory_bits, export_fence; entities: Device, Instance; tests:
+//! device_tests, context_tests.
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,7 @@ pub(super) struct Device {
   instance: Arc<Instance>,
   api: ash::Device,
   family: u32,
+  storage_range: u64,
   queue: Mutex<vk::Queue>,
   external: ash::khr::external_memory_fd::Device,
 }
@@ -56,16 +57,21 @@ impl Device {
         .iter()
         .position(|p| p.queue_flags.contains(vk::QueueFlags::COMPUTE))
       {
-        selected = Some((physical, family as u32));
+        selected = Some((
+          physical,
+          family as u32,
+          u64::from(properties.limits.max_storage_buffer_range),
+        ));
         break;
       }
     }
-    let (physical, family) = selected.ok_or_else(|| {
-      io::Error::new(
-        io::ErrorKind::NotFound,
-        "no hardware Vulkan compute device",
-      )
-    })?;
+    let (physical, family, storage_range) =
+      selected.ok_or_else(|| {
+        io::Error::new(
+          io::ErrorKind::NotFound,
+          "no hardware Vulkan compute device",
+        )
+      })?;
     let available = unsafe {
       instance.0.enumerate_device_extension_properties(physical)
     }
@@ -105,6 +111,7 @@ impl Device {
       instance,
       api,
       family,
+      storage_range,
       queue: Mutex::new(queue),
       external,
     }))
@@ -112,6 +119,10 @@ impl Device {
 
   pub(super) fn family(&self) -> u32 {
     self.family
+  }
+
+  pub(super) fn storage_range(&self) -> u64 {
+    self.storage_range
   }
 
   /// # Safety

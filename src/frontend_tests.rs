@@ -5,6 +5,48 @@ use crate::frontend::Frontend;
 use crate::timestamp::Source;
 
 #[test]
+fn test_admit_repeated_damage_restores_standalone_av1_configuration() {
+  let stream = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
+  let size =
+    u32::from_le_bytes(stream[32..36].try_into().unwrap()) as usize;
+  let packet = &stream[44..44 + size];
+  let mut frontend =
+    Frontend::new(u32::from_le_bytes(*b"AV01")).unwrap();
+  assert!(
+    frontend
+      .admit(&packet[..15], 0, Source::End, 32)
+      .unwrap()
+      .tasks
+      .is_empty()
+  );
+  for _ in 0..32 {
+    assert_eq!(
+      frontend.admit(&[0xff], 0, Source::End, 32).err().unwrap().kind(),
+      std::io::ErrorKind::InvalidData
+    );
+  }
+  let admitted =
+    frontend.admit(&packet[15..], 123, Source::Start, 1).unwrap();
+  assert_eq!(admitted.tasks.len(), 1);
+  let task = &admitted.tasks[0];
+  assert_eq!(task.descriptor.timestamp, 123);
+  assert_eq!(task.descriptor.source, Source::Start);
+  let Payload::Prefixed { prefix, range } = &task.payload else {
+    panic!("recovered frame needs the saved standalone configuration");
+  };
+  let mut restored = prefix.clone();
+  restored.extend_from_slice(&packet[15..][range.clone()]);
+  assert_eq!(
+    codec_parser::Validator::new(u32::from_le_bytes(*b"AV01"))
+      .unwrap()
+      .validate(&restored, 1)
+      .unwrap()
+      .len(),
+    1
+  );
+}
+
+#[test]
 fn test_admit_av1_self_configuring_recovery_keeps_input_borrowed() {
   let stream = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
   let size =

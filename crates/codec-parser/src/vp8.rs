@@ -19,11 +19,13 @@ impl Validator {
   pub(crate) fn validate(
     &mut self,
     bytes: &[u8],
+    budget: usize,
   ) -> io::Result<super::unit::Unit> {
     let valid_tag = bytes.len() >= 3 && (bytes[0] >> 1) & 7 <= 3;
     let key_sync = bytes.first().is_some_and(|tag| tag & 1 != 0)
       || (bytes.len() >= 10 && bytes[3..6] == [0x9d, 1, 0x2a]);
-    if !valid_tag
+    if budget == 0
+      || !valid_tag
       || !key_sync
       || (self.needs_keyframe && bytes[0] & 1 != 0)
     {

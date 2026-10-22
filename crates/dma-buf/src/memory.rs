@@ -25,10 +25,10 @@ struct Allocation {
 pub struct Buffer(Arc<Allocation>);
 impl Buffer {
   pub fn allocate(size: usize) -> io::Result<Self> {
-    if size == 0 {
+    if size == 0 || size > isize::MAX as usize {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "zero DMA allocation",
+        "DMA allocation outside Rust slice domain",
       ));
     }
     Self::from_owned(system::allocate(size)?, size)
