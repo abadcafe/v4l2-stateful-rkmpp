@@ -11,8 +11,17 @@ operations: pytest cases; entities: none; tests:
 import errno
 from pathlib import Path
 
+import pytest
+
 from tests.support.outcome import Rejected, accepted
 from tests.support.video import Video
+
+
+@pytest.mark.parametrize("kind", [-1, 1 << 32, 1 << 128])
+def test_subscribe_rejects_unrepresentable_event_type(kind: int) -> None:
+    with accepted(Video.open(Path("/dev/null"))) as video:
+        result = video.subscribe(kind)
+        assert isinstance(result, Rejected) and result.code == errno.EINVAL
 
 
 def test_open_missing_device_returns_rejected(tmp_path: Path) -> None:

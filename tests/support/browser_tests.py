@@ -5,6 +5,8 @@ Real playback behavior is covered by tests/browser through this public interface
 """
 
 import errno
+import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import BinaryIO
@@ -71,6 +73,49 @@ def test_open_timeout_terminates_only_owned_process_group(
     result = Browser.open(tmp_path / "browser", (), (), startup_timeout=0.05)
     assert isinstance(result, Rejected)
     assert len(processes) == 1 and processes[0].poll() is not None
+
+
+def test_open_exited_leader_retains_group_identity_until_cleanup_signals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processes: list[subprocess.Popen[bytes]] = []
+    attempts: list[tuple[int, int, bool]] = []
+
+    def launch(
+        profile: Path, log: BinaryIO, flags: tuple[str, ...], executable: Path
+    ) -> Result[subprocess.Popen[bytes]]:
+        assert (
+            profile.parent == tmp_path / "browser"
+            and not flags
+            and executable.is_file()
+        )
+        process: subprocess.Popen[bytes] = subprocess.Popen(
+            ["/usr/bin/true"], stdout=log, stderr=log, start_new_session=True
+        )
+        # Observe exit while preserving the unreaped child and its identifier.
+        status = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        assert status is not None and status.si_code == os.CLD_EXITED
+        processes.append(process)
+        return Ok(process)
+
+    def stop_group(group: int, number: int) -> None:
+        process = processes[0]
+        pinned = False
+        if process.returncode is None:
+            status = os.waitid(
+                os.P_PID, process.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG
+            )
+            pinned = status is not None and status.si_pid == process.pid
+        attempts.append((group, number, pinned))
+        # Record the boundary without sending any real process-group signal.
+        raise ProcessLookupError(errno.ESRCH, "owned group already exited")
+
+    monkeypatch.setattr(browser_launch, "launch", launch)
+    monkeypatch.setattr(os, "killpg", stop_group)
+    result = Browser.open(tmp_path / "browser", (), (), startup_timeout=0.1)
+    assert isinstance(result, Rejected) and result.code == errno.ETIMEDOUT
+    assert len(processes) == 1 and processes[0].wait(timeout=1) == 0
+    assert attempts == [(processes[0].pid, signal.SIGTERM, True)]
 
 
 def test_open_existing_workspace_does_not_replace_user_files(tmp_path: Path) -> None:

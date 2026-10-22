@@ -163,8 +163,10 @@ def _source(output: Recording, playback_source: Path) -> Result[None]:
     try:
         with output.workload.source.open("rb") as seed:
             output.seed_sha256 = hashlib.file_digest(seed, "sha256").hexdigest()
-        with playback_source.open("rb") as source:
-            output.source_sha256 = hashlib.file_digest(source, "sha256").hexdigest()
+        output.source_sha256 = output.seed_sha256
+        if playback_source != output.workload.source:
+            with playback_source.open("rb") as source:
+                output.source_sha256 = hashlib.file_digest(source, "sha256").hexdigest()
         output.module_build_note = (
             Path("/sys/module/v4l2_rkmpp_bridge/notes/.note.gnu.build-id")
             .read_bytes()

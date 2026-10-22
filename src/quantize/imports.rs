@@ -1,6 +1,10 @@
 //! module: quantize::imports; responsibility: cache owned Vulkan
-//! DMA-BUF imports. operations: new, pair, descriptors; entities:
-//! Cache, Pair, Entry, Imported; tests: imports_tests, quantize_tests.
+//! DMA-BUF imports. operations: new, pair, reserve, descriptors;
+//! entities: Cache, Pair, Reservation, Imported; tests: imports_tests,
+//! quantize_tests. Preparing a pair does not mutate the cache; only
+//! successfully reserved and prepared pairs commit their recency and
+//! retention.
+use std::collections::VecDeque;
 use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, BorrowedFd, IntoRawFd};
@@ -14,8 +18,7 @@ struct Imported {
   gpu: Arc<Device>,
   buffer: vk::Buffer,
   memory: vk::DeviceMemory,
-  identity: (u64, u64),
-  size: u64,
+  storage: dma_buf::device::Storage,
 }
 impl Imported {
   fn new(
@@ -33,8 +36,7 @@ impl Imported {
       gpu,
       buffer: vk::Buffer::null(),
       memory: vk::DeviceMemory::null(),
-      identity: stat.identity(),
-      size: stat.size() as u64,
+      storage: dma_buf::device::Storage::new(*stat)?,
     };
     // SAFETY: every Vulkan resource below is owned by imported;
     // descriptor chains borrow local storage only until their call
@@ -44,7 +46,7 @@ impl Imported {
       .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
     let info = vk::BufferCreateInfo::default()
       .push_next(&mut external)
-      .size(imported.size)
+      .size(imported.storage.metadata().size() as u64)
       .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
       .sharing_mode(vk::SharingMode::EXCLUSIVE);
     imported.buffer =
@@ -53,7 +55,7 @@ impl Imported {
       })?;
     let requirements =
       unsafe { d.get_buffer_memory_requirements(imported.buffer) };
-    if requirements.size > imported.size {
+    if requirements.size > imported.storage.metadata().size() as u64 {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "Vulkan allocation exceeds DMA-BUF",
@@ -99,32 +101,50 @@ impl Drop for Imported {
   }
 }
 pub(super) struct Pair([Rc<Imported>; 2]);
-impl Pair {
+pub(super) struct Reservation {
+  pair: Pair,
+  _access: [dma_buf::device::Access; 2],
+}
+impl Reservation {
   pub(super) fn descriptors(
     &self,
     gpu: &Device,
   ) -> io::Result<[vk::DescriptorBufferInfo; 2]> {
+    self.pair.descriptors(gpu)
+  }
+}
+impl Pair {
+  fn reserve(self) -> io::Result<Reservation> {
+    let access =
+      [self.0[0].storage.reserve()?, self.0[1].storage.reserve()?];
+    Ok(Reservation { pair: self, _access: access })
+  }
+
+  pub(super) fn descriptors(
+    &self,
+    gpu: &Device,
+  ) -> io::Result<[vk::DescriptorBufferInfo; 2]> {
+    self.validate(gpu)?;
+    Ok(self.0.each_ref().map(|entry| {
+      vk::DescriptorBufferInfo::default()
+        .buffer(entry.buffer)
+        .range(entry.storage.metadata().size() as u64)
+    }))
+  }
+
+  fn validate(&self, gpu: &Device) -> io::Result<()> {
     if self.0.iter().any(|i| !std::ptr::eq(i.gpu.as_ref(), gpu)) {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "conversion imports belong to another Vulkan device",
       ));
     }
-    Ok(self.0.each_ref().map(|entry| {
-      vk::DescriptorBufferInfo::default()
-        .buffer(entry.buffer)
-        .range(entry.size)
-    }))
+    Ok(())
   }
-}
-struct Entry {
-  import: Rc<Imported>,
-  age: u64,
 }
 pub(super) struct Cache {
   gpu: Arc<Device>,
-  entries: Vec<Entry>,
-  clock: u64,
+  entries: VecDeque<Rc<Imported>>,
   capacity: usize,
 }
 impl Cache {
@@ -140,14 +160,13 @@ impl Cache {
     }
     Ok(Self {
       gpu,
-      entries: Vec::with_capacity(capacity.get()),
-      clock: 0,
+      entries: VecDeque::with_capacity(capacity.get()),
       capacity: capacity.get(),
     })
   }
 
   pub(super) fn pair(
-    &mut self,
+    &self,
     source: dma_buf::image::Plane<'_>,
     destination: dma_buf::image::Plane<'_>,
   ) -> io::Result<Pair> {
@@ -159,46 +178,66 @@ impl Cache {
         "conversion images alias the same DMA-BUF",
       ));
     }
-    let input = self.get(source.fd(), &source_stat, None)?;
-    let output =
-      self.get(destination.fd(), &destination_stat, Some(input))?;
-    Ok(Pair([
-      self.entries[input].import.clone(),
-      self.entries[output].import.clone(),
-    ]))
+    // Retain both owners without changing the cache. A caller may
+    // abandon this candidate or fail its access reservation.
+    let input = self.get(source.fd(), &source_stat)?;
+    let output = self.get(destination.fd(), &destination_stat)?;
+    Ok(Pair([input, output]))
+  }
+
+  /// Prepare the caller's dependencies while both access leases are
+  /// held. Failure drops those leases without committing the cache.
+  pub(super) fn reserve<T>(
+    &mut self,
+    pair: Pair,
+    prepare: impl FnOnce() -> io::Result<T>,
+  ) -> io::Result<(Reservation, T)> {
+    // Validate origin before reserving or mutating either cache.
+    pair.validate(&self.gpu)?;
+    let reservation = pair.reserve()?;
+    let prepared = prepare()?;
+    for imported in &reservation.pair.0 {
+      self.remember(imported);
+    }
+    Ok((reservation, prepared))
   }
 
   fn get(
-    &mut self,
+    &self,
     fd: BorrowedFd<'_>,
     stat: &dma_buf::Metadata,
-    avoid: Option<usize>,
-  ) -> io::Result<usize> {
-    self.clock = self.clock.wrapping_add(1);
+  ) -> io::Result<Rc<Imported>> {
     let identity = stat.identity();
-    if let Some(index) =
-      self.entries.iter().position(|e| e.import.identity == identity)
-    {
-      self.entries[index].age = self.clock;
-      return Ok(index);
-    }
-    let entry = Entry {
-      import: Rc::new(Imported::new(self.gpu.clone(), fd, stat)?),
-      age: self.clock,
-    };
-    if self.entries.len() < self.capacity {
-      self.entries.push(entry);
-      return Ok(self.entries.len() - 1);
-    }
-    let index = self
+    if let Some(import) = self
       .entries
       .iter()
-      .enumerate()
-      .filter(|(i, _)| Some(*i) != avoid)
-      .min_by_key(|(_, e)| e.age)
-      .unwrap()
-      .0;
-    self.entries[index] = entry;
-    Ok(index)
+      .find(|import| import.storage.metadata().identity() == identity)
+    {
+      return Ok(import.clone());
+    }
+    Imported::new(self.gpu.clone(), fd, stat).map(Rc::new)
+  }
+
+  fn remember(&mut self, import: &Rc<Imported>) {
+    // Two outstanding candidates can import the same storage before
+    // either is committed. Keep one entry per allocation identity.
+    let cached = self.entries.iter().position(|entry| {
+      entry.storage.metadata().identity()
+        == import.storage.metadata().identity()
+    });
+    let retained = if let Some(index) = cached {
+      let previous = self.entries.remove(index).unwrap();
+      if Rc::ptr_eq(&previous, import) {
+        previous
+      } else {
+        import.clone()
+      }
+    } else {
+      if self.entries.len() == self.capacity {
+        self.entries.pop_front();
+      }
+      import.clone()
+    };
+    self.entries.push_back(retained);
   }
 }

@@ -1,8 +1,8 @@
-//! module: dma_buf::access; responsibility: enforce CPU access
-//! ownership. operations: Owner, State, Lease::new/finish; entities:
-//! State, Lease; tests: access_tests. Aliases share an opaque state;
-//! synchronization is supplied by the storage owner, independent of fd
-//! representation.
+//! module: dma_buf::access; responsibility: enforce exclusive storage
+//! access ownership. operations: Owner, State, Lease::new/finish;
+//! entities: State, Lease; tests: access_tests. Aliases share an opaque
+//! state; synchronization is supplied by the storage owner, independent
+//! of fd representation.
 use std::io;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -54,7 +54,7 @@ impl<T: Owner> Lease<T> {
       Err(_) => {
         return Err(io::Error::new(
           io::ErrorKind::WouldBlock,
-          "DMA buffer already has a CPU access lease",
+          "DMA buffer already has an access lease",
         ));
       }
     }

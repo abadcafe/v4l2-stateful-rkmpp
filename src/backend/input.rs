@@ -5,7 +5,7 @@
 //! tests/service/test_resources.
 use std::io;
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 use rkmpp::{Input, InputAccess, Packet, Payload};
 
 use crate::submission::Origin;

@@ -10,6 +10,8 @@ operations: pytest cases; entities: none; tests:
 import errno
 from pathlib import Path
 
+import pytest
+
 from tests.support.outcome import Rejected, accepted
 from tests.support.queue import QueueType
 from tests.support.stream import Codec
@@ -21,6 +23,25 @@ from tests.support.video_formats import (
     selection,
     set_format,
 )
+
+
+@pytest.mark.parametrize("value", [-1, 1 << 32, 1 << 128])
+def test_format_operations_reject_unrepresentable_wire_values(value: int) -> None:
+    with accepted(open_fd(Path("/dev/null"))) as owner:
+        results = (
+            get_format(owner.fd, value),
+            enumerate_formats(owner.fd, value),
+            selection(owner.fd, value),
+            set_format(owner.fd, value, 0),
+            set_format(owner.fd, 10, value),
+            set_format(owner.fd, 10, 0, width=value),
+            set_format(owner.fd, 10, 0, height=value),
+            set_format(owner.fd, 10, 0, size=value),
+        )
+        assert all(
+            isinstance(result, Rejected) and result.code == errno.EINVAL
+            for result in results
+        )
 
 
 def test_format_operations_non_video_fd_return_enotty() -> None:

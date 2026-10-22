@@ -1,5 +1,5 @@
-//! module: dma_buf::persistent; responsibility: retain checked CPU
-//! reads over reusable DMA mappings. operations: new, read, bytes,
+//! module: dma_buf::memory::persistent; responsibility: retain checked
+//! CPU reads over reusable DMA mappings. operations: new, read, bytes,
 //! finish; entities: InputMap, ReadAccess; tests: persistent_tests.
 use std::io;
 use std::rc::Rc;

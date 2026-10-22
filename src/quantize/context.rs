@@ -9,7 +9,7 @@ use std::sync::Arc;
 use ash::vk;
 
 use super::device::Device;
-use super::imports::Pair;
+use super::imports::Reservation;
 use super::layout::Layout;
 use super::pipeline::{Factory, Pipeline};
 use crate::fence::Fence;
@@ -17,7 +17,7 @@ fn error(operation: &str, result: vk::Result) -> io::Error {
   io::Error::other(format!("Vulkan {operation}: {result:?}"))
 }
 struct Submission {
-  _imports: Pair,
+  _imports: Reservation,
   state: Submitted,
 }
 enum Submitted {
@@ -169,7 +169,7 @@ impl Context {
 
   pub(super) fn dispatch(
     &mut self,
-    imports: Pair,
+    imports: Reservation,
     layout: Layout,
   ) -> io::Result<()> {
     if self.failed {

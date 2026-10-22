@@ -5,6 +5,9 @@ operations: pytest cases; entities: none; tests: startup/session/error/terminati
 
 import errno
 import os
+import select
+import signal
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,48 @@ from tests.support.mock_process import Peer, Process
 from tests.support.mock_wire import Reply, Request
 from tests.support.outcome import Rejected, accepted, present
 from tests.support.seqpacket import Socket
+from tests.support.syscalls import OwnedFd
+
+
+def test_close_forced_exit_observes_terminal_status_before_releasing_resources(
+    executable: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
+    directory = tmp_path / "mock"
+    process = accepted(Process.open(executable, library, directory))
+    wait = process.process.wait
+    observed: list[bool] = []
+    with OwnedFd(os.open(directory / "ctl", os.O_RDONLY | os.O_NONBLOCK)) as reader:
+        readiness = select.poll()
+        readiness.register(reader.fd, select.POLLIN | select.POLLHUP)
+
+        def delayed_wait(timeout: float | None = None) -> int:
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(process.process.args, timeout)
+            status = wait()
+            # After the actual child exits, only Process's parent-side FIFO
+            # writer prevents EOF. It must remain owned through this wait.
+            observed.append(not readiness.poll(0))
+            return status
+
+        def delayed_termination() -> None:
+            # Model a graceful signal whose delivery has not completed before
+            # the first observation deadline; SIGKILL remains real.
+            assert process.process.poll() is None
+
+        try:
+            with monkeypatch.context() as operations:
+                operations.setattr(process.process, "terminate", delayed_termination)
+                operations.setattr(process.process, "wait", delayed_wait)
+                process.close()
+            assert observed == [True]
+            assert process.process.returncode == -signal.SIGKILL
+            assert readiness.poll(1000) == [(reader.fd, select.POLLHUP)]
+        finally:
+            if process.process.poll() is None:
+                process.process.kill()
+            _ = wait()
+            process.close()
 
 
 @pytest.mark.parametrize(
@@ -134,8 +179,6 @@ def test_open_inherits_only_selected_descriptors_and_preserves_parent_owners(
     executable: Path,
     tmp_path: Path,
 ) -> None:
-    from tests.support.syscalls import OwnedFd
-
     library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     selected, private = tmp_path / "selected", tmp_path / "private"
     _ = selected.write_bytes(b"selected")

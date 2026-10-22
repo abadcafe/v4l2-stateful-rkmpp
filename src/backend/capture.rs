@@ -7,8 +7,8 @@ use std::io;
 use std::num::NonZeroU32;
 use std::os::fd::{AsFd, AsRawFd};
 
-use dma_buf::Buffer;
 use dma_buf::image::Plane;
+use dma_buf::memory::Buffer;
 use rkmpp::{Decoder, Frame, Reservation};
 enum Lease {
   Decoded(Frame),

@@ -126,6 +126,41 @@ def test_native_array_bounds_return_optional_or_false() -> None:
     assert not pool.set_descriptor(32, Descriptor())
 
 
+@pytest.mark.parametrize(
+    "index",
+    [-1, -(1 << 256), 1 << 32, 1 << 64, 1 << 256],
+    ids=[
+        "negative",
+        "negative-wide",
+        "large-native",
+        "usize-overflow",
+        "wide-positive",
+    ],
+)
+def test_native_array_invalid_integer_returns_without_mutating_records(
+    index: int,
+) -> None:
+    batch = Batch(version=VERSION)
+    assert batch.set_event(0, Message(index=7))
+    assert batch.set_reply(0, Message(index=9))
+    assert batch.set_result(0, -errno.ESTALE)
+    pool = Pool(version=VERSION)
+    assert pool.set_descriptor(0, Descriptor(fd=-17, size=4096))
+    before = (bytes(batch), bytes(pool))
+    assert batch.event(index) is None
+    assert batch.reply(index) is None
+    assert batch.result(index) is None
+    assert batch.results(index) is None
+    assert not batch.set_event(index, Message())
+    assert not batch.set_reply(index, Message())
+    assert not batch.set_result(index, 0)
+    assert pool.descriptor(index) is None
+    assert not pool.set_descriptor(index, Descriptor())
+    assert Pool.descriptor_offset(index) is None
+    assert (bytes(batch), bytes(pool)) == before
+    assert batch.results(1) == [-errno.ESTALE]
+
+
 def test_native_results_read_only_the_requested_entries() -> None:
     batch = Batch()
     assert batch.set_result(0, -errno.ESTALE)

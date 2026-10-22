@@ -7,6 +7,10 @@
 //! test_validate_accepts_empty_and_maximum_batch_counts
 //! test_validate_rejects_invalid_version_reserved_or_counts
 //! test_event_and_reply_discriminants_match_wire_contract
+use rkmpp_bridge_uapi::wire::{
+  Flags, RB_IOCTL_ACCEPT, RB_IOCTL_EXCHANGE, RB_IOCTL_REGISTER_POOL,
+};
+
 use crate::protocol::registration::{Descriptor, MAX_BUFFERS, Pool};
 use crate::protocol::{
   Batch, Event, MAX_BATCH, Message, Reply, VERSION, validate,
@@ -23,7 +27,7 @@ fn test_message_wire_layout_matches_published_kernel_uapi() {
     (message.version, message.kind, message.epoch, message.reserved),
     (0, 0, 0, [0; 1])
   );
-  assert_eq!(Message::RESET_CAPTURE_ONLY, 1 << 16);
+  assert_eq!(Flags::ResetCaptureOnly as u32, 1 << 16);
 }
 #[test]
 fn test_batch_wire_layout_matches_published_kernel_uapi() {
@@ -141,8 +145,13 @@ fn test_all_public_wire_fields_and_constants_match_compiled_c_header() {
     ("RB_VERSION", VERSION as usize),
     ("RB_BATCH_MAX", MAX_BATCH),
     ("RB_MAX_BUFFERS", MAX_BUFFERS),
-    ("RB_RESET_CAPTURE_ONLY", Message::RESET_CAPTURE_ONLY as usize),
-    ("RB_RESET_ABORT_DRAIN", Message::RESET_ABORT_DRAIN as usize),
+    ("RB_CAPTURE_REUSE", Flags::CaptureReuse as usize),
+    ("RB_FRAME_ERROR", Flags::FrameError as usize),
+    ("RB_RESET_CAPTURE_ONLY", Flags::ResetCaptureOnly as usize),
+    ("RB_RESET_ABORT_DRAIN", Flags::ResetAbortDrain as usize),
+    ("RB_ACCEPT", RB_IOCTL_ACCEPT as usize),
+    ("RB_EXCHANGE", RB_IOCTL_EXCHANGE as usize),
+    ("RB_REGISTER_POOL", RB_IOCTL_REGISTER_POOL as usize),
     ("RB_PACKET", Event::Packet as usize),
     ("RB_CAPTURE", Event::Capture as usize),
     ("RB_RECYCLE", Event::Recycle as usize),

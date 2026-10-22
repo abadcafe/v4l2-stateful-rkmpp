@@ -1,7 +1,8 @@
 //! module: codec parser build; responsibility: derive installed
 //! GStreamer ABI. operations: Cargo build entrypoint; entities:
 //! CodecSymbols; tests: parser contracts.
-use std::process::Command;
+#[path = "build/sdk.rs"]
+mod sdk;
 #[derive(Debug)]
 struct CodecSymbols;
 impl bindgen::callbacks::ParseCallbacks for CodecSymbols {
@@ -48,14 +49,7 @@ impl bindgen::callbacks::ParseCallbacks for CodecSymbols {
   }
 }
 fn codec_parsers(output: &std::path::Path) {
-  let flags = Command::new("pkg-config")
-    .args(["--cflags", "gstreamer-codecparsers-1.0"])
-    .output()
-    .expect("query GStreamer codecparsers headers");
-  assert!(
-    flags.status.success(),
-    "GStreamer codecparsers development files are required"
-  );
+  let flags = sdk::configure();
   bindgen::Builder::default()
     .formatter(bindgen::Formatter::Prettyplease)
     .header_contents(
@@ -64,9 +58,7 @@ fn codec_parsers(output: &std::path::Path) {
        <gst/codecparsers/gstvp9parser.h>\n#include \
        <gst/codecparsers/gstav1parser.h>\n#include <gst/codecparsers/gsth264parser.h>\n#include <gst/codecparsers/gsth265parser.h>",
     )
-    .clang_args(
-      String::from_utf8(flags.stdout).unwrap().split_whitespace(),
-    )
+    .clang_args(flags)
     .clang_arg("-DGST_USE_UNSTABLE_API")
     .allowlist_function(
       "gst_h264_nal_parser_(new|free)|gst_h264_parser_(identify_nalu|parse_nal|parse_slice_hdr)|gst_h265_parser_(new|free|identify_nalu|parse_nal|parse_slice_hdr)|gst_h265_slice_hdr_free|gst_vp8_parser_.*|gst_vp9_parser_.*\
@@ -86,7 +78,6 @@ fn codec_parsers(output: &std::path::Path) {
     .expect("generate public codecparser bindings")
     .write_to_file(output.join("framed.rs"))
     .expect("write codecparser bindings");
-  println!("cargo:rustc-link-lib=gstcodecparsers-1.0");
 }
 fn main() {
   let output =

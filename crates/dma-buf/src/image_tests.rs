@@ -1,41 +1,33 @@
 //! module: image_tests; responsibility: define the corresponding public
 //! module contract. operations: Rust test entrypoints; entities: none;
-//! tests:
-//! test_new_retains_buffer_and_borrows_layout_after_original_owner_is_dropped
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+//! tests: descriptor/layout views, retained-source caching, descriptor
+//! selection and concurrent cache initialization.
+use std::os::fd::{AsFd, AsRawFd};
 
-use crate::Buffer;
-use crate::image::{Image, Plane, PlaneCache};
+use crate::image::{Plane, PlaneCache};
+use crate::memory::Buffer;
 
 #[test]
-fn test_new_retains_buffer_and_borrows_layout_after_original_owner_is_dropped()
- {
-  let raw = unsafe {
-    libc::memfd_create(c"image-contract".as_ptr(), libc::MFD_CLOEXEC)
-  };
-  assert!(raw >= 0);
-  let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-  assert_eq!(unsafe { libc::ftruncate(raw, 4096) }, 0);
-  let buffer = Buffer::from_owned(fd, 4096).unwrap();
+fn test_new_borrows_descriptor_with_explicit_layout() {
+  let buffer = Buffer::allocate(4096).unwrap();
   let plane = Plane::new(buffer.as_fd(), 64, 32);
   assert_eq!((plane.stride(), plane.rows()), (64, 32));
-  let image = Image::new(buffer.clone(), 128, 16);
-  let other = image.clone();
-  drop(buffer);
-  drop(image);
-  assert_eq!(other.plane().fd().as_raw_fd(), raw);
-  assert_eq!((other.plane().stride(), other.plane().rows()), (128, 16));
-  assert!(unsafe { libc::fcntl(raw, libc::F_GETFD) } >= 0);
+  assert_eq!(plane.fd().as_raw_fd(), buffer.as_fd().as_raw_fd());
+  assert_eq!(
+    plane.metadata().unwrap().identity(),
+    buffer.metadata().identity()
+  );
+  assert_eq!(plane.metadata().unwrap().size(), buffer.size() as i64);
 }
 
 #[test]
 fn test_from_buffer_borrows_registered_storage_and_layout() {
   use std::os::fd::{AsFd, AsRawFd};
-  let buffer = crate::Buffer::allocate(4096).unwrap();
+  let buffer = crate::memory::Buffer::allocate(4096).unwrap();
   let plane = crate::image::Plane::from_buffer(&buffer, 64, 32);
   assert_eq!(plane.fd().as_raw_fd(), buffer.as_fd().as_raw_fd());
   assert_eq!((plane.stride(), plane.rows()), (64, 32));
-  assert_eq!(plane.metadata().unwrap().st_size, 4096);
+  assert_eq!(plane.metadata().unwrap().size(), 4096);
 }
 
 #[test]
@@ -58,4 +50,80 @@ fn test_plane_cache_owns_each_metadata_source_without_descriptor_duplication()
     assert_eq!(second_metadata.size(), 8192);
     assert_ne!(first_metadata.identity(), second_metadata.identity());
   }
+}
+
+#[test]
+fn test_plane_cache_binds_metadata_to_selected_descriptor() {
+  use std::cell::Cell;
+  use std::os::fd::BorrowedFd;
+
+  struct Source {
+    buffers: [Buffer; 2],
+    selected: Cell<usize>,
+  }
+  impl AsFd for Source {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+      self.buffers[self.selected.get()].as_fd()
+    }
+  }
+  let cache = PlaneCache::new(Source {
+    buffers: [
+      Buffer::allocate(4096).unwrap(),
+      Buffer::allocate(8192).unwrap(),
+    ],
+    selected: Cell::new(0),
+  });
+  for selected in [0, 1, 0, 1] {
+    cache.source().selected.set(selected);
+    let plane = cache.plane(64, 32).unwrap();
+    let expected = cache.source().buffers[selected].metadata();
+    let actual = plane.metadata().unwrap();
+    assert_eq!(actual.identity(), expected.identity());
+    assert_eq!(actual.size(), expected.size());
+    assert_eq!(
+      plane.fd().as_raw_fd(),
+      cache.source().buffers[selected].as_fd().as_raw_fd()
+    );
+  }
+}
+
+#[test]
+fn test_plane_cache_concurrent_initialization_keeps_each_descriptor_metadata()
+ {
+  use std::os::fd::BorrowedFd;
+  use std::sync::Barrier;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  struct Source {
+    buffers: [Buffer; 2],
+    selected: AtomicUsize,
+  }
+  impl AsFd for Source {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+      let selected = self.selected.fetch_add(1, Ordering::Relaxed) % 2;
+      self.buffers[selected].as_fd()
+    }
+  }
+  let cache = PlaneCache::new(Source {
+    buffers: [
+      Buffer::allocate(4096).unwrap(),
+      Buffer::allocate(8192).unwrap(),
+    ],
+    selected: AtomicUsize::new(0),
+  });
+  let rendezvous = Barrier::new(2);
+  std::thread::scope(|scope| {
+    let check = || {
+      rendezvous.wait();
+      let plane = cache.plane(64, 32).unwrap();
+      let expected = Plane::new(plane.fd(), 64, 32).metadata().unwrap();
+      let actual = plane.metadata().unwrap();
+      assert_eq!(actual.identity(), expected.identity());
+      assert_eq!(actual.size(), expected.size());
+    };
+    let first = scope.spawn(check);
+    let second = scope.spawn(check);
+    first.join().unwrap();
+    second.join().unwrap();
+  });
 }

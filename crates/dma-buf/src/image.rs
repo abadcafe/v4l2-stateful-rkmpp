@@ -1,10 +1,10 @@
-//! module: image; responsibility: describe borrowed or owned DMA-BUF
-//! images. operations: plane layout access, image/cache construction
-//! and borrow; entities: Depth, Plane, Image, PlaneCache. tests:
+//! module: image; responsibility: describe borrowed DMA-BUF images.
+//! operations: plane layout access, metadata source retention;
+//! entities: Depth, Plane, PlaneCache. tests:
 //! image_tests and quantize_tests via public image views.
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
-use crate::Buffer;
+use crate::memory::Buffer;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug)]
@@ -57,29 +57,14 @@ impl<'a> Plane<'a> {
     self.rows
   }
 }
-#[derive(Clone, Debug)]
-pub struct Image {
-  buffer: Buffer,
-  stride: u32,
-  rows: u32,
-}
-impl Image {
-  pub fn new(buffer: Buffer, stride: u32, rows: u32) -> Self {
-    Self { buffer, stride, rows }
-  }
-
-  pub fn plane(&self) -> Plane<'_> {
-    Plane::from_buffer(&self.buffer, self.stride, self.rows)
-  }
-}
-
-/// An owned descriptor source and its inseparable cached metadata.
-/// No constructor accepts independently supplied metadata or a second
+/// Retain a DMA-BUF source and cache its first descriptor's metadata.
+/// Sources selecting another live descriptor get fresh metadata for
+/// that view; an AsFd implementation need not always select the same
 /// fd.
 #[derive(Debug)]
 pub struct PlaneCache<T: AsFd> {
   source: T,
-  metadata: std::sync::OnceLock<crate::Metadata>,
+  metadata: std::sync::OnceLock<(RawFd, crate::Metadata)>,
 }
 impl<T: AsFd> PlaneCache<T> {
   pub fn new(source: T) -> Self {
@@ -96,11 +81,18 @@ impl<T: AsFd> PlaneCache<T> {
     rows: u32,
   ) -> std::io::Result<Plane<'_>> {
     let fd = self.source.as_fd();
-    let known = if let Some(metadata) = self.metadata.get() {
-      *metadata
-    } else {
-      let metadata = crate::system::metadata(fd)?;
-      *self.metadata.get_or_init(|| metadata)
+    let known = match self.metadata.get() {
+      Some((cached_fd, metadata)) if *cached_fd == fd.as_raw_fd() => {
+        *metadata
+      }
+      _ => {
+        let metadata = crate::system::metadata(fd)?;
+        // A concurrent first access may select a different descriptor.
+        // Return this lookup's metadata even if another fd wins the
+        // cache.
+        let _ = self.metadata.set((fd.as_raw_fd(), metadata));
+        metadata
+      }
     };
     Ok(Plane { fd, known: Some(known), stride, rows })
   }

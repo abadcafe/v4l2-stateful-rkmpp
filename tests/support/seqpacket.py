@@ -12,7 +12,7 @@ from pathlib import Path
 from types import TracebackType
 
 from tests.support.outcome import Ok, Rejected, Result
-from tests.support.syscalls import OwnedFd
+from tests.support.syscalls import OwnedFd, descriptor_fits
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,10 @@ class Socket:
     def send(self, body: bytes, fds: tuple[int, ...] = ()) -> Result[None]:
         if not 0 < len(body) <= 32768 or len(fds) > 32:
             return Rejected(errno.EINVAL, "invalid Unix message extent")
+        if any(not descriptor_fits(fd) for fd in fds):
+            return Rejected(
+                errno.EBADF, "Unix descriptor outside native signed integer"
+            )
         ancillary = (
             [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds).tobytes())]
             if fds

@@ -18,7 +18,12 @@ pub(crate) struct Validator {
 impl Validator {
   pub(crate) fn new() -> io::Result<Self> {
     let parser = NonNull::new(unsafe { ffi::gst_av1_parser_new() })
-      .ok_or_else(|| io::Error::other("allocate AV1 parser"))?;
+      .ok_or_else(|| {
+        io::Error::new(
+          io::ErrorKind::OutOfMemory,
+          "allocate native AV1 parser",
+        )
+      })?;
     Ok(Self { parser, sequence: Vec::new() })
   }
 

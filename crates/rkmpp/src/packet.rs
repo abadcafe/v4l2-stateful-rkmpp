@@ -9,8 +9,8 @@ use std::io;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use dma_buf::Buffer;
-use dma_buf::persistent::{InputMap, ReadAccess};
+use dma_buf::memory::Buffer;
+use dma_buf::memory::persistent::{InputMap, ReadAccess};
 #[link(name = "rockchip_mpp")]
 unsafe extern "C" {
   fn mpp_packet_init(

@@ -9,6 +9,9 @@ operations: pytest cases; entities: none; tests:
 Hardware counters use the published sysfs/proc formats.
 """
 
+import errno
+import sys
+
 import pytest
 
 from tests.support.outcome import Rejected, accepted
@@ -22,6 +25,18 @@ def test_gpu_load_parses_percentage_and_frequency() -> None:
 @pytest.mark.parametrize("raw", ["", "101@10Hz", "-1@10Hz", "load: 1", "1@0Hz"])
 def test_gpu_load_malformed_or_out_of_range_is_rejected(raw: str) -> None:
     assert isinstance(gpu_load(raw), Rejected)
+
+
+def test_gpu_load_integer_conversion_limit_returns_error_and_allows_retry() -> None:
+    original = sys.get_int_max_str_digits()
+    limit = sys.int_info.str_digits_check_threshold
+    try:
+        sys.set_int_max_str_digits(limit)
+        result = gpu_load("1@" + "9" * (limit + 1) + "Hz")
+        assert isinstance(result, Rejected) and result.code == errno.EINVAL
+        assert accepted(gpu_load("37@800000000Hz")) == (37.0, 800000000)
+    finally:
+        sys.set_int_max_str_digits(original)
 
 
 def test_mpp_completed_window_load_preserves_every_core_percentage() -> None:

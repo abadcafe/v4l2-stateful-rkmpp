@@ -6,3 +6,5 @@ publish = false
 
 [build-dependencies]
 bindgen.workspace = true
+shlex.workspace = true
+pkg-config.workspace = true

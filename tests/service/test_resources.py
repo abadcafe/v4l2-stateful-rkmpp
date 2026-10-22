@@ -11,11 +11,13 @@ import time
 from pathlib import Path
 
 from pydantic import BaseModel
+from rkmpp_bridge_uapi import EXCHANGE, Batch
 
 from tests.support.diagnostics import query
 from tests.support.mock_decode import play
 from tests.support.mock_process import Process
-from tests.support.outcome import accepted
+from tests.support.mock_wire import Reply, Request
+from tests.support.outcome import accepted, present
 from tests.support.reference import frame_hashes
 from tests.support.stream import Codec
 
@@ -34,6 +36,35 @@ class Report(BaseModel):
     pid: int
     baseline: Snapshot
     samples: list[Sample]
+
+
+def test_idle_sessions_use_one_channel_and_one_wakeup_descriptor(
+    mock_service: Process,
+) -> None:
+    before = accepted(query(mock_service.diagnostics))
+
+    def idle(request: Request) -> Reply:
+        assert request.command == EXCHANGE
+        return Reply(body=bytes(present(Batch.decode(request.body))))
+
+    peers = [accepted(mock_service.session(idle)) for _ in range(8)]
+    # The initial exchange follows creation of both the backend and its
+    # readiness listener. Wait through the public peer transaction history.
+    deadline = time.monotonic() + 5
+    while any(not peer.calls() for peer in peers) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert all(peer.calls() for peer in peers)
+    active = accepted(query(mock_service.diagnostics))
+    assert active.threads == before.threads
+    assert active.fds == before.fds + 2 * len(peers), (before, active)
+    for peer in peers:
+        peer.close()
+    deadline = time.monotonic() + 5
+    after = accepted(query(mock_service.diagnostics))
+    while after.fds != before.fds and time.monotonic() < deadline:
+        time.sleep(0.01)
+        after = accepted(query(mock_service.diagnostics))
+    assert after.fds == before.fds and after.threads == before.threads
 
 
 def test_constrained_intra_infers_capture_budget_without_reference_surfaces(

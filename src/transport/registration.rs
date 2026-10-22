@@ -4,7 +4,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use crate::pool::{Direction, Pool as RegisteredPool};
 use crate::protocol::VERSION;

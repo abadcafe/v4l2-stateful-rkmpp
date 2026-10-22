@@ -37,9 +37,9 @@ pub(super) fn allocate(size: usize) -> io::Result<OwnedFd> {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Metadata {
-  pub(crate) st_dev: u64,
-  pub(crate) st_ino: u64,
-  pub(crate) st_size: i64,
+  st_dev: u64,
+  st_ino: u64,
+  st_size: i64,
 }
 pub(crate) fn metadata(fd: BorrowedFd<'_>) -> io::Result<Metadata> {
   let mut stat = std::mem::MaybeUninit::uninit();

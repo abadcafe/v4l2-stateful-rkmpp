@@ -6,6 +6,25 @@ fn test_parse_rejects_truncated_sps() {
   }
 }
 
+#[test]
+fn test_parse_single_temporal_layer_requires_nesting() {
+  let mut data = sequence(&[(1, 0, 0)], true);
+  assert!(super::hevc::parse(&data).is_ok());
+  data[0] &= !1;
+  assert!(super::hevc::parse(&data).is_err());
+}
+
+#[test]
+fn test_parse_preserves_temporal_nesting_for_multiple_layers() {
+  for nested in [false, true] {
+    let mut data = sequence(&[(4, 0, 0); 3], true);
+    data[0] = (data[0] & !1) | u8::from(nested);
+    let sequence = super::hevc::parse(&data).unwrap();
+    assert_eq!(sequence.temporal_nested, nested);
+    assert_eq!(sequence.layers.len(), 3);
+  }
+}
+
 fn sequence(layers: &[(u32, u32, u32)], all: bool) -> Vec<u8> {
   sequence_with_chroma(layers, all, 1)
 }

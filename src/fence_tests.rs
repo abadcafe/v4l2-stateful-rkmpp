@@ -6,7 +6,7 @@ use crate::notify::Notify;
 #[test]
 fn test_ready_preserves_completed_dma_fence_and_shared_descriptor_lifetime()
  {
-  let buffer = dma_buf::Buffer::allocate(4096).unwrap();
+  let buffer = dma_buf::memory::Buffer::allocate(4096).unwrap();
   let fence =
     Fence::new(Some(dma_buf::export_read(buffer.as_fd()).unwrap()));
   let lease = fence.lease().unwrap();

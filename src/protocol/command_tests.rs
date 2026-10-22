@@ -2,6 +2,8 @@
 //! command admission. operations: tests; entities: none; tests:
 //! complete domain values, malformed envelopes, invalid queue
 //! identities, extents, codecs and control flags.
+use rkmpp_bridge_uapi::wire::Flags;
+
 use super::command::{Action, Command, Stop};
 use super::{Event, Message, VERSION};
 fn message(kind: Event) -> Message {
@@ -139,7 +141,7 @@ fn test_try_from_rejects_invalid_capture_recycle_and_reset_contracts() {
     Message { index: 32, ..message(Event::Recycle) },
     Message { flags: 1, ..message(Event::Reset) },
     Message {
-      flags: Message::RESET_ABORT_DRAIN,
+      flags: Flags::ResetAbortDrain as u32,
       ..message(Event::Reset)
     },
   ] {
@@ -147,7 +149,8 @@ fn test_try_from_rejects_invalid_capture_recycle_and_reset_contracts() {
   }
   assert!(matches!(
     Command::try_from(Message {
-      flags: Message::RESET_CAPTURE_ONLY | Message::RESET_ABORT_DRAIN,
+      flags: Flags::ResetCaptureOnly as u32
+        | Flags::ResetAbortDrain as u32,
       ..message(Event::Reset)
     })
     .unwrap()

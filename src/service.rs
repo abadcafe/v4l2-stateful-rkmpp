@@ -127,11 +127,10 @@ use std::io;
 use scheduler::{Channel, Engine};
 
 use crate::hardware::{Client, Engine as HardwareEngine};
-use crate::notify::Notify;
+use crate::notify::{Listener, Notify};
 use crate::pool::{Direction, Pool};
 use crate::protocol::command::Command;
 use crate::protocol::{Batch, Message};
-use crate::readiness::Readable;
 use crate::shutdown::Shutdown;
 use crate::transport::Session;
 
@@ -151,11 +150,10 @@ impl Channel for Session {
 
   async fn wait(
     &mut self,
-    notify: &Notify,
-    notification: &Readable,
+    notification: &Listener,
     shutdown: &Shutdown,
   ) -> io::Result<bool> {
-    Session::wait(self, notify, notification, shutdown).await
+    Session::wait(self, notification, shutdown).await
   }
 }
 impl Engine for HardwareEngine {

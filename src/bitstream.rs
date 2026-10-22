@@ -12,9 +12,13 @@ mod h264;
 #[cfg(test)]
 mod h264_tests;
 mod hevc;
+#[cfg(test)]
+mod hevc_irap_tests;
 mod hevc_rps;
 #[cfg(test)]
 mod hevc_rps_tests;
+#[cfg(test)]
+mod hevc_temporal_tests;
 #[cfg(test)]
 mod hevc_tests;
 mod recovery;
@@ -59,10 +63,7 @@ impl Parser {
       Ok(report) => Ok(report),
       Err(error) => {
         self.seek()?;
-        Err(io::Error::new(
-          io::ErrorKind::InvalidData,
-          error.to_string(),
-        ))
+        Err(error)
       }
     }
   }
@@ -76,10 +77,26 @@ impl Parser {
     let boundary = unit.boundary;
     let picture_bytes = &bytes[unit.range];
     let mut units = Vec::new();
-    if let Some(picture) = self.syntax.inspect(
-      &picture_bytes[..unit.prefix.min(picture_bytes.len())],
-      unit.header.as_ref(),
-    )? {
+    // Only syntax interpretation translates semantic failures into
+    // damaged input. Native resource errors keep their classification
+    // through the outer recovery transaction.
+    let picture = self
+      .syntax
+      .inspect(
+        &picture_bytes[..unit.prefix.min(picture_bytes.len())],
+        unit.header.as_ref(),
+      )
+      .map_err(|error| {
+        if matches!(
+          error.kind(),
+          io::ErrorKind::OutOfMemory | io::ErrorKind::InvalidData
+        ) {
+          error
+        } else {
+          io::Error::new(io::ErrorKind::InvalidData, error)
+        }
+      })?;
+    if let Some(picture) = picture {
       let configuration = if self.restore_configuration {
         self.validator.configuration()
       } else {

@@ -8,7 +8,8 @@
 //! test_event_old_capture_recycle_cannot_acknowledge_new_layout
 use std::time::{Duration, Instant};
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
+use rkmpp_bridge_uapi::wire::Flags;
 
 use crate::backend::Backend;
 use crate::pool::{Direction, Pool};
@@ -65,7 +66,7 @@ fn test_step_completes_inputs_in_submission_order_across_slot_reuse() {
       (reply.kind, reply.index, reply.count),
       (Reply::InputDone as u32, index, count)
     );
-    assert_eq!(reply.flags, Message::FRAME_ERROR);
+    assert_eq!(reply.flags, Flags::FrameError as u32);
   }
   assert!(backend.take_reply().is_none());
 }
@@ -186,7 +187,7 @@ fn test_register_accepts_early_capture_but_rejects_duplicate_pool() {
         version: VERSION,
         kind: Event::Reset as u32,
         count: 1,
-        flags: Message::RESET_CAPTURE_ONLY,
+        flags: Flags::ResetCaptureOnly as u32,
         ..Default::default()
       }
     )
@@ -301,7 +302,7 @@ fn test_register_defers_undersized_capture_until_layout_reset() {
     Message {
       kind: Event::Reset as u32,
       count: 1,
-      flags: Message::RESET_CAPTURE_ONLY,
+      flags: Flags::ResetCaptureOnly as u32,
       generation: 1,
       ..base
     },
@@ -556,7 +557,7 @@ fn test_event_old_capture_recycle_cannot_acknowledge_new_layout() {
             Message {
               kind: Event::Reset as u32,
               count: 1,
-              flags: Message::RESET_CAPTURE_ONLY,
+              flags: Flags::ResetCaptureOnly as u32,
               ..base(generation)
             },
           )
@@ -685,7 +686,7 @@ fn test_event_input_completion_echoes_the_queue_token_even_on_damage() {
         (reply.kind, reply.index, reply.count),
         (Reply::InputDone as u32, 0, 17)
       );
-      assert_ne!(reply.flags & Message::FRAME_ERROR, 0);
+      assert_ne!(reply.flags & Flags::FrameError as u32, 0);
       return;
     }
   }

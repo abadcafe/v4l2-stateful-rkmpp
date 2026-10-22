@@ -275,3 +275,35 @@ def test_h264_valid_multi_slice_mmco_preserves_all_pixels(
     assert tuple(frame.digest for frame in result.frames) == accepted(
         frame_hashes(source, 8, 128, 128)
     )
+
+
+@pytest.mark.parametrize("input_count", [1, 8])
+def test_hevc_missing_current_reference_is_rejected_before_decode_and_recovers(
+    mock_service: Process, artifacts: Path, input_count: int
+) -> None:
+    source = artifacts / "hevc-yuv420p.hevc"
+    packets = accepted(load(Codec.HEVC, source))
+    # POC1 uses POC2. Omit POC2, then resume at an independently framed IDR.
+    submissions = tuple(
+        Packet(data=data, timestamp=index * 1000)
+        for index, data in enumerate(
+            (packets[0].data, packets[2].data, packets[0].data)
+        )
+    )
+    result = accepted(
+        play(
+            mock_service,
+            Codec.HEVC,
+            source,
+            input_count=input_count,
+            submissions=submissions,
+        )
+    )
+    assert result.eos and not result.errors
+    assert tuple(bool(done.flags & 2) for done in result.input_completions) == (
+        False,
+        True,
+        False,
+    )
+    expected = accepted(frame_hashes(source, 8, 256, 128))[0]
+    assert tuple(frame.digest for frame in result.frames) == (expected, expected)

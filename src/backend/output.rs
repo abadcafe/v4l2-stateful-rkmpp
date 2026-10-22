@@ -7,9 +7,10 @@
 use std::io;
 use std::num::NonZeroU32;
 
-use dma_buf::Buffer;
 use dma_buf::image::Depth;
+use dma_buf::memory::Buffer;
 use rkmpp::{Decoder, FrameInfo};
+use rkmpp_bridge_uapi::wire::Flags;
 
 use super::capture::{CapturePool, CopyReason, Presentation};
 use super::frame::FrameInput;
@@ -240,7 +241,7 @@ impl Output {
       bytesused,
       timestamp: info.pts as u64,
       field: crate::backend::frame::field(info)?,
-      flags: (if info.failed { Message::FRAME_ERROR } else { 0 })
+      flags: (if info.failed { Flags::FrameError as u32 } else { 0 })
         | crate::timestamp::Source::try_from(
           u32::try_from(info.dts).map_err(|_| {
             io::Error::other("invalid MPP timestamp source")

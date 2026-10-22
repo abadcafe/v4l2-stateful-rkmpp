@@ -18,12 +18,22 @@
 //! test_run_wait_error_sends_failed_reply
 //! test_run_backend_event_failure_preserves_failure_context
 //! test_run_backend_progress_error_sends_failed_reply
+//! test_run_rejects_reserved_before_close_registration_or_engine_mutation
+//! test_run_waits_after_consumed_events_when_engine_has_no_runnable_work
+//! test_run_reply_only_exchange_does_not_advance_idle_hardware
+//! test_run_backend_wait_completion_advances_without_control_fetch
+//! test_run_backend_wait_failure_closes_before_failed_reply
+//! test_run_backend_close_failure_reports_failed_after_owner_release
+//! test_run_backend_close_failure_preserves_original_wait_error
+//! test_run_shutdown_wakes_wait_and_closes_before_return
+//! test_run_listener_failure_closes_before_failed_reply
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
+use rkmpp_bridge_uapi::wire::Flags;
 
 use super::scheduler::{Channel, Engine, run};
 use crate::notify::Notify;
@@ -40,16 +50,24 @@ struct Observed {
   waits: usize,
   steps: usize,
   advances: usize,
+  closed: bool,
+  replies_after_close: Vec<bool>,
   dropped: bool,
 }
 struct Control {
   batches: VecDeque<io::Result<Batch>>,
   register_error: Option<i32>,
   waits: VecDeque<io::Result<bool>>,
+  block_wait: bool,
   seen: Rc<RefCell<Observed>>,
 }
 impl Channel for Control {
   async fn exchange(&mut self, batch: &mut Batch) -> io::Result<()> {
+    let closed = {
+      let seen = self.seen.borrow();
+      seen.closed && seen.dropped
+    };
+    self.seen.borrow_mut().replies_after_close.push(closed);
     self
       .seen
       .borrow_mut()
@@ -78,11 +96,14 @@ impl Channel for Control {
 
   async fn wait(
     &mut self,
-    _notify: &Notify,
-    _notification: &crate::readiness::Readable,
-    _shutdown: &Shutdown,
+    _notification: &crate::notify::Listener,
+    shutdown: &Shutdown,
   ) -> io::Result<bool> {
     self.seen.borrow_mut().waits += 1;
+    if self.block_wait {
+      shutdown.cancelled().await;
+      return Ok(false);
+    }
     self.waits.pop_front().unwrap_or(Ok(true))
   }
 }
@@ -91,12 +112,23 @@ struct Decoder {
   replies: VecDeque<Message>,
   steps: VecDeque<io::Result<bool>>,
   event_error: bool,
+  waits: RefCell<VecDeque<io::Result<()>>>,
+  close_error: Option<&'static str>,
+  reply_on_advance: Option<(usize, Message)>,
   seen: Rc<RefCell<Observed>>,
 }
 impl Engine for Decoder {
   async fn close(self) -> io::Result<()> {
+    let error = self.close_error;
+    self.seen.borrow_mut().closed = true;
+    // Teardown suspends before releasing its owner. A FAILED reply
+    // must await the complete close transaction.
+    tokio::task::yield_now().await;
     drop(self);
-    Ok(())
+    match error {
+      Some(message) => Err(io::Error::other(message)),
+      None => Ok(()),
+    }
   }
 
   fn notification(&self) -> Notify {
@@ -121,6 +153,12 @@ impl Engine for Decoder {
 
   async fn advance(&mut self) -> io::Result<bool> {
     self.seen.borrow_mut().advances += 1;
+    if let Some((turn, reply)) = self.reply_on_advance
+      && turn == self.seen.borrow().advances
+    {
+      self.replies.push_back(reply);
+      self.reply_on_advance = None;
+    }
     let mut progressed = false;
     for _ in 0..4 {
       self.seen.borrow_mut().steps += 1;
@@ -133,7 +171,11 @@ impl Engine for Decoder {
   }
 
   async fn wait(&self) -> io::Result<()> {
-    std::future::pending().await
+    let result = self.waits.borrow_mut().pop_front();
+    match result {
+      Some(result) => result,
+      None => std::future::pending().await,
+    }
   }
 
   fn take_reply(&mut self) -> Option<Message> {
@@ -175,6 +217,7 @@ fn fixture(
       batches: batches.into(),
       register_error: None,
       waits: VecDeque::new(),
+      block_wait: false,
       seen: seen.clone(),
     },
     Decoder {
@@ -182,6 +225,9 @@ fn fixture(
       replies: VecDeque::new(),
       steps: VecDeque::new(),
       event_error: false,
+      waits: RefCell::default(),
+      close_error: None,
+      reply_on_advance: None,
       seen: seen.clone(),
     },
     seen,
@@ -237,7 +283,7 @@ async fn test_run_reuses_registered_pool_and_batches_ordered_replies() {
 #[tokio::test(flavor = "current_thread")]
 async fn test_run_capture_reset_replaces_capture_registration_only() {
   let mut reset = message(Event::Reset as u32, 0);
-  reset.flags = Message::RESET_CAPTURE_ONLY;
+  reset.flags = Flags::ResetCaptureOnly as u32;
   let events = [
     message(Event::Packet as u32, 1),
     message(Event::Capture as u32, 2),
@@ -519,4 +565,143 @@ async fn test_run_reply_only_exchange_does_not_advance_idle_hardware() {
     run(&mut control, engine, &signals.shutdown()).await.unwrap();
   assert_eq!((stats.exchanges, stats.replies), (3, 1));
   assert_eq!(seen.borrow().advances, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_backend_wait_completion_advances_without_control_fetch()
+ {
+  let (mut control, mut engine, seen) = fixture(vec![
+    Ok(batch(&[message(Event::Resume as u32, 0)])),
+    close(),
+  ]);
+  control.block_wait = true;
+  engine.waits.get_mut().push_back(Ok(()));
+  engine.reply_on_advance =
+    Some((2, message(Reply::InputDone as u32, 1)));
+  let signals = Signals::install().unwrap();
+  let stats =
+    run(&mut control, engine, &signals.shutdown()).await.unwrap();
+  assert_eq!((stats.exchanges, stats.replies), (2, 1));
+  let seen = seen.borrow();
+  assert_eq!(seen.advances, 2);
+  assert_eq!(seen.replies[1][0].kind, Reply::InputDone as u32);
+  assert!(seen.closed && seen.dropped);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_backend_wait_failure_closes_before_failed_reply() {
+  let mut event = message(Event::Resume as u32, 0);
+  event.generation = 9;
+  let (mut control, mut engine, seen) =
+    fixture(vec![Ok(batch(&[event]))]);
+  control.block_wait = true;
+  engine
+    .waits
+    .get_mut()
+    .push_back(Err(io::Error::other("completion lost")));
+  let signals = Signals::install().unwrap();
+  let error =
+    run(&mut control, engine, &signals.shutdown()).await.unwrap_err();
+  assert!(error.contains("wait: completion lost"));
+  let seen = seen.borrow();
+  assert!(seen.closed && seen.dropped);
+  assert_eq!(seen.replies_after_close, [false, true]);
+  let failed = seen.replies.last().unwrap();
+  assert_eq!(failed.len(), 1);
+  assert_eq!(
+    (failed[0].kind, failed[0].epoch, failed[0].generation),
+    (Reply::Failed as u32, event.epoch, event.generation)
+  );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_backend_close_failure_reports_failed_after_owner_release()
+ {
+  let (mut control, mut engine, seen) = fixture(vec![close()]);
+  engine.close_error = Some("teardown failed");
+  let signals = Signals::install().unwrap();
+  let error =
+    run(&mut control, engine, &signals.shutdown()).await.unwrap_err();
+  assert!(error.contains("close backend: teardown failed"));
+  let seen = seen.borrow();
+  assert!(seen.closed && seen.dropped);
+  assert_eq!(seen.replies_after_close, [false, true]);
+  assert_eq!(
+    seen.replies.last().unwrap()[0].kind,
+    Reply::Failed as u32
+  );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_backend_close_failure_preserves_original_wait_error()
+{
+  let (mut control, mut engine, seen) = fixture(vec![Ok(batch(&[]))]);
+  control.block_wait = true;
+  engine
+    .waits
+    .get_mut()
+    .push_back(Err(io::Error::other("completion lost")));
+  engine.close_error = Some("teardown failed");
+  let signals = Signals::install().unwrap();
+  let error =
+    run(&mut control, engine, &signals.shutdown()).await.unwrap_err();
+  assert_eq!(error, "wait: completion lost");
+  let seen = seen.borrow();
+  assert!(seen.closed && seen.dropped);
+  assert_eq!(seen.replies_after_close, [false, true]);
+  assert_eq!(
+    seen.replies.last().unwrap()[0].kind,
+    Reply::Failed as u32
+  );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_shutdown_wakes_wait_and_closes_before_return() {
+  let (mut control, engine, seen) = fixture(vec![Ok(batch(&[]))]);
+  control.block_wait = true;
+  let signals = Signals::install().unwrap();
+  let shutdown = signals.shutdown();
+  let stop = async {
+    while seen.borrow().waits == 0 {
+      tokio::task::yield_now().await;
+    }
+    shutdown.request();
+  };
+  let (result, ()) =
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+      tokio::join!(run(&mut control, engine, &shutdown), stop)
+    })
+    .await
+    .unwrap();
+  let stats = result.unwrap();
+  assert_eq!((stats.exchanges, stats.events, stats.replies), (1, 0, 0));
+  let seen = seen.borrow();
+  assert!(seen.closed && seen.dropped);
+  assert_eq!(seen.advances, 1);
+  assert_eq!(seen.replies_after_close, [false]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_listener_failure_closes_before_failed_reply() {
+  let (mut control, mut engine, seen) = fixture(vec![]);
+  // Occupy the registration through the notification's public API.
+  // The scheduler must handle this setup error like later errors.
+  let listener = engine.notification().listen().unwrap();
+  engine.close_error = Some("teardown failed");
+  let signals = Signals::install().unwrap();
+  let error =
+    run(&mut control, engine, &signals.shutdown()).await.unwrap_err();
+  assert_eq!(
+    error,
+    io::Error::from_raw_os_error(libc::EEXIST).to_string()
+  );
+  let seen = seen.borrow();
+  assert!(seen.closed && seen.dropped);
+  assert!(seen.events.is_empty() && seen.pools.is_empty());
+  assert_eq!((seen.advances, seen.waits), (0, 0));
+  assert_eq!(seen.replies_after_close, [true]);
+  assert_eq!(seen.replies.len(), 1);
+  assert_eq!(seen.replies[0].len(), 1);
+  assert_eq!(seen.replies[0][0].kind, Reply::Failed as u32);
+  drop(listener);
 }

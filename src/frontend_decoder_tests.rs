@@ -1,7 +1,7 @@
 //! module: frontend decoder tests; responsibility: verify admitted AV1
 //! tasks complete through MPP. operations: Rust tests; entities: none;
 //! tests: synchronous progress and per-input publication.
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 use rkmpp::{Decoder, Input, Packet, Payload, Submission};
 
 use crate::timestamp::Source;

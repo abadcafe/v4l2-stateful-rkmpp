@@ -19,6 +19,130 @@ fn samples() -> [([u8; 4], &'static [u8], usize, usize); 2] {
     ),
   ]
 }
+
+#[test]
+fn test_admit_hevc_temporal_header_violations_reject_and_recover() {
+  let bytes = include_bytes!("../tests/artifacts/hevc-yuv420p.hevc");
+  for kind in [3u8, 32, 33] {
+    for temporal_id in [1, 6] {
+      let mut parser =
+        Parser::new(u32::from_le_bytes(*b"HEVC")).unwrap();
+      assert_eq!(parser.admit(&bytes[..5496]).unwrap().units.len(), 1);
+      let (source, original) = if kind == 3 {
+        (&bytes[5496..7063], 1)
+      } else {
+        (&bytes[..5496], kind)
+      };
+      let mut bad = source.to_vec();
+      let offset = bad
+        .windows(4)
+        .position(|data| data == [0, 0, 1, original << 1])
+        .unwrap()
+        + 3;
+      assert_eq!(bad[offset + 1], 1);
+      bad[offset] = kind << 1;
+      bad[offset + 1] = temporal_id + 1;
+      let result = parser.admit(&bad);
+      assert!(result.is_err());
+      assert_eq!(
+        result.err().unwrap().kind(),
+        std::io::ErrorKind::InvalidData
+      );
+      assert_eq!(parser.admit(&bytes[..5496]).unwrap().units.len(), 1);
+      assert_eq!(
+        parser.admit(&bytes[5496..7063]).unwrap().units.len(),
+        1
+      );
+    }
+  }
+}
+
+#[test]
+fn test_admit_preserves_native_allocation_failure_after_recovery() {
+  const MARKER: &str = "RKMPP_TEST_PARSER_ALLOCATION_CHILD";
+  if std::env::var_os(MARKER).is_some() {
+    for (codec, bytes, first, _) in samples() {
+      let mut parser = Parser::new(u32::from_le_bytes(codec)).unwrap();
+      let error = parser.admit(&[0xff]).unwrap_err();
+      assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+      assert_eq!(parser.admit(&bytes[..first]).unwrap().units.len(), 1);
+    }
+    return;
+  }
+  let nonce = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_nanos();
+  let directory = std::env::temp_dir().join(format!(
+    "rkmpp-parser-allocation-{}-{nonce}",
+    std::process::id()
+  ));
+  std::fs::create_dir(&directory).unwrap();
+  let source = directory.join("allocation.rs");
+  let library = directory.join("libparser_allocation.so");
+  // Only this child's second native construction fails. Other calls
+  // use the installed SDK, including the following successful reset.
+  std::fs::write(
+    &source,
+    r#"
+use std::ffi::{c_char, c_void};
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[link(name = "dl")]
+unsafe extern "C" {
+    fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+}
+macro_rules! constructor {
+    ($name:ident) => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name() -> *mut c_void {
+            static CALLS: AtomicUsize = AtomicUsize::new(0);
+            if CALLS.fetch_add(1, Ordering::SeqCst) == 1 {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: RTLD_NEXT selects the linked SDK's same C ABI.
+            let symbol = unsafe {
+                dlsym((-1isize) as *mut c_void,
+                    concat!(stringify!($name), "\0").as_ptr().cast())
+            };
+            assert!(!symbol.is_null());
+            // SAFETY: both exported constructors take no arguments
+            // and return one owned native parser pointer.
+            let original: unsafe extern "C" fn() -> *mut c_void =
+                unsafe { std::mem::transmute(symbol) };
+            unsafe { original() }
+        }
+    };
+}
+constructor!(gst_h264_nal_parser_new);
+constructor!(gst_h265_parser_new);
+"#,
+  )
+  .unwrap();
+  let compiled = std::process::Command::new("rustc")
+    .args(["--edition=2024", "--crate-type=cdylib", "-Dwarnings"])
+    .arg(&source)
+    .arg("-o")
+    .arg(&library)
+    .output()
+    .unwrap();
+  assert!(
+    compiled.status.success(),
+    "{}",
+    String::from_utf8_lossy(&compiled.stderr)
+  );
+  let observed = std::process::Command::new(std::env::current_exe().unwrap())
+    .args(["--exact", "bitstream_tests::test_admit_preserves_native_allocation_failure_after_recovery", "--nocapture"])
+    .env(MARKER, "1")
+    .env("LD_PRELOAD", &library)
+    .output().unwrap();
+  std::fs::remove_dir_all(directory).unwrap();
+  assert!(
+    observed.status.success(),
+    "{}{}",
+    String::from_utf8_lossy(&observed.stdout),
+    String::from_utf8_lossy(&observed.stderr)
+  );
+}
 #[test]
 fn test_admit_complete_picture_produces_borrowed_view_and_geometry() {
   for (codec, data, first, second) in samples() {

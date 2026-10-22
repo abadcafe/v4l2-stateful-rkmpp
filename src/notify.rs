@@ -1,11 +1,19 @@
 //! module: notify; responsibility: an owned, clonable eventfd wakeup.
-//! operations: new, signal, drain; entities: Notify; tests:
-//! notify_tests.
+//! operations: new, signal, drain, listen, Listener::wait; entities:
+//! Notify, Listener; tests: notify_tests and service resource tests.
+//! A listener shares the descriptor owner and always drains the
+//! counter it observes. Registration never duplicates the descriptor.
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-use std::sync::Arc;
+
+use crate::descriptor::Lease;
+use crate::readiness::Readable;
 #[derive(Clone, Debug)]
-pub struct Notify(Arc<OwnedFd>);
+pub struct Notify(Lease);
+pub struct Listener {
+  notify: Notify,
+  ready: Readable,
+}
 impl Notify {
   pub fn new() -> io::Result<Self> {
     // SAFETY: no pointers; a successful eventfd is uniquely owned.
@@ -15,7 +23,14 @@ impl Notify {
     if fd < 0 {
       return Err(io::Error::last_os_error());
     }
-    Ok(Self(Arc::new(unsafe { OwnedFd::from_raw_fd(fd) })))
+    Ok(Self(Lease::new(unsafe { OwnedFd::from_raw_fd(fd) })))
+  }
+
+  pub fn listen(&self) -> io::Result<Listener> {
+    Ok(Listener {
+      ready: Readable::from_lease(self.0.clone())?,
+      notify: self.clone(),
+    })
   }
 
   pub fn signal(&self) -> io::Result<()> {
@@ -43,28 +58,33 @@ impl Notify {
   }
 
   pub fn drain(&self) -> io::Result<u64> {
-    let mut total = 0u64;
-    loop {
-      let mut value = 0u64;
-      // SAFETY: value is an aligned writable eight-byte destination.
-      let result = unsafe {
-        libc::read(
-          self.0.as_raw_fd(),
-          (&mut value as *mut u64).cast(),
-          8,
-        )
-      };
-      if result == 8 {
-        total = total.saturating_add(value);
-        continue;
-      }
-      let error = io::Error::last_os_error();
-      if error.kind() == io::ErrorKind::WouldBlock {
-        return Ok(total);
-      }
-      if error.kind() != io::ErrorKind::Interrupted {
-        return Err(error);
-      }
+    drain(self.as_fd())
+  }
+}
+impl Listener {
+  pub async fn wait(&self) -> io::Result<u64> {
+    self.ready.wait().await?;
+    self.notify.drain()
+  }
+}
+fn drain(fd: BorrowedFd<'_>) -> io::Result<u64> {
+  let mut total = 0u64;
+  loop {
+    let mut value = 0u64;
+    // SAFETY: value is an aligned writable eight-byte destination.
+    let result = unsafe {
+      libc::read(fd.as_raw_fd(), (&mut value as *mut u64).cast(), 8)
+    };
+    if result == 8 {
+      total = total.saturating_add(value);
+      continue;
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+      return Ok(total);
+    }
+    if error.kind() != io::ErrorKind::Interrupted {
+      return Err(error);
     }
   }
 }

@@ -2,7 +2,7 @@
 //! device admission.
 use std::os::fd::AsFd;
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use super::device::Device;
 #[test]

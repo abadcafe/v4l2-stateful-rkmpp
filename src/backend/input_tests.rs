@@ -5,7 +5,7 @@
 //! test_prepare_and_complete_reject_invalid_index_and_length
 //! test_new_rejects_oversized_input_allocation
 //! test_drop_releases_active_input_read_lease
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 use rkmpp::Payload;
 
 use super::input::InputPool;

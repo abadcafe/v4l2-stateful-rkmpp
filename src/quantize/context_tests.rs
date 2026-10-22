@@ -5,15 +5,25 @@
 //! test_dispatch_rejects_undersized_imports_before_submission
 //! test_dispatch_rejects_foreign_device_without_poisoning_context
 //! test_dispatch_imports_survive_cache_eviction_before_submission
+//! test_new_shared_factory_reuses_device_and_keeps_contexts_independent
 use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
 
-use dma_buf::Buffer;
 use dma_buf::image::{Depth, Plane};
+use dma_buf::memory::Buffer;
 
 use super::context::Context;
-use super::imports::Cache;
+use super::imports::{Cache, Reservation};
 use super::layout::Layout;
+
+fn reserved(
+  cache: &mut Cache,
+  source: Plane<'_>,
+  destination: Plane<'_>,
+) -> Reservation {
+  let pair = cache.pair(source, destination).unwrap();
+  cache.reserve(pair, || Ok(())).unwrap().0
+}
 
 #[test]
 fn test_dispatch_real_imports_completes_and_publishes_nv12_pixels() {
@@ -43,22 +53,30 @@ fn test_dispatch_real_imports_completes_and_publishes_nv12_pixels() {
     Plane::new(target.as_fd(), 32, 32),
   )
   .unwrap();
-  let buffers = imports
-    .pair(
-      Plane::new(source.as_fd(), 64, 32),
-      Plane::new(target.as_fd(), 32, 32),
-    )
-    .unwrap();
+  let buffers = reserved(
+    &mut imports,
+    Plane::new(source.as_fd(), 64, 32),
+    Plane::new(target.as_fd(), 32, 32),
+  );
   context.dispatch(buffers, layout).unwrap();
+  assert_eq!(
+    source.read().err().unwrap().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+  assert_eq!(
+    target.write().err().unwrap().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+  let other_source = Buffer::allocate(4096).unwrap();
+  let other_target = Buffer::allocate(4096).unwrap();
   assert_eq!(
     context
       .dispatch(
-        imports
-          .pair(
-            Plane::new(source.as_fd(), 64, 32),
-            Plane::new(target.as_fd(), 32, 32)
-          )
-          .unwrap(),
+        reserved(
+          &mut imports,
+          Plane::new(other_source.as_fd(), 64, 32),
+          Plane::new(other_target.as_fd(), 32, 32),
+        ),
         layout
       )
       .unwrap_err()
@@ -66,13 +84,19 @@ fn test_dispatch_real_imports_completes_and_publishes_nv12_pixels() {
     std::io::ErrorKind::WouldBlock
   );
   context.quiesce().unwrap();
+  // Completion alone does not retire this context's resource owners.
+  assert_eq!(
+    target.read().err().unwrap().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
   assert!(context.finish().unwrap());
-  let buffers = imports
-    .pair(
-      Plane::new(source.as_fd(), 64, 32),
-      Plane::new(target.as_fd(), 32, 32),
-    )
-    .unwrap();
+  source.read().unwrap().finish().unwrap();
+  target.read().unwrap().finish().unwrap();
+  let buffers = reserved(
+    &mut imports,
+    Plane::new(source.as_fd(), 64, 32),
+    Plane::new(target.as_fd(), 32, 32),
+  );
   context.dispatch(buffers, layout).unwrap();
   drop(imports);
   context.quiesce().unwrap();
@@ -93,7 +117,7 @@ fn test_dispatch_rejects_foreign_device_without_poisoning_context() {
   let layout = Layout::new(Depth::Ten, 32, 32, a, b).unwrap();
   assert_eq!(
     context
-      .dispatch(imports.pair(a, b).unwrap(), layout)
+      .dispatch(reserved(&mut imports, a, b), layout)
       .unwrap_err()
       .kind(),
     std::io::ErrorKind::InvalidInput
@@ -112,17 +136,14 @@ fn test_dispatch_imports_survive_cache_eviction_before_submission() {
   source.write().unwrap().fill(73);
   let a = Plane::new(source.as_fd(), 32, 32);
   let b = Plane::new(target.as_fd(), 32, 32);
-  let buffers = imports.pair(a, b).unwrap();
+  let buffers = reserved(&mut imports, a, b);
   let replacement_a = Buffer::allocate(4096).unwrap();
   let replacement_b = Buffer::allocate(4096).unwrap();
-  drop(
-    imports
-      .pair(
-        Plane::new(replacement_a.as_fd(), 32, 32),
-        Plane::new(replacement_b.as_fd(), 32, 32),
-      )
-      .unwrap(),
-  );
+  drop(reserved(
+    &mut imports,
+    Plane::new(replacement_a.as_fd(), 32, 32),
+    Plane::new(replacement_b.as_fd(), 32, 32),
+  ));
   drop(imports);
   context
     .dispatch(buffers, Layout::new(Depth::Eight, 32, 32, a, b).unwrap())
@@ -145,7 +166,7 @@ fn test_dispatch_rejects_undersized_imports_before_submission() {
   let layout = Layout::new(Depth::Eight, 64, 64, a, b).unwrap();
   assert_eq!(
     context
-      .dispatch(imports.pair(a, b).unwrap(), layout)
+      .dispatch(reserved(&mut imports, a, b), layout)
       .unwrap_err()
       .kind(),
     std::io::ErrorKind::InvalidInput

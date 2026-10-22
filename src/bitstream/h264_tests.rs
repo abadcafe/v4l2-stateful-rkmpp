@@ -38,7 +38,7 @@ fn test_inspect_metadata_recovery_point_applies_once_without_replaying_bytes()
       .unwrap()
       .is_none()
   );
-  let header = Header::H264(Header264 {
+  let mut header = Header::H264(Header264 {
     sequence: match unit.header.as_ref().unwrap() {
       Header::H264(previous) => previous.sequence.clone(),
       _ => panic!("missing H264 header"),
@@ -53,5 +53,10 @@ fn test_inspect_metadata_recovery_point_applies_once_without_replaying_bytes()
   let picture = syntax.inspect(&[], Some(&header)).unwrap().unwrap();
   assert!(picture.display);
   syntax.boundary();
+  let Header::H264(next) = &mut header else {
+    panic!("missing H264 header");
+  };
+  next.frame = 2;
+  next.lsb = 4;
   assert!(syntax.inspect(&[], Some(&header)).unwrap().is_none());
 }

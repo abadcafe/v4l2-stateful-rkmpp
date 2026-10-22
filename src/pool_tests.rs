@@ -5,7 +5,7 @@
 //! test_into_parts_transfers_entire_registration_to_consumer
 use std::os::fd::{FromRawFd, OwnedFd};
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use crate::pool::{Direction, Pool};
 

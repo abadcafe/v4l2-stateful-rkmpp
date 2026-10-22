@@ -1,10 +1,13 @@
 //! module: bitstream::hevc; responsibility: HEVC picture output
 //! eligibility. operations: Hevc implementing Syntax; entities: Hevc;
-//! tests: hevc_tests, service output semantics.
+//! tests: hevc_tests, hevc_temporal_tests, hevc_irap_tests,
+//! service output semantics.
 use std::io;
 
 use super::codec::{Picture, Syntax};
-use super::hevc_rps::{Memory, Target};
+use super::hevc_rps::{
+  Memory, Picture as ReferencePicture, References,
+};
 pub(super) struct Hevc {
   references: Memory,
   seeking: bool,
@@ -48,6 +51,12 @@ impl Syntax for Hevc {
     let kind = header.kind;
     let irap = (16..=23).contains(&kind);
     let seq = &header.sequence;
+    if usize::from(header.temporal_id) >= seq.layers.len() {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "HEVC TemporalId exceeds the active SPS layer bound",
+      ));
+    }
     if (self.seeking && !irap)
       || (matches!(kind, 8 | 9) && self.suppress_rasl)
     {
@@ -73,36 +82,19 @@ impl Syntax for Hevc {
       temporal_id: header.temporal_id,
       random_access: reset,
     })?;
-    let mut targets =
-      Vec::with_capacity(header.short.len() + header.long.len());
-    for delta in &header.short {
-      targets.push(Target::Short(
-        poc
-          .checked_add(*delta)
-          .ok_or_else(|| io::Error::other("reference POC overflow"))?,
-      ));
-    }
-    let modulus = 1u32 << seq.poc_bits;
-    for long in &header.long {
-      let full = long
-        .cycle
-        .map(|cycle| {
-          i32::try_from(
-            i128::from(long.lsb) + i128::from(poc)
-              - i128::from(cycle) * i128::from(modulus)
-              - i128::from(poc as u32 & (modulus - 1)),
-          )
-          .map_err(|_| io::Error::other("long-term POC overflow"))
-        })
-        .transpose()?;
-      targets.push(Target::Long {
-        lsb: long.lsb,
-        mask: modulus - 1,
-        full,
-      });
-    }
+    let references = References::new(
+      ReferencePicture {
+        poc,
+        kind,
+        temporal_id: header.temporal_id,
+        temporal_nested: seq.temporal_nested,
+      },
+      seq.poc_bits,
+      &header.short,
+      &header.long,
+    )?;
     let (id, references) =
-      self.references.apply(poc, &targets, reset, limits)?;
+      self.references.apply(references, reset, limits)?;
     let mut geometry = seq.geometry;
     geometry.limits = limits;
     self.seeking = false;

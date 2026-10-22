@@ -38,7 +38,9 @@ The service uses one Tokio orchestration thread for admission, session schedulin
 
 `kernel/bridge_uapi.h` is the sole private UAPI source. `crates/rkmpp-bridge-uapi/` provides Rust wire types and the `rkmpp_bridge_uapi` Python module in one crate. PyO3 bindings always compile, without an optional binding feature. `rkmpp-bridge-uapi/Cargo.toml` unconditionally enables the PyO3 `extension-module` feature to fix extension-module linkage: the importing interpreter supplies Python APIs, and the service has no runtime dependency on libpython. Bindgen derives the raw ABI; exhaustive field initialization and event/reply matches make incompatible protocol field or enum changes compile errors. Service validation and Python mock behavior remain independent. The packaged `.pyi` supplies static types, with tests comparing its public fields, constructor parameters and enum members against the actual extension. `uv run pytest` builds and installs this local package through maturin; wheels are local installation/cache artifacts and are not published. Cargo and uv both track header changes; build scripts, the workspace lockfile, sources and stubs also invalidate their respective caches. Protocol version 11 requires updating the service and kernel together. The kernel endpoint encapsulates ABI copies and descriptor rollback behind transitions on an opaque session. The service validates typed commands before registering pools. Admission owns immutable normalized H.264/HEVC sequence snapshots; presentation ordering reads those snapshots.
 
-The main service stays in root `src/`. The root Cargo manifest manages the workspace and selects only the service and its dependencies by default. `crates/rkmpp/` owns MPP objects, buffer groups and nonblocking decode; `crates/codec-parser/` owns the GStreamer codecparser ABI and independent syntax parsing. Neither depends on the service or private UAPI. `crates/dma-buf/` supplies shared DMA-BUF ownership, CPU access and image views to MPP and GPU clients. The service translates V4L2 timestamps and field order. The UAPI Rust/Python interfaces compile together as part of the service dependency graph. The independent preload mock lives in `crates/v4l2-rkmpp-kernel-mock/` outside that graph. All packages share the root lockfile and output directory; the preload mock uses nightly.
+The main service stays in root `src/`. The root Cargo manifest manages the workspace and builds and checks every member by default. `crates/rkmpp/` owns MPP objects, buffer groups and nonblocking decode; `crates/codec-parser/` owns the GStreamer codecparser ABI and independent syntax parsing. Neither depends on the service or private UAPI. `crates/dma-buf/` supplies shared DMA-BUF ownership, CPU access and image views to MPP and GPU clients. The service translates V4L2 timestamps and field order. The UAPI Rust/Python interfaces compile together as part of the service dependency graph. The independent preload mock lives in `crates/v4l2-rkmpp-kernel-mock/` outside that graph. All packages share the root lockfile and output directory; every member uses stable Rust.
+
+CPU maps and GPU conversions share process-local exclusion by storage identity. An opaque conversion reservation retains both image imports and access ownership from preparation until retirement or cancellation. Sync-files and Vulkan barriers provide device synchronization.
 
 ## Build, install, and use
 
@@ -98,18 +100,14 @@ Tests require an RK3588 machine, Python 3.14+, uv, Rust nightly, FFmpeg, Chromiu
 
 Browser integration tests reject an already running service and ask you to stop it. Run `cargo build` first: browser tests only check and use `target/debug/v4l2-stateful-rkmpp` in the current checkout. They start and stop the service but do not build it, and fail if the binary is missing. Rebuild the service yourself after changing its source. Tests do not check whether the loaded module matches the source; update the module yourself. A passing result applies only to the module actually loaded. The running kernel identity is recorded under `kernel-runtime*/` in the pytest temporary directory, and the service identity used by each browser test is recorded in its `service-identity.json`.
 
-The test interception library uses Rust's `c_variadic` feature to implement C variadic interfaces, so its Clippy checks, build, and tests require nightly. The main service uses stable Rust.
+On aarch64 and x86_64, stable naked ABI entrypoints preserve C variadic argument registers; only system calls requiring an argument consume it. The default workspace commands build and check the service, bindings and interception library together. Nightly is used only for formatting.
 
 ```sh
 cargo +nightly fmt --all
 cargo +nightly fmt --all --check
-cargo clippy --workspace --exclude v4l2-rkmpp-kernel-mock --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo build
-cargo test --workspace --exclude v4l2-rkmpp-kernel-mock --no-fail-fast
-
-cargo +nightly clippy -p v4l2-rkmpp-kernel-mock --all-targets -- -D warnings
-cargo +nightly build -p v4l2-rkmpp-kernel-mock
-cargo +nightly test -p v4l2-rkmpp-kernel-mock
+cargo test --workspace --no-fail-fast
 
 uv run ruff format
 uv run ruff format --check

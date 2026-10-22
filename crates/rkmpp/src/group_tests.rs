@@ -6,7 +6,7 @@
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::MetadataExt;
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use super::group::Group;
 

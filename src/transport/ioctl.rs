@@ -5,10 +5,13 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
+use rkmpp_bridge_uapi::wire::{
+  RB_IOCTL_EXCHANGE, RB_IOCTL_REGISTER_POOL,
+};
+
 use super::admission::Admission;
 use crate::pool::{Direction, Pool as RegisteredPool};
 use crate::protocol::Batch;
-use crate::protocol::registration::Pool;
 pub(super) fn accept(
   lease: crate::descriptor::Lease,
 ) -> io::Result<Admission<OwnedFd>> {
@@ -24,15 +27,14 @@ pub(super) fn accept(
 }
 pub(super) fn exchange(
   lease: crate::descriptor::Lease,
-  mut owned: Batch,
-) -> io::Result<Batch> {
-  let batch = &mut owned;
+  batch: &mut Batch,
+) -> io::Result<()> {
   crate::protocol::validate(batch)?;
   let submitted = batch.reply_count;
   // SAFETY: Batch matches bridge_uapi.h and remains writable until
   // ioctl completes.
   if unsafe {
-    libc::ioctl(lease.as_raw_fd(), Batch::IOCTL, &mut *batch)
+    libc::ioctl(lease.as_raw_fd(), RB_IOCTL_EXCHANGE, &mut *batch)
   } < 0
   {
     return Err(io::Error::last_os_error());
@@ -51,7 +53,7 @@ pub(super) fn exchange(
       "invalid exchange response",
     ));
   }
-  Ok(owned)
+  Ok(())
 }
 
 pub(super) fn register(
@@ -64,8 +66,9 @@ pub(super) fn register(
     crate::protocol::registration::request(direction as u32, epoch, id);
   // SAFETY: REGISTER_POOL installs fresh fds only on successful
   // copyout.
-  if unsafe { libc::ioctl(lease.as_raw_fd(), Pool::IOCTL, &mut pool) }
-    < 0
+  if unsafe {
+    libc::ioctl(lease.as_raw_fd(), RB_IOCTL_REGISTER_POOL, &mut pool)
+  } < 0
   {
     return Err(io::Error::last_os_error());
   }

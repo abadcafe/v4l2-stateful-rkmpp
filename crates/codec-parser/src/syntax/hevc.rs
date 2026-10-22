@@ -6,6 +6,7 @@ use crate::syntax::geometry::Geometry;
 pub struct Sequence {
   pub geometry: Geometry,
   pub poc_bits: usize,
+  pub temporal_nested: bool,
   pub layers: Vec<crate::Limits>,
 }
 use crate::syntax::bits::Bits;
@@ -19,7 +20,13 @@ pub fn parse(data: &[u8]) -> io::Result<Sequence> {
       "invalid HEVC temporal layer count",
     ));
   }
-  b.skip(1 + 96)?;
+  let temporal_nested = b.get(1)? != 0;
+  if layers == 0 && !temporal_nested {
+    return Err(io::Error::other(
+      "single-layer HEVC SPS requires temporal nesting",
+    ));
+  }
+  b.skip(96)?;
   let mut sub = Vec::new();
   for _ in 0..layers {
     sub.push((b.get(1)?, b.get(1)?));
@@ -125,5 +132,5 @@ pub fn parse(data: &[u8]) -> io::Result<Sequence> {
       )
     })?,
   };
-  Ok(Sequence { geometry, poc_bits, layers: limits })
+  Ok(Sequence { geometry, poc_bits, temporal_nested, layers: limits })
 }

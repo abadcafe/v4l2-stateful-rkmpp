@@ -35,6 +35,8 @@ class Video:
         return Ok(payload) if isinstance(result, Ok) else result
 
     def subscribe(self, kind: int) -> Result[None]:
+        if not 0 <= kind < 1 << 32:
+            return Rejected(errno.EINVAL, "event type outside unsigned 32-bit ABI")
         payload = Subscription(kind=kind)
         result = ioctl(self.fd, command(1, "V", 90, ctypes.sizeof(payload)), payload)
         return Ok(None) if isinstance(result, Ok) else result

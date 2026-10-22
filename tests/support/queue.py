@@ -5,6 +5,7 @@ entities: Queue, QueueType, BufferInfo; tests: queue_tests and kernel/service ac
 """
 
 import ctypes
+import errno
 import mmap
 import os
 from enum import IntEnum
@@ -16,6 +17,9 @@ from tests.support.event_abi import Scalar
 from tests.support.format_abi import RequestBuffers
 from tests.support.outcome import Ok, Rejected, Result
 from tests.support.syscalls import OwnedFd, command, ioctl
+
+_U32_MAX = (1 << 32) - 1
+_TIMEVAL_LIMIT = 1 << (8 * ctypes.sizeof(ctypes.c_long) - 1)
 
 
 class QueueType(IntEnum):
@@ -40,6 +44,8 @@ class Queue:
         self._planes: int = 1
 
     def request(self, count: int) -> Result[int]:
+        if not 0 <= count <= _U32_MAX:
+            return Rejected(errno.EINVAL, "queue count outside unsigned 32-bit ABI")
         payload = RequestBuffers(count=count, kind=self._kind, memory=1)
         result = ioctl(self._fd, command(3, "V", 8, ctypes.sizeof(payload)), payload)
         return Ok(payload.count) if isinstance(result, Ok) else result
@@ -71,6 +77,8 @@ class Queue:
         )
 
     def query(self, index: int) -> Result[BufferInfo]:
+        if not 0 <= index <= _U32_MAX:
+            return Rejected(errno.EINVAL, "buffer index outside unsigned 32-bit ABI")
         payload, planes = self._buffer(index)
         result = ioctl(self._fd, command(3, "V", 9, ctypes.sizeof(payload)), payload)
         return Ok(self._describe(payload, planes)) if isinstance(result, Ok) else result
@@ -78,12 +86,18 @@ class Queue:
     def queue(
         self, index: int, bytesused: int = 0, timestamp: int = 0, data_offset: int = 0
     ) -> Result[None]:
+        if any(not 0 <= value <= _U32_MAX for value in (index, bytesused, data_offset)):
+            return Rejected(
+                errno.EINVAL, "queue submission outside unsigned 32-bit ABI"
+            )
+        seconds, microseconds = divmod(timestamp, 1000000)
+        if not -_TIMEVAL_LIMIT <= seconds < _TIMEVAL_LIMIT:
+            return Rejected(errno.EINVAL, "timestamp outside native timeval ABI")
         payload, planes = self._buffer(index)
         Plane.from_buffer(planes).bytesused = bytesused
         Plane.from_buffer(planes).data_offset = data_offset
-        payload.timestamp.seconds, payload.timestamp.microseconds = divmod(
-            timestamp, 1000000
-        )
+        payload.timestamp.seconds = seconds
+        payload.timestamp.microseconds = microseconds
         result = ioctl(self._fd, command(3, "V", 15, ctypes.sizeof(payload)), payload)
         return Ok(None) if isinstance(result, Ok) else result
 
@@ -93,6 +107,8 @@ class Queue:
         return Ok(self._describe(payload, planes)) if isinstance(result, Ok) else result
 
     def export(self, index: int, plane: int = 0) -> Result[OwnedFd]:
+        if any(not 0 <= value <= _U32_MAX for value in (index, plane)):
+            return Rejected(errno.EINVAL, "export index outside unsigned 32-bit ABI")
         payload = ExportBuffer(
             kind=self._kind, index=index, plane=plane, flags=os.O_CLOEXEC
         )

@@ -1,7 +1,6 @@
 //! module: preload; responsibility: interpose the test process's
 //! bridge system-call entrypoints. operations: ioctl, open64; entities:
 //! none; tests: lib_tests, Python service process acceptance.
-#![feature(c_variadic)]
 #[cfg(test)]
 mod lib_tests;
 
@@ -11,18 +10,32 @@ mod lib_tests;
 /// pathname must address a C string and flags must have their required
 /// optional mode argument, as specified by Linux open64.
 #[unsafe(no_mangle)]
+#[unsafe(naked)]
 pub unsafe extern "C" fn open64(
+  _pathname: *const libc::c_char,
+  _flags: libc::c_int,
+  _mode: usize,
+) -> libc::c_int {
+  // Preserve the optional mode register without constructing a Rust
+  // VaList. The dispatcher uses it only for commands that supply it.
+  #[cfg(target_arch = "aarch64")]
+  core::arch::naked_asm!("b {}", sym dispatch_open);
+  #[cfg(target_arch = "x86_64")]
+  core::arch::naked_asm!("jmp {}", sym dispatch_open);
+}
+
+unsafe extern "C" fn dispatch_open(
   pathname: *const libc::c_char,
   flags: libc::c_int,
-  mut arguments: ...
+  mode: usize,
 ) -> libc::c_int {
   use std::ffi::{CStr, CString};
   use std::os::unix::ffi::OsStrExt;
   let mode = if flags & libc::O_CREAT != 0
     || flags & libc::O_TMPFILE == libc::O_TMPFILE
   {
-    // SAFETY: These flags require the caller's mode argument.
-    unsafe { arguments.next_arg::<libc::mode_t>() }
+    // Linux mode_t uses the low 32 bits of the variadic register.
+    mode as libc::mode_t
   } else {
     0
   };
@@ -59,7 +72,7 @@ mod rpc_tests;
 pub unsafe extern "C" fn ioctl(
   _fd: libc::c_int,
   _command: libc::c_ulong,
-  _arguments: ...
+  _argument: usize,
 ) -> libc::c_int {
   // Do not read a C variadic argument: many native ioctl commands have
   // none, including legacy commands without encoded direction/size.

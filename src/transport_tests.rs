@@ -8,7 +8,6 @@
 //! test_wait_observes_closed_control_and_drop_closes_owned_channel
 use std::io::Read;
 use std::num::NonZeroUsize;
-use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -29,7 +28,6 @@ fn executor() -> Pool<()> {
 }
 use crate::pool::Direction;
 use crate::protocol::{Batch, VERSION};
-use crate::readiness::Readable;
 use crate::shutdown::Signals;
 use crate::transport::{Broker, Session};
 
@@ -76,6 +74,85 @@ async fn test_exchange_validates_header_before_external_ioctl() {
       .raw_os_error(),
     Some(libc::ENOTTY)
   );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_exchange_repeated_failures_preserve_each_request() {
+  let executor = executor();
+  let (stream, _peer) = UnixStream::pair().unwrap();
+  let mut session =
+    Session::new(stream.into(), executor.router().lane()).unwrap();
+  for count in [16, 0, 1, 15, 0, 16] {
+    let mut batch = Batch {
+      version: VERSION,
+      reply_count: count,
+      ..Default::default()
+    };
+    for (index, message) in batch.replies.iter_mut().enumerate() {
+      message.epoch = u64::from(count) + index as u64;
+    }
+    batch.events[15].epoch = 99;
+    batch.results[15] = -7;
+    let original = batch;
+    assert_eq!(
+      session.exchange(&mut batch).await.unwrap_err().raw_os_error(),
+      Some(libc::ENOTTY)
+    );
+    assert_eq!(batch, original);
+  }
+  drop(session);
+  executor.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_exchange_cancelled_admission_retains_its_next_request() {
+  use std::future::Future;
+  use std::task::{Context, Waker};
+
+  let executor = executor();
+  let lane = executor.router().lane();
+  let (release, blocked) = std::sync::mpsc::channel();
+  let (started, running) = tokio::sync::oneshot::channel();
+  let blocker = lane
+    .schedule(|| {
+      move |_| {
+        started.send(()).unwrap();
+        blocked.recv().unwrap();
+        Ok(())
+      }
+    })
+    .await
+    .unwrap();
+  running.await.unwrap();
+  let mut waiting = Vec::new();
+  for _ in 0..4 {
+    waiting.push(lane.schedule(|| |_| Ok(())).await.unwrap());
+  }
+  let (stream, _peer) = UnixStream::pair().unwrap();
+  let mut session = Session::new(stream.into(), lane).unwrap();
+  let mut batch = Batch { version: VERSION, ..Default::default() };
+  let mut exchange = Box::pin(session.exchange(&mut batch));
+  assert!(
+    exchange
+      .as_mut()
+      .poll(&mut Context::from_waker(Waker::noop()))
+      .is_pending()
+  );
+  drop(exchange);
+  release.send(()).unwrap();
+  blocker.await.unwrap();
+  for pending in waiting {
+    pending.await.unwrap();
+  }
+  batch.reply_count = 1;
+  batch.replies[0].epoch = 42;
+  assert_eq!(
+    session.exchange(&mut batch).await.unwrap_err().raw_os_error(),
+    Some(libc::ENOTTY)
+  );
+  assert_eq!(batch.replies[0].epoch, 42);
+  drop(session);
+  executor.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -151,12 +228,7 @@ async fn test_wait_notification_drains_wakeup_without_control_readiness()
   notify.signal().unwrap();
   assert!(
     !session
-      .wait(
-        &notify,
-        &Readable::new(notify.as_fd().try_clone_to_owned().unwrap())
-          .unwrap(),
-        &signals.shutdown()
-      )
+      .wait(&notify.listen().unwrap(), &signals.shutdown())
       .await
       .unwrap()
   );
@@ -164,12 +236,7 @@ async fn test_wait_notification_drains_wakeup_without_control_readiness()
   signals.shutdown().request();
   assert!(
     !session
-      .wait(
-        &notify,
-        &Readable::new(notify.as_fd().try_clone_to_owned().unwrap())
-          .unwrap(),
-        &signals.shutdown()
-      )
+      .wait(&notify.listen().unwrap(), &signals.shutdown())
       .await
       .unwrap()
   );
@@ -190,12 +257,7 @@ async fn test_wait_observes_closed_control_and_drop_closes_owned_channel()
   assert!({
     let notify = Notify::new().unwrap();
     session
-      .wait(
-        &notify,
-        &Readable::new(notify.as_fd().try_clone_to_owned().unwrap())
-          .unwrap(),
-        &signals.shutdown(),
-      )
+      .wait(&notify.listen().unwrap(), &signals.shutdown())
       .await
       .unwrap()
   });

@@ -1,7 +1,8 @@
 //! module: codec_parser::header; responsibility: carry owned validated
 //! picture syntax into ordering semantics. operations/entities: Header,
-//! H264, Hevc, Long, Marking, Operation; tests: packet_syntax_tests and
-//! codec-specific admission tests. No parser pointers escape admission.
+//! H264, Hevc, Short, Long, Marking, Operation; tests:
+//! packet_syntax_tests and codec-specific admission tests. No parser
+//! pointers escape admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operation {
   ForgetShort(u32),
@@ -27,9 +28,15 @@ pub struct H264 {
   pub delta: [i32; 2],
   pub marking: Marking,
 }
+#[derive(Debug, PartialEq, Eq)]
+pub struct Short {
+  pub delta: i32,
+  pub used: bool,
+}
 pub struct Long {
   pub lsb: u32,
   pub cycle: Option<u64>,
+  pub used: bool,
 }
 pub struct Hevc {
   pub sequence: std::rc::Rc<crate::syntax::hevc::Sequence>,
@@ -38,7 +45,7 @@ pub struct Hevc {
   pub no_prior: bool,
   pub display: bool,
   pub lsb: u32,
-  pub short: Vec<i32>,
+  pub short: Vec<Short>,
   pub long: Vec<Long>,
 }
 pub enum Header {

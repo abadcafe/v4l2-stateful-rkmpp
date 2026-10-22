@@ -14,6 +14,8 @@ from tests.support.format_abi import Format, FormatDescription, Selection
 from tests.support.outcome import Ok, Rejected, Result
 from tests.support.syscalls import command, ioctl
 
+_U32_MAX = (1 << 32) - 1
+
 
 class VideoFormat(BaseModel):
     width: int
@@ -51,6 +53,8 @@ def _describe(payload: Format) -> VideoFormat:
 
 
 def get_format(fd: int, kind: int) -> Result[VideoFormat]:
+    if not 0 <= kind <= _U32_MAX:
+        return Rejected(errno.EINVAL, "queue type outside unsigned 32-bit ABI")
     payload = Format(kind=kind)
     result = ioctl(fd, command(3, "V", 4, ctypes.sizeof(payload)), payload)
     return Ok(_describe(payload)) if isinstance(result, Ok) else result
@@ -65,6 +69,8 @@ def set_format(
     height: int = 0,
     size: int = 16 * 1024 * 1024,
 ) -> Result[VideoFormat]:
+    if any(not 0 <= value <= _U32_MAX for value in (kind, fourcc, width, height, size)):
+        return Rejected(errno.EINVAL, "format value outside unsigned 32-bit ABI")
     payload = Format(kind=kind)
     data = bytearray(200)
     struct.pack_into("<5I", data, 0, width, height, fourcc, 0, 0)
@@ -76,6 +82,8 @@ def set_format(
 
 
 def enumerate_formats(fd: int, kind: int) -> Result[list[int]]:
+    if not 0 <= kind <= _U32_MAX:
+        return Rejected(errno.EINVAL, "queue type outside unsigned 32-bit ABI")
     formats: list[int] = []
     while True:
         payload = FormatDescription(index=len(formats), kind=kind)
@@ -86,6 +94,8 @@ def enumerate_formats(fd: int, kind: int) -> Result[list[int]]:
 
 
 def selection(fd: int, kind: int) -> Result[tuple[int, int]]:
+    if not 0 <= kind <= _U32_MAX:
+        return Rejected(errno.EINVAL, "queue type outside unsigned 32-bit ABI")
     payload = Selection(kind=kind, target=0x100)
     result = ioctl(fd, command(3, "V", 94, ctypes.sizeof(payload)), payload)
     return (

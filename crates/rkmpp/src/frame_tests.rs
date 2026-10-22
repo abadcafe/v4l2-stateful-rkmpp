@@ -8,7 +8,7 @@
 use std::ffi::{c_char, c_void};
 use std::os::fd::{AsFd, AsRawFd};
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use super::frame::Frame;
 

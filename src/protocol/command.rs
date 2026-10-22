@@ -1,10 +1,12 @@
 //! module: protocol::command; responsibility: admit complete typed
-//! commands before resource registration. operations: TryFrom<Message>,
-//! kind, bounded-value queries; entities: Command, Route, Action, Stop,
-//! Slot, Capacity, Extent; tests: command_tests and scheduler/process
-//! acceptance.
+//! commands before resource registration. operations:
+//! `TryFrom<Message>`, kind, bounded-value queries; entities: Command,
+//! Route, Action, Stop, Slot, Capacity, Extent; tests: command_tests
+//! and scheduler/process acceptance.
 use std::io;
 use std::num::NonZeroU32;
+
+use rkmpp_bridge_uapi::wire::Flags;
 
 use super::{Event, Message, VERSION};
 use crate::codec::Codec;
@@ -130,14 +132,14 @@ impl TryFrom<Message> for Command {
       }
       value if value == Event::Capture as u32 => {
         if m.count > super::registration::MAX_BUFFERS as u32
-          || m.flags & !Message::CAPTURE_REUSE != 0
+          || m.flags & !(Flags::CaptureReuse as u32) != 0
         {
           return Err(invalid());
         }
         Action::Capture {
           pool: nonzero(m.pool_id)?,
           count: Capacity(nonzero(m.count)?),
-          reuse: m.flags & Message::CAPTURE_REUSE != 0,
+          reuse: m.flags & Flags::CaptureReuse as u32 != 0,
         }
       }
       value if value == Event::Recycle as u32 => Action::Recycle {
@@ -148,18 +150,19 @@ impl TryFrom<Message> for Command {
       value if value == Event::Drain as u32 => Action::Drain,
       value if value == Event::Reset as u32 => {
         if m.flags
-          & !(Message::RESET_CAPTURE_ONLY | Message::RESET_ABORT_DRAIN)
+          & !(Flags::ResetCaptureOnly as u32
+            | Flags::ResetAbortDrain as u32)
           != 0
-          || m.flags & Message::RESET_ABORT_DRAIN != 0
-            && m.flags & Message::RESET_CAPTURE_ONLY == 0
+          || m.flags & Flags::ResetAbortDrain as u32 != 0
+            && m.flags & Flags::ResetCaptureOnly as u32 == 0
         {
           return Err(invalid());
         }
         Action::Reset {
           token: nonzero(m.count)?,
-          scope: if m.flags & Message::RESET_CAPTURE_ONLY != 0 {
+          scope: if m.flags & Flags::ResetCaptureOnly as u32 != 0 {
             Stop::Capture {
-              abort_drain: m.flags & Message::RESET_ABORT_DRAIN != 0,
+              abort_drain: m.flags & Flags::ResetAbortDrain as u32 != 0,
             }
           } else {
             Stop::All

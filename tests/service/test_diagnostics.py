@@ -6,15 +6,21 @@ running inode, socket cleanup, request isolation. Uses only process interfaces.
 
 import errno
 import os
+import resource
 import shutil
 import socket
+import threading
+import time
 from contextlib import ExitStack
 from pathlib import Path
+
+from rkmpp_bridge_uapi import EXCHANGE, Batch
 
 from tests.support.build_identity import service_id
 from tests.support.diagnostics import measure, query
 from tests.support.mock_process import Process
-from tests.support.outcome import Rejected, accepted
+from tests.support.mock_wire import Reply, Request
+from tests.support.outcome import Rejected, accepted, present
 from tests.support.syscalls import OwnedFd
 
 
@@ -130,3 +136,62 @@ def test_diagnostics_measurement_matches_identity_without_resource_inventory(
     assert first.state == second.state == "ready"
     assert second.cpu_seconds >= first.cpu_seconds >= snapshot.cpu_seconds
     assert set(first.model_dump()) == {"protocol", "identity", "state", "cpu_seconds"}
+
+
+def test_diagnostics_descriptor_pressure_preserves_sessions_and_recovers(
+    mock_service: Process,
+) -> None:
+    observed = threading.Event()
+
+    def handle(request: Request) -> Reply:
+        assert request.command == EXCHANGE
+        observed.set()
+        return Reply(body=bytes(present(Batch.decode(request.body))))
+
+    peer = accepted(mock_service.session(handle))
+    assert observed.wait(5)
+    before = accepted(query(mock_service.diagnostics))
+    pid = mock_service.process.pid
+    limits = resource.prlimit(pid, resource.RLIMIT_NOFILE)
+    # The child's three standard descriptors occupy every allocatable slot.
+    # Keep the limit nonzero: Linux rejects poll(nfds=1) with EINVAL at limit
+    # zero even for an existing descriptor, independently of accept pressure.
+    _ = resource.prlimit(pid, resource.RLIMIT_NOFILE, (3, limits[1]))
+    try:
+        # Only this owned child is constrained. The parent's new connection
+        # reaches its listener, but accept cannot install a descriptor.
+        began = time.monotonic()
+        blocked = query(mock_service.diagnostics)
+        assert isinstance(blocked, Rejected)
+        assert mock_service.process.poll() is None, mock_service.log()
+        observed.clear()
+        accepted(peer.wake())
+        assert observed.wait(1), mock_service.log()
+        # A permanently readable listener must not create a busy retry loop.
+        retries = mock_service.log().count("rkmpp diagnostics: admission pressure")
+        assert 1 <= retries <= 15 * (time.monotonic() - began) + 1, mock_service.log()
+    finally:
+        if mock_service.process.poll() is None:
+            _ = resource.prlimit(pid, resource.RLIMIT_NOFILE, limits)
+    after = accepted(query(mock_service.diagnostics))
+    assert after.identity == before.identity and after.state == "ready"
+
+
+def test_diagnostics_descriptor_pressure_keeps_shutdown_responsive(
+    mock_service: Process,
+) -> None:
+    pid = mock_service.process.pid
+    limits = resource.prlimit(pid, resource.RLIMIT_NOFILE)
+    # All allocatable slots are occupied; poll on an existing fd stays legal.
+    _ = resource.prlimit(pid, resource.RLIMIT_NOFILE, (3, limits[1]))
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1)
+            client.connect(str(mock_service.diagnostics))
+            client.sendall(b"measure\n")
+            time.sleep(0.25)
+            mock_service.process.terminate()
+            assert mock_service.process.wait(timeout=2) == 0, mock_service.log()
+    finally:
+        if mock_service.process.poll() is None:
+            _ = resource.prlimit(pid, resource.RLIMIT_NOFILE, limits)

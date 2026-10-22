@@ -3,7 +3,7 @@
 //! Direction; tests: pool_tests.
 use std::io;
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use crate::protocol::registration::MAX_BUFFERS;
 

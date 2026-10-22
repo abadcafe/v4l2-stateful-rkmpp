@@ -9,8 +9,7 @@ use codec_parser::header::{
 };
 
 use super::reference::{
-  Marking as ReferenceMarking, Memory, Operation,
-  Picture as ReferencePicture,
+  Marking as ReferenceMarking, Memory, Picture as ReferencePicture,
 };
 #[derive(Debug, Default)]
 pub(super) struct Marking {
@@ -50,41 +49,7 @@ impl Order {
       }
       HeaderMarking::Sliding => ReferenceMarking::Sliding,
       HeaderMarking::Adaptive(operations) => {
-        ReferenceMarking::Adaptive(
-          operations
-            .iter()
-            .map(|op| {
-              Ok(match *op {
-                HeaderOperation::ForgetShort(n) => {
-                  Operation::ForgetShort(n.checked_add(1).ok_or_else(
-                    || {
-                      io::Error::other("reference difference overflow")
-                    },
-                  )?)
-                }
-                HeaderOperation::ForgetLong(n) => {
-                  Operation::ForgetLong(n)
-                }
-                HeaderOperation::LongFromShort {
-                  difference,
-                  index,
-                } => Operation::LongFromShort(
-                  difference.checked_add(1).ok_or_else(|| {
-                    io::Error::other("reference difference overflow")
-                  })?,
-                  index,
-                ),
-                HeaderOperation::LongLimit(n) => {
-                  Operation::LongLimit(n)
-                }
-                HeaderOperation::Reset => Operation::Reset,
-                HeaderOperation::CurrentLong(n) => {
-                  Operation::CurrentLong(n)
-                }
-              })
-            })
-            .collect::<io::Result<Vec<_>>>()?,
-        )
+        ReferenceMarking::Adaptive(operations)
       }
     };
     let reset = matches!(&header.marking, HeaderMarking::Adaptive(operations) if operations.contains(&HeaderOperation::Reset));
@@ -142,7 +107,7 @@ fn record(
   parameters: &codec_parser::syntax::h264::Poc,
   mut poc: super::poc::Picture,
   mut marking: Marking,
-  reference: ReferencePicture,
+  reference: ReferencePicture<'_>,
 ) -> io::Result<Marking> {
   poc.reset = marking.reset;
   marking.poc = counter.derive(parameters, poc)?;

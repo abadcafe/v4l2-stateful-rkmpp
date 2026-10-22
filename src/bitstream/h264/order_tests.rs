@@ -60,6 +60,56 @@ fn test_observe_idr_exposes_prior_output_suppression() {
     assert_eq!(marking.frame, 0);
   }
 }
+
+#[test]
+fn test_observe_rejects_nonzero_idr_and_repeated_frame_identity() {
+  for marking in [
+    header(1, Marking::Idr { discard: false, long: false }),
+    header(0, Marking::Sliding),
+    header(0, Marking::Disposable),
+  ] {
+    let mut order = Order::default();
+    order
+      .observe(&header(0, Marking::Idr { discard: false, long: false }))
+      .unwrap();
+    assert!(order.observe(&marking).is_err());
+    order.reset();
+    let resumed = order
+      .observe(&header(0, Marking::Idr { discard: false, long: false }))
+      .unwrap();
+    assert!(resumed.idr && !resumed.continuation);
+  }
+}
+
+#[test]
+fn test_observe_checks_canonical_difference_overflow_and_accepts_zero_encoding()
+ {
+  for operation in [
+    Operation::ForgetShort(u32::MAX),
+    Operation::LongFromShort { difference: u32::MAX, index: 0 },
+  ] {
+    let mut order = Order::default();
+    order
+      .observe(&header(0, Marking::Idr { discard: false, long: false }))
+      .unwrap();
+    assert!(
+      order
+        .observe(&header(1, Marking::Adaptive(vec![operation])))
+        .is_err()
+    );
+    order.reset();
+    order
+      .observe(&header(0, Marking::Idr { discard: false, long: false }))
+      .unwrap();
+    let next = order
+      .observe(&header(
+        1,
+        Marking::Adaptive(vec![Operation::ForgetShort(0)]),
+      ))
+      .unwrap();
+    assert_eq!(next.references, [next.reference_id]);
+  }
+}
 #[test]
 fn test_observe_mmco5_field_pair_uses_normalized_reference_identity() {
   for bottom in [false, true] {

@@ -30,6 +30,56 @@ from tests.support.window import Window
 _CHROMIUM = Path("/usr/lib/chromium/chromium")
 
 
+def _alive(process: subprocess.Popen[bytes] | None) -> bool:
+    if process is None or process.returncode is not None:
+        return False
+    # Keep the session leader unreaped until all group signals are issued.
+    # Reaping while observing liveness would permit its PID/PGID to be reused.
+    return (
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None
+    )
+
+
+def _stop(process: subprocess.Popen[bytes]) -> Result[None]:
+    if process.returncode is not None:
+        return Ok(None)
+    failure: Rejected | None = None
+    group_present = True
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        group_present = False
+    except OSError as error:
+        failure = Rejected(error.errno or 0, f"stop owned browser: {error}")
+    if group_present:
+        deadline = time.monotonic() + 5
+        delay = 0.001
+        while _alive(process):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(delay, remaining))
+            delay = min(2 * delay, 0.05)
+        forced = _alive(process)
+        # The leader can exit while descendants ignore SIGTERM. Complete the
+        # group signal plan while its unreaped leader still owns the PGID.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            failure = Rejected(error.errno or 0, f"kill owned browser group: {error}")
+        if forced and failure is None:
+            failure = Rejected(errno.ETIMEDOUT, "owned browser required SIGKILL")
+    # Only terminal status permits reaping/releasing the leader. A second
+    # observation timeout after SIGKILL would not establish termination.
+    try:
+        _ = process.wait()
+    except OSError as error:
+        failure = Rejected(error.errno or 0, f"wait for owned browser: {error}")
+    return failure if failure is not None else Ok(None)
+
+
 class _Target(BaseModel):
     id: str
     type: str
@@ -54,7 +104,7 @@ class _Lease:
             if (
                 self.window is not None
                 and self.process is not None
-                and self.process.poll() is None
+                and _alive(self.process)
             ):
                 result = self.window.close()
                 if isinstance(result, Rejected):
@@ -64,23 +114,9 @@ class _Lease:
                 if channel is not None:
                     channel.close()
             if self.process is not None:
-                try:
-                    os.killpg(self.process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                except OSError as error:
-                    failure = Rejected(error.errno or 0, f"stop owned browser: {error}")
-                try:
-                    _ = self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(self.process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    _ = self.process.wait(timeout=5)
-                    failure = Rejected(
-                        errno.ETIMEDOUT, "owned browser required SIGKILL"
-                    )
+                stopped = _stop(self.process)
+                if isinstance(stopped, Rejected):
+                    failure = stopped
             if self.site is not None:
                 stopped = self.site.close()
                 if isinstance(stopped, Rejected):
@@ -132,7 +168,7 @@ class Browser:
 
     @property
     def alive(self) -> bool:
-        return self._lease.process is not None and self._lease.process.poll() is None
+        return _alive(self._lease.process)
 
     @property
     def window(self) -> Window:
@@ -187,9 +223,7 @@ def _open(
     endpoint = directory / "profile/DevToolsActivePort"
     deadline = time.monotonic() + timeout
     while (
-        not endpoint.exists()
-        and lease.process.poll() is None
-        and time.monotonic() < deadline
+        not endpoint.exists() and _alive(lease.process) and time.monotonic() < deadline
     ):
         time.sleep(0.02)
     if not endpoint.exists():

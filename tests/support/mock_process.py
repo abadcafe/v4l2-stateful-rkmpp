@@ -253,7 +253,9 @@ class Process:
                 _ = self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-                _ = self.process.wait(timeout=5)
+                # Observe actual termination before releasing the parent's
+                # FIFO, log and other owned resources.
+                _ = self.process.wait()
         self._lease.close()
 
     def __enter__(self) -> Process:

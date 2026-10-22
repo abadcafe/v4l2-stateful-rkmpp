@@ -4,10 +4,15 @@
 //! test_convert_pixels_saturation_fractional_mean_padding_and_odd_dimensions
 //! test_convert_distinct_buffer_lifetimes_preserve_all_pixels
 //! test_convert_4k_frame_preserves_pixels_and_padding
+//! test_submit_cpu_owned_source_is_rejected_and_releases_target
+//! test_submit_cpu_owned_target_alias_is_rejected_and_releases_source
+//! test_submit_reserves_both_images_until_completion_or_cancellation
+//! test_submit_independent_contexts_cannot_overlap_the_same_storage
+//! test_submit_regular_file_images_reject_and_allow_retry
 use std::os::fd::AsFd;
 
-use dma_buf::Buffer;
 use dma_buf::image::{Depth, Plane};
+use dma_buf::memory::Buffer;
 
 use crate::quantize::Quantizer;
 
@@ -282,4 +287,186 @@ fn test_submit_drop_waits_for_started_gpu_work_before_releasing_imports()
   assert!(
     target.read().unwrap()[..1536].iter().all(|value| *value == 37)
   );
+}
+
+#[test]
+fn test_submit_cpu_owned_source_is_rejected_and_releases_target() {
+  let source = Buffer::allocate(4096).unwrap();
+  let target = Buffer::allocate(4096).unwrap();
+  let mut quantizer =
+    Quantizer::new(&crate::quantize::Factory::default()).unwrap();
+  let cpu = source.write().unwrap();
+  let result = quantizer.submit(
+    Depth::Eight,
+    32,
+    32,
+    Plane::from_buffer(&source, 32, 32),
+    Plane::from_buffer(&target, 32, 32),
+  );
+  assert_eq!(
+    result.unwrap_err().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+  target.write().unwrap().finish().unwrap();
+  cpu.finish().unwrap();
+  quantizer
+    .convert(
+      Depth::Eight,
+      32,
+      32,
+      Plane::from_buffer(&source, 32, 32),
+      Plane::from_buffer(&target, 32, 32),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_submit_cpu_owned_target_alias_is_rejected_and_releases_source()
+{
+  let source = Buffer::allocate(4096).unwrap();
+  let target = Buffer::allocate(4096).unwrap();
+  let alias = Buffer::from_owned(
+    target.as_fd().try_clone_to_owned().unwrap(),
+    4096,
+  )
+  .unwrap();
+  let mut quantizer =
+    Quantizer::new(&crate::quantize::Factory::default()).unwrap();
+  let cpu = alias.read().unwrap();
+  let result = quantizer.submit(
+    Depth::Eight,
+    32,
+    32,
+    Plane::from_buffer(&source, 32, 32),
+    Plane::from_buffer(&target, 32, 32),
+  );
+  assert_eq!(
+    result.unwrap_err().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+  source.write().unwrap().finish().unwrap();
+  cpu.finish().unwrap();
+  quantizer
+    .convert(
+      Depth::Eight,
+      32,
+      32,
+      Plane::from_buffer(&source, 32, 32),
+      Plane::from_buffer(&target, 32, 32),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_submit_reserves_both_images_until_completion_or_cancellation() {
+  let source = Buffer::allocate(4096).unwrap();
+  let target = Buffer::allocate(4096).unwrap();
+  let mut quantizer =
+    Quantizer::new(&crate::quantize::Factory::default()).unwrap();
+  quantizer
+    .submit(
+      Depth::Eight,
+      32,
+      32,
+      Plane::from_buffer(&source, 32, 32),
+      Plane::from_buffer(&target, 32, 32),
+    )
+    .unwrap();
+  for buffer in [&source, &target] {
+    assert_eq!(
+      buffer.read().err().unwrap().kind(),
+      std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+      buffer.write().err().unwrap().kind(),
+      std::io::ErrorKind::WouldBlock
+    );
+  }
+  drop(quantizer);
+  source.write().unwrap().finish().unwrap();
+  target.write().unwrap().finish().unwrap();
+}
+
+#[test]
+fn test_submit_independent_contexts_cannot_overlap_the_same_storage() {
+  let source = Buffer::allocate(4096).unwrap();
+  let target = Buffer::allocate(4096).unwrap();
+  let other_target = Buffer::allocate(4096).unwrap();
+  source.write().unwrap().fill(29);
+  let factory = crate::quantize::Factory::default();
+  let mut first = Quantizer::new(&factory).unwrap();
+  let mut second = Quantizer::new(&factory).unwrap();
+  first
+    .submit(
+      Depth::Eight,
+      32,
+      32,
+      Plane::from_buffer(&source, 32, 32),
+      Plane::from_buffer(&target, 32, 32),
+    )
+    .unwrap();
+  assert_eq!(
+    second
+      .submit(
+        Depth::Eight,
+        32,
+        32,
+        Plane::from_buffer(&source, 32, 32),
+        Plane::from_buffer(&other_target, 32, 32),
+      )
+      .unwrap_err()
+      .kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+  other_target.write().unwrap().finish().unwrap();
+  while !first.finish().unwrap() {
+    std::thread::sleep(std::time::Duration::from_micros(100));
+  }
+  second
+    .convert(
+      Depth::Eight,
+      32,
+      32,
+      Plane::from_buffer(&source, 32, 32),
+      Plane::from_buffer(&other_target, 32, 32),
+    )
+    .unwrap();
+  assert!(
+    other_target.read().unwrap()[..1536].iter().all(|v| *v == 29)
+  );
+}
+
+#[test]
+fn test_submit_regular_file_images_reject_and_allow_retry() {
+  let nonce = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_nanos();
+  let path = std::env::temp_dir().join(format!(
+    "v4l2-rkmpp-quantize-regular-{}-{nonce}",
+    std::process::id()
+  ));
+  let regular = std::fs::File::create_new(&path).unwrap();
+  std::fs::remove_file(path).unwrap();
+  regular.set_len(4096).unwrap();
+  let source = Buffer::allocate(4096).unwrap();
+  let target = Buffer::allocate(4096).unwrap();
+  source.write().unwrap().fill(29);
+  let a = Plane::from_buffer(&source, 32, 32);
+  let b = Plane::from_buffer(&target, 32, 32);
+  let invalid = Plane::new(regular.as_fd(), 32, 32);
+  let mut quantizer =
+    Quantizer::new(&crate::quantize::Factory::default()).unwrap();
+  for (input, output) in [(invalid, b), (a, invalid)] {
+    target.write().unwrap().fill(0xa5);
+    assert!(
+      quantizer.submit(Depth::Eight, 32, 32, input, output).is_err()
+    );
+    assert_eq!(source.read().unwrap()[0], 29);
+    assert!(target.read().unwrap().iter().all(|byte| *byte == 0xa5));
+    quantizer.convert(Depth::Eight, 32, 32, a, b).unwrap();
+    assert!(
+      target.read().unwrap()[..1536].iter().all(|byte| *byte == 29)
+    );
+  }
 }

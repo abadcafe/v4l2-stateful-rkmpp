@@ -1,11 +1,11 @@
-//! module: dma_buf::persistent_tests; responsibility: define checked
-//! persistent input reads through the public mapping interface.
+//! module: dma_buf::memory::persistent_tests; responsibility: specify
+//! checked persistent input reads through the public mapping interface.
 //! operations: test entrypoints; entities: none; tests: read ownership
 //! and boundaries.
 use std::rc::Rc;
 
 use super::persistent::InputMap;
-use crate::Buffer;
+use crate::memory::Buffer;
 
 #[test]
 fn test_read_retains_mapping_and_lease_after_input_owner_drops() {

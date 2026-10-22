@@ -3,7 +3,7 @@
 //! is independently observable.
 use std::num::NonZeroU32;
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 use rkmpp::Decoder;
 
 use super::capture::CapturePool;

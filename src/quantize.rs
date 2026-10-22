@@ -28,7 +28,7 @@ use imports::Cache;
 use layout::Layout;
 
 struct Prepared {
-  buffers: imports::Pair,
+  buffers: imports::Reservation,
   layout: Layout,
   dependencies: [crate::fence::Fence; 2],
   next: usize,
@@ -79,18 +79,17 @@ impl Quantizer {
         "undersized or aliased conversion buffers",
       ));
     }
-    let source_ready =
-      crate::fence::Fence::new(Some(dma::export_read(source.fd())?));
-    let target_ready = crate::fence::Fence::new(Some(
-      dma::export_write(destination.fd())?,
-    ));
-    let buffers = self.imports.pair(source, destination)?;
-    self.prepared = Some(Prepared {
-      buffers,
-      layout,
-      dependencies: [source_ready, target_ready],
-      next: 0,
-    });
+    let pair = self.imports.pair(source, destination)?;
+    let (buffers, dependencies) = self.imports.reserve(pair, || {
+      Ok([
+        crate::fence::Fence::new(Some(dma::export_read(source.fd())?)),
+        crate::fence::Fence::new(Some(dma::export_write(
+          destination.fd(),
+        )?)),
+      ])
+    })?;
+    self.prepared =
+      Some(Prepared { buffers, layout, dependencies, next: 0 });
     Ok(())
   }
 

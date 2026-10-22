@@ -2,7 +2,7 @@
 //! MPP output buffer leases through the published module interfaces.
 //! operations: test entrypoints; entities: none; tests:
 //! acquire/index/drop.
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use super::group::Group;
 

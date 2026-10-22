@@ -98,6 +98,10 @@ mod order;
 mod order_tests;
 mod reference;
 #[cfg(test)]
+mod reference_field_tests;
+#[cfg(test)]
+mod reference_identity_tests;
+#[cfg(test)]
 mod reference_tests;
 
 mod poc;

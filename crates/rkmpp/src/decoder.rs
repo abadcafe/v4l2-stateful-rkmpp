@@ -7,7 +7,7 @@ use std::ffi::{c_char, c_void};
 use std::io;
 use std::ptr::NonNull;
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use super::api::Api;
 use super::frame::Frame;

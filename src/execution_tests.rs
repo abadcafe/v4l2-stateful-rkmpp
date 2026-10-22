@@ -1,7 +1,7 @@
 //! module: execution_tests; responsibility: specify bounded owned
 //! execution. operations: tests; entities: none; tests: lane isolation,
 //! thread affinity, cancellation before preparation, native panic
-//! propagation and shutdown.
+//! propagation, shutdown and reclamation under queue backpressure.
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -215,4 +215,46 @@ async fn test_close_drains_accepted_transactions_and_rejects_new_preparation()
       .is_err()
   );
   assert!(!prepared.get());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_reclaim_full_queue_collects_before_accepted_barrier() {
+  let pool = Pool::start(
+    "execution-reclaim",
+    limits(1, 1),
+    Vec::<std::sync::Weak<()>>::new,
+    |owners| owners.retain(|owner| owner.strong_count() != 0),
+  )
+  .unwrap();
+  let lane = pool.router().lane();
+  let owner = std::sync::Arc::new(());
+  let weak = std::sync::Arc::downgrade(&owner);
+  lane
+    .call(move |owners| {
+      owners.push(weak);
+      Ok(())
+    })
+    .await
+    .unwrap();
+  let (started, executing) = tokio::sync::oneshot::channel();
+  let (release, wait) = std::sync::mpsc::channel();
+  let blocked = lane
+    .schedule(|| {
+      move |_| {
+        let _ = started.send(());
+        wait.recv().unwrap();
+        Ok(())
+      }
+    })
+    .await
+    .unwrap();
+  executing.await.unwrap();
+  let barrier =
+    lane.schedule(|| |owners| Ok(owners.len())).await.unwrap();
+  drop(owner);
+  lane.reclaim();
+  release.send(()).unwrap();
+  blocked.await.unwrap();
+  assert_eq!(barrier.await.unwrap(), 0);
+  pool.close().await.unwrap();
 }

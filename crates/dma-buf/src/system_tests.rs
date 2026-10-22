@@ -13,7 +13,7 @@ use super::system;
 fn test_allocate_returns_cloexec_dma_buf_with_page_aligned_size() {
   let fd = system::allocate(4097).unwrap();
   let stat = system::metadata(fd.as_fd()).unwrap();
-  assert!(stat.st_size >= 4097);
+  assert!(stat.size() >= 4097);
   assert_ne!(
     unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) }
       & libc::FD_CLOEXEC,

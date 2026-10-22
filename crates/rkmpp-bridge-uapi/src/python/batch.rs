@@ -1,6 +1,9 @@
 //! module: batch; responsibility: own a Python Batch wire value.
 //! operations: typed fields, encoding and bounded record access;
 //! entities: Batch; tests: native_tests.
+use pyo3::Bound;
+use pyo3::types::{PyAnyMethods, PyInt};
+
 use super::record::record;
 use crate::wire as raw;
 record!(Batch, raw::Batch; arrays [replies, events, results];
@@ -11,29 +14,38 @@ record!(Batch, raw::Batch; arrays [replies, events, results];
     reserved => set_reserved: u32 = [reserved],
   }
   methods {
-    fn event(&self, index: usize) -> Option<super::message::Message> {
+    fn event(
+      &self,
+      index: &Bound<'_, PyInt>,
+    ) -> Option<super::message::Message> {
       self
         .raw
         .events
-        .get(index)
+        .get(index.extract::<usize>().ok()?)
         .copied()
         .map(|raw| super::message::Message { raw })
     }
 
-    fn reply(&self, index: usize) -> Option<super::message::Message> {
+    fn reply(
+      &self,
+      index: &Bound<'_, PyInt>,
+    ) -> Option<super::message::Message> {
       self
         .raw
         .replies
-        .get(index)
+        .get(index.extract::<usize>().ok()?)
         .copied()
         .map(|raw| super::message::Message { raw })
     }
 
     fn set_event(
       &mut self,
-      index: usize,
+      index: &Bound<'_, PyInt>,
       value: &super::message::Message,
     ) -> bool {
+      let Ok(index) = index.extract::<usize>() else {
+        return false;
+      };
       let Some(slot) = self.raw.events.get_mut(index) else {
         return false;
       };
@@ -43,9 +55,12 @@ record!(Batch, raw::Batch; arrays [replies, events, results];
 
     fn set_reply(
       &mut self,
-      index: usize,
+      index: &Bound<'_, PyInt>,
       value: &super::message::Message,
     ) -> bool {
+      let Ok(index) = index.extract::<usize>() else {
+        return false;
+      };
       let Some(slot) = self.raw.replies.get_mut(index) else {
         return false;
       };
@@ -53,15 +68,26 @@ record!(Batch, raw::Batch; arrays [replies, events, results];
       true
     }
 
-    fn result(&self, index: usize) -> Option<i32> {
-      self.raw.results.get(index).copied()
+    fn result(&self, index: &Bound<'_, PyInt>) -> Option<i32> {
+      self.raw.results
+        .get(index.extract::<usize>().ok()?)
+        .copied()
     }
 
-    fn results(&self, count: usize) -> Option<Vec<i32>> {
-      self.raw.results.get(..count).map(<[i32]>::to_vec)
+    fn results(&self, count: &Bound<'_, PyInt>) -> Option<Vec<i32>> {
+      self.raw.results
+        .get(..count.extract::<usize>().ok()?)
+        .map(<[i32]>::to_vec)
     }
 
-    fn set_result(&mut self, index: usize, value: i32) -> bool {
+    fn set_result(
+      &mut self,
+      index: &Bound<'_, PyInt>,
+      value: i32,
+    ) -> bool {
+      let Ok(index) = index.extract::<usize>() else {
+        return false;
+      };
       let Some(slot) = self.raw.results.get_mut(index) else {
         return false;
       };

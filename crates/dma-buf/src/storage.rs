@@ -1,4 +1,4 @@
-//! module: dma_buf::storage; responsibility: share CPU ownership by
+//! module: dma_buf::storage; responsibility: share access ownership by
 //! live allocation identity. operations: state; entities: Registry;
 //! tests: storage_tests. Weak entries do not extend storage lifetimes,
 //! and geometric collection amortizes registry scans across new

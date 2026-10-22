@@ -1,6 +1,6 @@
-//! module: dma_buf_tests; responsibility: define the corresponding
-//! public module contract. operations: Rust test entrypoints; entities:
-//! none; tests:
+//! module: dma_buf::memory_tests; responsibility: define the
+//! corresponding public module contract. operations: Rust test
+//! entrypoints; entities: none; tests:
 //! test_allocate_rejects_zero_size_without_allocating
 //! test_from_owned_rejects_file_smaller_than_claimed_size
 //! test_write_shared_ownership_and_cpu_access
@@ -9,7 +9,7 @@
 use std::fs::File;
 use std::os::fd::{AsFd, AsRawFd};
 
-use crate::Buffer;
+use crate::memory::Buffer;
 
 #[test]
 fn test_allocate_rejects_zero_size_without_allocating() {

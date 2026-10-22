@@ -3,7 +3,7 @@
 //! tests:
 //! test_new_unsupported_codec_fails_before_creating_decoder
 //! test_prepare_packet_bounds_and_empty_decoder_through_facade
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use crate::{Decoder, Input};
 

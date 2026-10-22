@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::descriptor::Lease;
 use crate::execution::{self, Limits, Pending, Pool as Executors};
-use crate::notify::Notify;
+use crate::notify::Listener;
 use crate::pool::{Direction, Pool as RegisteredPool};
 use crate::protocol::{Batch, MAX_BATCH, Message};
 use crate::readiness::Readable;
@@ -22,6 +22,8 @@ mod admission;
 #[cfg(test)]
 mod admission_tests;
 mod ioctl;
+#[cfg(test)]
+mod ioctl_tests;
 mod registration;
 #[cfg(test)]
 mod registration_tests;
@@ -33,7 +35,7 @@ struct Registration {
   id: u32,
 }
 enum Flight {
-  Exchange { result: Pending<Batch> },
+  Exchange { result: Pending<(Box<Batch>, io::Result<()>)> },
   Register { key: Registration, result: Pending<RegisteredPool> },
 }
 pub struct Session {
@@ -43,6 +45,9 @@ pub struct Session {
   // The request snapshot survives cancellation. Reuse its storage for
   // the whole session instead of allocating once per ioctl exchange.
   submitted: Vec<Message>,
+  // Move this owner through the execution lane, rather than copying
+  // an entire ABI batch into the job and back through its result.
+  exchange_buffer: Option<Box<Batch>>,
 }
 pub struct Broker {
   ready: Readable,
@@ -68,6 +73,7 @@ impl Session {
       client,
       flight: None,
       submitted: Vec::with_capacity(MAX_BATCH),
+      exchange_buffer: Some(Box::default()),
     })
   }
 
@@ -81,6 +87,12 @@ impl Session {
   ) -> io::Result<()> {
     crate::protocol::validate(batch)?;
     if self.flight.is_none() {
+      if self.exchange_buffer.is_none() {
+        return Err(io::Error::new(
+          io::ErrorKind::BrokenPipe,
+          "exchange executor lost its transaction buffer",
+        ));
+      }
       let lease = self.lease();
       let result = self
         .client
@@ -89,8 +101,17 @@ impl Session {
           self.submitted.extend_from_slice(
             &batch.replies[..batch.reply_count as usize],
           );
-          let owned = *batch;
-          move |_| ioctl::exchange(lease, owned)
+          let mut owned = self.exchange_buffer.take().unwrap();
+          owned.version = batch.version;
+          owned.reserved = batch.reserved;
+          owned.reply_count = batch.reply_count;
+          owned.event_count = batch.event_count;
+          owned.replies[..self.submitted.len()]
+            .copy_from_slice(&self.submitted);
+          move |_| {
+            let status = ioctl::exchange(lease, &mut owned);
+            Ok((owned, status))
+          }
         })
         .await?;
       self.flight = Some(Flight::Exchange { result });
@@ -105,7 +126,21 @@ impl Session {
     }
     let completed = result.await;
     self.flight = None;
-    *batch = completed?;
+    let (owned, status) = completed?;
+    self.exchange_buffer = Some(owned);
+    status?;
+    let response = self.exchange_buffer.as_ref().unwrap();
+    // The kernel ABI publishes only the header and counted output
+    // ranges. Unused slots and submitted replies are not outputs.
+    batch.version = response.version;
+    batch.reserved = response.reserved;
+    batch.reply_count = response.reply_count;
+    batch.event_count = response.event_count;
+    let events = response.event_count as usize;
+    let replies = response.reply_count as usize;
+    batch.events[..events].copy_from_slice(&response.events[..events]);
+    batch.results[..replies]
+      .copy_from_slice(&response.results[..replies]);
     Ok(())
   }
 
@@ -141,13 +176,12 @@ impl Session {
 
   pub async fn wait(
     &self,
-    notify: &Notify,
-    notification: &Readable,
+    notification: &Listener,
     shutdown: &Shutdown,
   ) -> io::Result<bool> {
     tokio::select! {
       result = self.ready.wait() => { result?; Ok(true) },
-      result = notification.wait() => { result?; notify.drain()?; Ok(false) },
+      result = notification.wait() => { result?; Ok(false) },
       () = shutdown.cancelled() => Ok(false),
     }
   }

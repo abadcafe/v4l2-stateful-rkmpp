@@ -1,4 +1,4 @@
-//! module: rpc_tests; responsibility: specify mock reply ownership.
+//! module: rpc_tests; responsibility: specify mock RPC transactions.
 //! operations: tests; entities: none; all tests use module public API.
 use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -6,6 +6,103 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use super::rpc::decode;
+
+#[test]
+fn test_intercept_preserves_one_packet_for_zero_and_maximum_ioctl_extents()
+ {
+  const CHILD: &str = "RKMPP_REQUEST_EXTENTS_CHILD";
+  const SIZES: [usize; 3] = [0, 4, 0x3fff];
+  if std::env::var_os(CHILD).is_some() {
+    for size in SIZES {
+      let mut body: Vec<u8> =
+        (0..size).map(|index| index as u8 ^ 0xa5).collect();
+      let command = (3 << 30) | ((size as u64) << 16) | 0x5284;
+      // SAFETY: body owns the exact command extent for exclusive
+      // copyout; zero-sized requests do not dereference their pointer.
+      assert_eq!(
+        unsafe {
+          super::rpc::intercept(0, command, body.as_mut_ptr() as usize)
+        }
+        .unwrap(),
+        Some(0)
+      );
+      assert!(
+        body
+          .iter()
+          .enumerate()
+          .all(|(index, &byte)| byte == index as u8 ^ 0x25)
+      );
+    }
+    return;
+  }
+  let [receiver, sender] = seqpacket();
+  let child = std::process::Command::new(std::env::current_exe().unwrap())
+    .args(["--exact", "rpc_tests::test_intercept_preserves_one_packet_for_zero_and_maximum_ioctl_extents", "--nocapture"])
+    .env(CHILD, "1")
+    .env("RKMPP_TEST_KERNEL_SOCKET", "")
+    .env("RKMPP_TEST_KERNEL_CONTROL", "/unused-test-control")
+    .stdin(std::process::Stdio::from(receiver))
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn().unwrap();
+  for size in SIZES {
+    let mut ready = libc::pollfd {
+      fd: sender.as_raw_fd(),
+      events: libc::POLLIN,
+      revents: 0,
+    };
+    // SAFETY: ready is writable for the one advertised record.
+    assert_eq!(unsafe { libc::poll(&mut ready, 1, 5000) }, 1);
+    let mut request = [0u8; 32 + 0x3fff + 1];
+    // SAFETY: request owns writable storage larger than any admitted
+    // request; recv returns one SOCK_SEQPACKET message.
+    let length = unsafe {
+      libc::recv(
+        sender.as_raw_fd(),
+        request.as_mut_ptr().cast(),
+        request.len(),
+        0,
+      )
+    };
+    assert_eq!(length, (32 + size) as isize);
+    assert_eq!(&request[..4], &0x324d4252u32.to_le_bytes());
+    assert_eq!(&request[4..8], &1u32.to_le_bytes());
+    assert_eq!(
+      &request[8..16],
+      &((3u64 << 30) | ((size as u64) << 16) | 0x5284).to_le_bytes()
+    );
+    assert_eq!(&request[16..20], &(size as u32).to_le_bytes());
+    assert_eq!(&request[20..32], &[0; 12]);
+    assert!(
+      request[32..32 + size]
+        .iter()
+        .enumerate()
+        .all(|(index, &byte)| byte == index as u8 ^ 0xa5)
+    );
+    let body: Vec<u8> =
+      (0..size).map(|index| index as u8 ^ 0x25).collect();
+    let reply = packet(0, &body, 0, &[]);
+    // SAFETY: reply owns readable bytes for this synchronous send.
+    assert_eq!(
+      unsafe {
+        libc::send(
+          sender.as_raw_fd(),
+          reply.as_ptr().cast(),
+          reply.len(),
+          libc::MSG_NOSIGNAL,
+        )
+      },
+      reply.len() as isize
+    );
+  }
+  let output = child.wait_with_output().unwrap();
+  assert!(
+    output.status.success(),
+    "{}{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+}
 
 #[test]
 fn test_intercept_empty_descriptor_message_closes_received_owners() {
@@ -26,22 +123,7 @@ fn test_intercept_empty_descriptor_message_closes_received_owners() {
     assert_eq!(count(), before, "empty message leaked SCM_RIGHTS");
     return;
   }
-  let mut pair = [-1; 2];
-  // SAFETY: pair provides space for both newly created descriptors.
-  assert_eq!(
-    unsafe {
-      libc::socketpair(
-        libc::AF_UNIX,
-        libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
-        0,
-        pair.as_mut_ptr(),
-      )
-    },
-    0
-  );
-  // SAFETY: socketpair transferred unique ownership of both fds.
-  let [receiver, sender] =
-    pair.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+  let [receiver, sender] = seqpacket();
   let child = std::process::Command::new(std::env::current_exe().unwrap())
     .args(["--exact", "rpc_tests::test_intercept_empty_descriptor_message_closes_received_owners", "--nocapture"])
     .env(CHILD, "1")
@@ -56,10 +138,15 @@ fn test_intercept_empty_descriptor_message_closes_received_owners() {
   let size = unsafe { libc::CMSG_SPACE(4) } as usize;
   let mut control =
     vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
-  // SAFETY: zero is a valid empty msghdr; no payload is sent.
-  let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
-  message.msg_control = control.as_mut_ptr().cast();
-  message.msg_controllen = size;
+  let message = libc::msghdr {
+    msg_name: std::ptr::null_mut(),
+    msg_namelen: 0,
+    msg_iov: std::ptr::null_mut(),
+    msg_iovlen: 0,
+    msg_control: control.as_mut_ptr().cast(),
+    msg_controllen: size,
+    msg_flags: 0,
+  };
   // SAFETY: the aligned control buffer contains one complete header
   // and descriptor; sendmsg borrows them only for this call.
   unsafe {
@@ -82,6 +169,24 @@ fn test_intercept_empty_descriptor_message_closes_received_owners() {
     String::from_utf8_lossy(&output.stdout),
     String::from_utf8_lossy(&output.stderr)
   );
+}
+
+fn seqpacket() -> [OwnedFd; 2] {
+  let mut pair = [-1; 2];
+  // SAFETY: pair owns writable space for two new socket descriptors.
+  assert_eq!(
+    unsafe {
+      libc::socketpair(
+        libc::AF_UNIX,
+        libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+        0,
+        pair.as_mut_ptr(),
+      )
+    },
+    0
+  );
+  // SAFETY: socketpair uniquely transferred both descriptors.
+  pair.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 fn packet(

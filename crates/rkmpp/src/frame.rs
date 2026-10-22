@@ -97,9 +97,7 @@ impl Frame {
   /// no other owner may mutate or deinitialize it after this call.
   pub(super) unsafe fn from_raw(handle: *mut c_void) -> Option<Self> {
     let frame = RawFrame(NonNull::new(handle)?);
-    // SAFETY: the transferred frame is initialized and exclusively
-    // owned.
-    let info = unsafe { Self::describe(handle) };
+    let info = Self::describe(&frame);
     let buffer = unsafe { mpp_frame_get_buffer(handle) };
     let storage = if buffer.is_null() {
       Storage::Empty(frame)
@@ -123,7 +121,8 @@ impl Frame {
     self.info
   }
 
-  unsafe fn describe(frame: *mut c_void) -> FrameInfo {
+  fn describe(owner: &RawFrame) -> FrameInfo {
+    let frame = owner.0.as_ptr();
     // SAFETY: this owner holds the frame for every getter, with no
     // simultaneous mutation.
     FrameInfo {

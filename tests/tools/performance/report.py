@@ -134,9 +134,13 @@ def summarize(samples: Sequence[Sample], warmup_seconds: float) -> Result[Utiliz
             return result
         mpp[key] = result.value
     gpu = describe([sample.gpu_percent for sample in steady])
-    frequency = describe([float(sample.gpu_frequency) for sample in steady])
     if isinstance(gpu, Rejected):
         return gpu
+    try:
+        frequencies = [float(sample.gpu_frequency) for sample in steady]
+    except OverflowError:
+        return Rejected(errno.EINVAL, "GPU frequency exceeds floating-point range")
+    frequency = describe(frequencies)
     if isinstance(frequency, Rejected):
         return frequency
     return Ok(

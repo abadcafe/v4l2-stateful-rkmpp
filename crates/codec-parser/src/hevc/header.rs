@@ -5,7 +5,7 @@
 use std::io;
 
 use crate::ffi;
-use crate::header::{Hevc, Long};
+use crate::header::{Hevc, Long, Short};
 pub(super) fn own(
   nal: &ffi::GstH265NalUnit,
   slice: &ffi::GstH265SliceHdr,
@@ -24,18 +24,20 @@ pub(super) fn own(
     } else {
       &slice.short_term_ref_pic_sets
     };
-    short.extend_from_slice(
-      rps
-        .deltapocs0
-        .get(..rps.numnegativepics as usize)
-        .ok_or_else(invalid)?,
-    );
-    short.extend_from_slice(
-      rps
-        .deltapocs1
-        .get(..rps.numpositivepics as usize)
-        .ok_or_else(invalid)?,
-    );
+    let negative = rps.numnegativepics as usize;
+    let positive = rps.numpositivepics as usize;
+    let before = rps.deltapocs0.get(..negative).ok_or_else(invalid)?;
+    let before_used =
+      rps.usedbycurrpics0.get(..negative).ok_or_else(invalid)?;
+    let after = rps.deltapocs1.get(..positive).ok_or_else(invalid)?;
+    let after_used =
+      rps.usedbycurrpics1.get(..positive).ok_or_else(invalid)?;
+    short = before
+      .iter()
+      .zip(before_used)
+      .chain(after.iter().zip(after_used))
+      .map(|(&delta, &used)| Short { delta, used: used != 0 })
+      .collect();
     let from_sps = usize::from(slice.num_long_term_sps);
     let count = from_sps + usize::from(slice.num_long_term_pics);
     if count > slice.lt_idx_sps.len() {
@@ -64,7 +66,16 @@ pub(super) fn own(
       } else {
         cycle.checked_add(delta).ok_or_else(invalid)?
       };
-      long.push(Long { lsb, cycle: present.then_some(cycle) });
+      let used = if i < from_sps {
+        *sps
+          .used_by_curr_pic_lt_sps_flag
+          .get(usize::from(slice.lt_idx_sps[i]))
+          .ok_or_else(invalid)?
+          != 0
+      } else {
+        *slice.used_by_curr_pic_lt_flag.get(i).ok_or_else(invalid)? != 0
+      };
+      long.push(Long { lsb, cycle: present.then_some(cycle), used });
     }
   }
   Ok(Hevc {

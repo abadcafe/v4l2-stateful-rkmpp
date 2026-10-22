@@ -1,11 +1,12 @@
 [workspace]
 members = [".", "crates/*"]
-default-members = ["."]
 resolver = "3"
 
 [workspace.dependencies]
 libc = "=0.2.189"
 bindgen = { version = "=0.73.2", default-features = false, features = ["runtime", "prettyplease"] }
+shlex = "2"
+pkg-config = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 dma-buf = { path = "crates/dma-buf" }
 rkmpp = { path = "crates/rkmpp" }

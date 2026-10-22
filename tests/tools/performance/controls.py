@@ -51,6 +51,11 @@ class Controls:
         if interval_ms <= 0 or minimum_hz is not None and minimum_hz <= 0:
             return Rejected(errno.EINVAL, "invalid measurement controls")
         try:
+            requested_minimum = str(minimum_hz) if minimum_hz is not None else None
+            requested_interval = str(interval_ms)
+        except ValueError:
+            return Rejected(errno.EINVAL, "measurement controls exceed decimal limit")
+        try:
             minimum = paths.minimum.read_text()
             interval = paths.interval.read_text()
             maximum = paths.maximum.read_text()
@@ -75,11 +80,11 @@ class Controls:
         )
         result: Result[Controls] | None = None
         try:
-            if minimum_hz is not None:
+            if requested_minimum is not None:
                 owner._frequency_changed = True
-                _ = paths.minimum.write_text(str(minimum_hz))
+                _ = paths.minimum.write_text(requested_minimum)
             owner._interval_changed = True
-            _ = paths.interval.write_text(str(interval_ms))
+            _ = paths.interval.write_text(requested_interval)
             result = Ok(owner)
         except OSError as error:
             message = f"write measurement controls: {error}; apply ../armbian-binary-pkgbuilds/v4l2-stateful-rkmpp/70-v4l2-stateful-rkmpp.rules and use the video group"

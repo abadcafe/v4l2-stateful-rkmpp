@@ -103,3 +103,14 @@ def test_send_closed_descriptor_is_rejected_without_receiver_ownership() -> None
         os.close(fd)
         result = left.send(b"packet", (fd,))
         assert isinstance(result, Rejected) and result.code == errno.EBADF
+
+
+@pytest.mark.parametrize("fd", [-(1 << 128), -1, 1 << 31, 1 << 128])
+def test_send_unrepresentable_descriptor_is_rejected_without_sending(fd: int) -> None:
+    left, right = accepted(Socket.pair())
+    with left, right:
+        result = left.send(b"invalid", (fd,))
+        assert isinstance(result, Rejected) and result.code == errno.EBADF
+        accepted(left.send(b"after"))
+        with accepted(right.receive()) as message:
+            assert message.body == b"after" and message.fds == ()

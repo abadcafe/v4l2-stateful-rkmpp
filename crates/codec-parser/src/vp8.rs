@@ -3,17 +3,17 @@
 //! validate; entities: Validator; tests: vp8_tests.
 use std::io;
 
-use super::ffi;
+mod native;
+#[cfg(test)]
+mod native_tests;
+
 pub(crate) struct Validator {
-  parser: ffi::GstVp8Parser,
+  parser: native::Parser,
   needs_keyframe: bool,
 }
 impl Validator {
   pub(crate) fn new() -> io::Result<Self> {
-    // SAFETY: this public C value is initialized by the parser API.
-    let mut parser = Default::default();
-    unsafe { ffi::gst_vp8_parser_init(&mut parser) };
-    Ok(Self { parser, needs_keyframe: true })
+    Ok(Self { parser: native::Parser::new(), needs_keyframe: true })
   }
 
   pub(crate) fn validate(
@@ -30,34 +30,28 @@ impl Validator {
       self.needs_keyframe = true;
       return Err(invalid());
     }
-    // SAFETY: parser and output are owned C values; the slice is live
-    // throughout the synchronous call and is never retained.
-    let mut header: ffi::GstVp8FrameHdr = Default::default();
-    let status = unsafe {
-      ffi::gst_vp8_parser_parse_frame_header(
-        &mut self.parser,
-        &mut header,
-        bytes.as_ptr(),
-        bytes.len() as _,
-      )
+    let header = match self.parser.frame(bytes) {
+      Ok(header)
+        if u64::from(header.header_bits)
+          <= u64::from(header.partition_bytes) * 8
+          && (!header.key_frame
+            || header.width != 0 && header.height != 0) =>
+      {
+        header
+      }
+      _ => {
+        self.parser.reset();
+        self.needs_keyframe = true;
+        return Err(invalid());
+      }
     };
-    if status != 0
-      || u64::from(header.header_size)
-        > u64::from(header.first_part_size) * 8
-      || (header.key_frame != 0
-        && (header.width == 0 || header.height == 0))
-    {
-      unsafe { ffi::gst_vp8_parser_init(&mut self.parser) };
-      self.needs_keyframe = true;
-      return Err(invalid());
-    }
     self.needs_keyframe = false;
     Ok(super::unit::Unit {
       prefix: 0,
       header: None,
       boundary: None,
       range: 0..bytes.len(),
-      display: header.show_frame != 0,
+      display: header.display,
     })
   }
 }

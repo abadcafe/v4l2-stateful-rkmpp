@@ -1,7 +1,7 @@
 //! module: codec_parser::h264; responsibility: validate one
 //! client-framed H.264 AU or metadata packet. operations: new,
-//! validate; entities: Validator, Identity; tests: h264_tests. Picture
-//! boundaries follow 7.4.1.2.4.
+//! validate; entities: Validator, Identity, Pending; tests: h264_tests.
+//! Picture boundaries follow 7.4.1.2.4.
 use std::collections::BTreeMap;
 use std::io;
 use std::ptr::NonNull;
@@ -25,6 +25,30 @@ struct Identity {
   lsb: u16,
   delta: (i32, [i32; 2]),
 }
+struct Pending {
+  sequence: Rc<Sequence>,
+  frame: u32,
+  field: Option<bool>,
+  lsb: u32,
+  bottom_delta: i32,
+  delta: [i32; 2],
+}
+impl Pending {
+  fn complete(
+    self,
+    marking: super::header::Marking,
+  ) -> super::header::H264 {
+    super::header::H264 {
+      sequence: self.sequence,
+      frame: self.frame,
+      field: self.field,
+      lsb: self.lsb,
+      bottom_delta: self.bottom_delta,
+      delta: self.delta,
+      marking,
+    }
+  }
+}
 pub(super) struct Validator {
   parser: NonNull<ffi::GstH264NalParser>,
   sets: Parameters,
@@ -38,7 +62,12 @@ impl Validator {
         sets: Parameters::default(),
         sequences: BTreeMap::new(),
       })
-      .ok_or_else(invalid)
+      .ok_or_else(|| {
+        io::Error::new(
+          io::ErrorKind::OutOfMemory,
+          "allocate native H264 parser",
+        )
+      })
   }
 
   pub(super) fn configuration(&self) -> Vec<u8> {
@@ -49,7 +78,11 @@ impl Validator {
     &mut self,
     bytes: &[u8],
   ) -> io::Result<super::unit::Unit> {
-    let result = self.inspect(bytes);
+    // Inspection only interprets input. Classify its syntax failures
+    // before recovery, whose native allocation can fail independently.
+    let result = self.inspect(bytes).map_err(|error| {
+      io::Error::new(io::ErrorKind::InvalidData, error)
+    });
     if result.is_err() {
       let configuration = self.configuration();
       let mut restored = Self::new()?;
@@ -69,7 +102,7 @@ impl Validator {
     let mut sequences = BTreeMap::new();
     let mut offset = 0;
     let mut identity = None;
-    let mut markings = Markings::default();
+    let mut picture: Option<(Pending, Markings)> = None;
     let mut unit = super::unit::Unit::annexb(bytes.len());
     while offset < bytes.len() {
       if bytes[offset..].iter().all(|&b| b == 0) {
@@ -137,33 +170,34 @@ impl Validator {
           {
             return Err(invalid());
           }
-          let marking = markings.admit(&nal, &slice)?;
-          if unit.header.is_none() {
+          if let Some((_, markings)) = &mut picture {
+            markings.admit(&nal, &slice)?;
+          } else {
+            let markings = Markings::new(&nal, &slice)?;
             unit.prefix = nal.sc_offset as usize;
             // PPS belongs to this parser and was checked above. Copy
             // only owned scalar syntax, never its address.
             let pps = unsafe { &*slice.pps };
-            unit.header =
-              Some(super::header::Header::H264(super::header::H264 {
-                sequence: {
-                  let sps = unsafe { pps.sequence.as_ref() }
-                    .ok_or_else(invalid)?;
-                  let id =
-                    u32::try_from(sps.id).map_err(|_| invalid())?;
-                  sequences
-                    .get(&id)
-                    .or_else(|| self.sequences.get(&id))
-                    .ok_or_else(invalid)?
-                    .clone()
-                },
-                frame: u32::from(slice.frame_num),
-                field: (slice.field_pic_flag != 0)
-                  .then_some(slice.bottom_field_flag != 0),
-                lsb: u32::from(slice.pic_order_cnt_lsb),
-                bottom_delta: slice.delta_pic_order_cnt_bottom,
-                delta: slice.delta_pic_order_cnt,
-                marking: marking.clone(),
-              }));
+            let pending = Pending {
+              sequence: {
+                let sps = unsafe { pps.sequence.as_ref() }
+                  .ok_or_else(invalid)?;
+                let id =
+                  u32::try_from(sps.id).map_err(|_| invalid())?;
+                sequences
+                  .get(&id)
+                  .or_else(|| self.sequences.get(&id))
+                  .ok_or_else(invalid)?
+                  .clone()
+              },
+              frame: u32::from(slice.frame_num),
+              field: (slice.field_pic_flag != 0)
+                .then_some(slice.bottom_field_flag != 0),
+              lsb: u32::from(slice.pic_order_cnt_lsb),
+              bottom_delta: slice.delta_pic_order_cnt_bottom,
+              delta: slice.delta_pic_order_cnt,
+            };
+            picture = Some((pending, markings));
           }
 
           identity = Some(current);
@@ -210,6 +244,11 @@ impl Validator {
         .collect::<Vec<_>>(),
     )?;
     self.sequences.extend(sequences);
+    if let Some((pending, markings)) = picture {
+      unit.header = Some(super::header::Header::H264(
+        pending.complete(markings.finish()),
+      ));
+    }
     Ok(unit)
   }
 }

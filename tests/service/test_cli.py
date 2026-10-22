@@ -11,6 +11,7 @@ CLI behavior belongs to process acceptance, not Rust module tests.
 import os
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -108,14 +109,19 @@ def test_cli_diagnostic_startup_failure_preserves_occupied_path(
     assert endpoint.read_bytes() == b"preserve"
 
 
-def test_hardware_executor_creation_failure_exits_and_removes_endpoint(
-    executable: Path, tmp_path: Path
+@pytest.mark.parametrize("phase", ["control", "hardware"])
+def test_executor_creation_failure_cleans_its_startup_stage(
+    executable: Path, tmp_path: Path, phase: Literal["control", "hardware"]
 ) -> None:
     control = tmp_path / "control"
     os.mkfifo(control, mode=0o600)
     endpoint = tmp_path / "status"
-    marker = tmp_path / "thread-failure"
-    marker.touch()
+    assert not endpoint.exists()
+    # The diagnostics socket is a public startup milestone. Using it as the
+    # marker admits transport threads and rejects the later hardware pool.
+    marker = endpoint if phase == "hardware" else tmp_path / "thread-failure"
+    if phase == "control":
+        marker.touch()
     library = executable.parent.parent / "debug/libv4l2_rkmpp_kernel_mock.so"
     assert library.is_file()
     environment = dict(os.environ)
@@ -131,6 +137,8 @@ def test_hardware_executor_creation_failure_exits_and_removes_endpoint(
         timeout=5,
         check=False,
     )
-    assert result.returncode != 0
+    assert result.returncode == 1
     assert "spawn worker thread" in result.stderr
+    context = "open control " if phase == "control" else "spawn worker thread:"
+    assert result.stderr.startswith(context)
     assert not endpoint.exists()

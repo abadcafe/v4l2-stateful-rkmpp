@@ -144,7 +144,9 @@ def _stop(
                     )
             except subprocess.TimeoutExpired:
                 process.kill()
-                _ = process.wait(timeout=5)
+                # Keep ownership until terminal status is actually observed.
+                # A second deadline cannot establish that SIGKILL completed.
+                _ = process.wait()
                 failure = Rejected(errno.ETIMEDOUT, "owned service required SIGKILL")
     except OSError as error:
         failure = Rejected(error.errno or 0, f"stop owned service: {error}")

@@ -1,6 +1,9 @@
 //! module: pool; responsibility: own a Python Pool wire value.
 //! operations: typed fields, encoding and bounded record access;
 //! entities: Pool; tests: native_tests.
+use pyo3::Bound;
+use pyo3::types::{PyAnyMethods, PyInt};
+
 use super::record::record;
 use crate::wire as raw;
 record!(Pool, raw::Pool; arrays [buffers];
@@ -15,21 +18,24 @@ record!(Pool, raw::Pool; arrays [buffers];
   methods {
     fn descriptor(
       &self,
-      index: usize,
+      index: &Bound<'_, PyInt>,
     ) -> Option<super::descriptor::Descriptor> {
       self
         .raw
         .buffers
-        .get(index)
+        .get(index.extract::<usize>().ok()?)
         .copied()
         .map(|raw| super::descriptor::Descriptor { raw })
     }
 
     fn set_descriptor(
       &mut self,
-      index: usize,
+      index: &Bound<'_, PyInt>,
       value: &super::descriptor::Descriptor,
     ) -> bool {
+      let Ok(index) = index.extract::<usize>() else {
+        return false;
+      };
       let Some(slot) = self.raw.buffers.get_mut(index) else {
         return false;
       };
@@ -38,7 +44,8 @@ record!(Pool, raw::Pool; arrays [buffers];
     }
 
     #[staticmethod]
-    fn descriptor_offset(index: usize) -> Option<usize> {
+    fn descriptor_offset(index: &Bound<'_, PyInt>) -> Option<usize> {
+      let index = index.extract::<usize>().ok()?;
       (index < raw::RB_MAX_BUFFERS as usize).then(|| {
         std::mem::offset_of!(raw::Pool, buffers)
           + index * std::mem::size_of::<raw::Descriptor>()

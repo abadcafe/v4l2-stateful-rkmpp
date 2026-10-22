@@ -4,15 +4,13 @@
 //! Dependency traits belong to their scheduling consumer.
 use std::collections::VecDeque;
 use std::io;
-use std::os::fd::AsFd;
 
-use crate::notify::Notify;
+use crate::notify::{Listener, Notify};
 use crate::pool::{Direction, Pool};
 use crate::protocol::command::{Action, Command, Stop};
 use crate::protocol::{
   Batch, Event, MAX_BATCH, Message, Reply, VERSION,
 };
-use crate::readiness::Readable;
 use crate::shutdown::Shutdown;
 pub(super) trait Channel {
   async fn exchange(&mut self, batch: &mut Batch) -> io::Result<()>;
@@ -24,8 +22,7 @@ pub(super) trait Channel {
   ) -> io::Result<Pool>;
   async fn wait(
     &mut self,
-    notify: &Notify,
-    notification: &Readable,
+    notification: &Listener,
     shutdown: &Shutdown,
   ) -> io::Result<bool>;
 }
@@ -55,11 +52,6 @@ pub(super) async fn run(
   mut backend: impl Engine,
   shutdown: &Shutdown,
 ) -> Result<Statistics, String> {
-  let notify = backend.notification();
-  let notification = Readable::new(
-    notify.as_fd().try_clone_to_owned().map_err(|e| e.to_string())?,
-  )
-  .map_err(|e| e.to_string())?;
   let mut current = Message::default();
   let mut pools = [0u32; 2];
   let mut fetch = true;
@@ -70,6 +62,8 @@ pub(super) async fn run(
     (0u64, 0u64, 0u64, 0u64);
   let mut batch = Batch { version: VERSION, ..Default::default() };
   let result = (async {
+    let notification =
+      backend.notification().listen().map_err(|e| e.to_string())?;
     loop {
       if shutdown.stopping() {
         return Ok(());
@@ -187,7 +181,7 @@ pub(super) async fn run(
         continue;
       }
       let ready = tokio::select! {
-        ready = control.wait(&notify, &notification, shutdown) => ready,
+        ready = control.wait(&notification, shutdown) => ready,
         ready = backend.wait() => ready.map(|()| false),
       };
       match ready {

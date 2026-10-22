@@ -9,7 +9,7 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd};
 use std::ptr::NonNull;
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use super::reservation::Reservation;
 #[repr(C)]

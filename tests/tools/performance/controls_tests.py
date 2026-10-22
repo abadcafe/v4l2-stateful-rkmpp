@@ -5,6 +5,7 @@ Temporary files substitute the public sysfs/procfs interface; hardware is untouc
 """
 
 import errno
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,39 @@ def test_open_normal_gpu_policy_only_changes_sampling_period(paths: Paths) -> No
     assert control.settings.requested_minimum_hz is None
     assert accepted(control.close()) is None
     assert paths.interval.read_text() == "0\n"
+
+
+@pytest.mark.parametrize("frequency", [None, 1000000000])
+def test_open_unrenderable_interval_rejects_before_any_control_write(
+    paths: Paths, monkeypatch: pytest.MonkeyPatch, frequency: int | None
+) -> None:
+    original_limit = sys.get_int_max_str_digits()
+    writes: list[Path] = []
+    write = Path.write_text
+
+    def record(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        writes.append(path)
+        return write(path, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", record)
+    try:
+        sys.set_int_max_str_digits(sys.int_info.str_digits_check_threshold)
+        interval = 1 << (4 * sys.int_info.str_digits_check_threshold)
+        result = Controls.open(frequency, interval, paths)
+        assert isinstance(result, Rejected) and result.code == errno.EINVAL
+        assert not writes
+        assert paths.minimum.read_text() == "200000000\n"
+        assert paths.interval.read_text() == "0\n"
+    finally:
+        sys.set_int_max_str_digits(original_limit)
+    control = accepted(Controls.open(frequency, 1000, paths))
+    assert accepted(control.close()) is None
 
 
 def test_open_fixed_frequency_and_close_restore_exact_values(paths: Paths) -> None:

@@ -5,9 +5,11 @@
 //! signal callbacks.
 use std::io;
 use std::marker::PhantomData;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::rc::Rc;
 use std::time::Duration;
+
+use crate::descriptor::Lease;
 #[derive(Clone)]
 pub struct Shutdown(tokio::sync::watch::Sender<bool>);
 impl Shutdown {
@@ -26,7 +28,7 @@ impl Shutdown {
 }
 pub struct Signals {
   shutdown: Shutdown,
-  fd: OwnedFd,
+  fd: Lease,
   ready: std::cell::OnceCell<crate::readiness::Readable>,
   old_mask: libc::sigset_t,
   _same_thread: PhantomData<Rc<()>>,
@@ -57,7 +59,7 @@ impl Signals {
     }
     Ok(Self {
       shutdown: Shutdown(tokio::sync::watch::channel(false).0),
-      fd: unsafe { OwnedFd::from_raw_fd(raw) },
+      fd: Lease::new(unsafe { OwnedFd::from_raw_fd(raw) }),
       ready: std::cell::OnceCell::new(),
       old_mask,
       _same_thread: PhantomData,
@@ -94,9 +96,8 @@ impl Signals {
   /// backoff.
   pub async fn wait(&self, duration: Duration) -> io::Result<()> {
     if self.ready.get().is_none() {
-      let ready = crate::readiness::Readable::new(
-        self.as_fd().try_clone_to_owned()?,
-      )?;
+      let ready =
+        crate::readiness::Readable::from_lease(self.fd.clone())?;
       let _ = self.ready.set(ready);
     }
     let ready = self.ready.get().unwrap();
@@ -105,11 +106,6 @@ impl Signals {
       () = self.shutdown.cancelled() => Ok(()),
       () = tokio::time::sleep(duration) => Ok(()),
     }
-  }
-}
-impl AsFd for Signals {
-  fn as_fd(&self) -> BorrowedFd<'_> {
-    self.fd.as_fd()
   }
 }
 fn termination_mask() -> libc::sigset_t {

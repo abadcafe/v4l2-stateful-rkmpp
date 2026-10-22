@@ -7,6 +7,7 @@ use std::io;
 use std::num::NonZeroU32;
 
 use rkmpp::{Decoder, Packet};
+use rkmpp_bridge_uapi::wire::Flags;
 
 use crate::frontend::Frontend;
 use crate::notify::Notify;
@@ -114,7 +115,7 @@ impl Backend {
       // all of this input's synchronous decode tasks. InputPool owns
       // the lease; no second completion/order ledger is needed.
       if self.inputs.complete(message.index as usize)? {
-        message.flags |= Message::FRAME_ERROR;
+        message.flags |= Flags::FrameError as u32;
       }
       self.inputs.id()
     } else {

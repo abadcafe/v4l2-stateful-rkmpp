@@ -30,7 +30,12 @@ impl Validator {
         sets: Parameters::default(),
         sequences: BTreeMap::new(),
       })
-      .ok_or_else(invalid)
+      .ok_or_else(|| {
+        io::Error::new(
+          io::ErrorKind::OutOfMemory,
+          "allocate native HEVC parser",
+        )
+      })
   }
 
   pub(super) fn configuration(&self) -> Vec<u8> {
@@ -41,7 +46,11 @@ impl Validator {
     &mut self,
     bytes: &[u8],
   ) -> io::Result<super::unit::Unit> {
-    let result = self.inspect(bytes);
+    // Inspection only interprets input. Classify its syntax failures
+    // before recovery, whose native allocation can fail independently.
+    let result = self.inspect(bytes).map_err(|error| {
+      io::Error::new(io::ErrorKind::InvalidData, error)
+    });
     if result.is_err() {
       let configuration = self.configuration();
       let mut restored = Self::new()?;
@@ -60,7 +69,7 @@ impl Validator {
     let mut changes = BTreeMap::new();
     let mut sequences = BTreeMap::new();
     let mut offset = 0;
-    let mut picture = None;
+    let mut picture: Option<Picture> = None;
     let mut unit = super::unit::Unit::annexb(bytes.len());
     while offset < bytes.len() {
       if bytes[offset..].iter().all(|&b| b == 0) {
@@ -87,6 +96,8 @@ impl Validator {
         || bytes[nal.offset as usize] & 0x80 != 0
         || nal.layer_id != 0
         || nal.temporal_id_plus1 == 0
+        || (matches!(nal.type_, 32 | 33 | 36 | 37)
+          && nal.temporal_id_plus1 != 1)
       {
         return Err(invalid());
       }
@@ -106,7 +117,6 @@ impl Validator {
               &mut slice,
             )
           };
-          let current = Picture::new(&nal, &slice);
           let valid = status == 0
             && !slice.pps.is_null()
             && (slice.header_size as usize) < nal.size as usize * 8
@@ -117,9 +127,9 @@ impl Validator {
               }
               Some(previous) => {
                 slice.first_slice_segment_in_pic_flag == 0
-                  && current
-                    .as_ref()
-                    .is_ok_and(|current| current.agrees(previous))
+                  && previous
+                    .agrees(&nal, &slice)
+                    .is_ok_and(|same| same)
               }
             };
           let owned = if valid && picture.is_none() {
@@ -134,7 +144,10 @@ impl Validator {
                 .or_else(|| self.sequences.get(&u32::from(sps.id)))
                 .ok_or_else(invalid)?
                 .clone();
-              header::own(&nal, &slice, sequence, sps)
+              Ok((
+                header::own(&nal, &slice, sequence, sps)?,
+                Picture::new(&nal, &slice)?,
+              ))
             }))
           } else {
             None
@@ -144,11 +157,10 @@ impl Validator {
             return Err(invalid());
           }
           if let Some(owned) = owned {
+            let (header, identity) = owned?;
             unit.prefix = nal.sc_offset as usize;
-            unit.header = Some(super::header::Header::Hevc(owned?));
-          }
-          if picture.is_none() {
-            picture = Some(current?);
+            unit.header = Some(super::header::Header::Hevc(header));
+            picture = Some(identity);
           }
         }
         32..=34 => {

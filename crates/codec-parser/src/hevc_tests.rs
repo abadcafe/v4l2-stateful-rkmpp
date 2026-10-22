@@ -1,5 +1,48 @@
 //! Public HEVC complete-access-unit admission contract.
 use super::hevc::Validator;
+
+#[test]
+fn test_validate_temporal_id_zero_constraints_before_configuration_commit()
+ {
+  let good = &include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/hevc-yuv420p.hevc"
+  ))[..5496];
+  for kind in [32u8, 33, 36, 37] {
+    for temporal_id in [1, 6] {
+      for established in [false, true] {
+        let mut bad = good.to_vec();
+        if kind >= 36 {
+          bad.extend_from_slice(&[0, 0, 1, kind << 1, 1]);
+        }
+        Validator::new().unwrap().validate(&bad).unwrap();
+        let offset = bad
+          .windows(4)
+          .position(|data| data == [0, 0, 1, kind << 1])
+          .unwrap()
+          + 3;
+        assert_eq!(bad[offset + 1], 1);
+        bad[offset + 1] = temporal_id + 1;
+        let mut validator = Validator::new().unwrap();
+        if established {
+          validator.validate(good).unwrap();
+        }
+        let configuration = validator.configuration();
+        // Native header parsing does not enforce this NAL constraint;
+        // the project owns admission before native state can change.
+        let result = validator.validate(&bad);
+        assert!(result.is_err());
+        assert_eq!(
+          result.err().unwrap().kind(),
+          std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(validator.configuration(), configuration);
+        validator.validate(good).unwrap();
+      }
+    }
+  }
+}
+
 #[test]
 fn test_validate_complete_access_unit_and_metadata() {
   let bytes = include_bytes!(concat!(

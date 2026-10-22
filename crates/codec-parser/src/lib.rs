@@ -19,7 +19,7 @@ pub struct Validator(Codec);
 enum Codec {
   H264(h264::Validator),
   Hevc(hevc::Validator),
-  Vp8(Box<vp8::Validator>),
+  Vp8(vp8::Validator),
   Vp9(vp9::Validator),
   Av1(Box<av1::Validator>),
 }
@@ -28,7 +28,7 @@ impl Validator {
     match &codec.to_le_bytes() {
       b"H264" => Ok(Self(Codec::H264(h264::Validator::new()?))),
       b"HEVC" => Ok(Self(Codec::Hevc(hevc::Validator::new()?))),
-      b"VP80" => Ok(Self(Codec::Vp8(Box::new(vp8::Validator::new()?)))),
+      b"VP80" => Ok(Self(Codec::Vp8(vp8::Validator::new()?))),
       b"VP90" => Ok(Self(Codec::Vp9(vp9::Validator::new()?))),
       b"AV01" => Ok(Self(Codec::Av1(Box::new(av1::Validator::new()?)))),
       _ => Err(io::Error::new(

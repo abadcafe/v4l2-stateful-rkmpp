@@ -2,6 +2,7 @@
 //! consistency through the header comparison API. operations: tests;
 //! entities: none; tests: independent/dependent invariants, active RPS,
 //! absent arrays and invalid reference counts (H.265 7.4.7.1).
+#![forbid(unsafe_code)]
 use super::super::ffi;
 use super::picture::Picture;
 
@@ -9,15 +10,22 @@ fn header() -> (ffi::GstH265NalUnit, ffi::GstH265SliceHdr) {
   // Scalar/array-only C input records; null PPS is an opaque identity
   // here. The owning syntax validator separately validates PPS
   // existence.
-  let mut nal: ffi::GstH265NalUnit = unsafe { std::mem::zeroed() };
-  let mut slice: ffi::GstH265SliceHdr = unsafe { std::mem::zeroed() };
-  nal.type_ = 20;
-  nal.temporal_id_plus1 = 1;
-  slice.pic_output_flag = 1;
-  slice.num_long_term_sps = 1;
-  slice.num_long_term_pics = 1;
-  slice.short_term_ref_pic_sets.numnegativepics = 1;
-  slice.short_term_ref_pic_sets.numpositivepics = 1;
+  let nal = ffi::GstH265NalUnit {
+    type_: 20,
+    temporal_id_plus1: 1,
+    ..Default::default()
+  };
+  let slice = ffi::GstH265SliceHdr {
+    pic_output_flag: 1,
+    num_long_term_sps: 1,
+    num_long_term_pics: 1,
+    short_term_ref_pic_sets: ffi::GstH265ShortTermRefPicSet {
+      numnegativepics: 1,
+      numpositivepics: 1,
+      ..Default::default()
+    },
+    ..Default::default()
+  };
   (nal, slice)
 }
 
@@ -47,10 +55,7 @@ fn test_agrees_rejects_every_picture_wide_independent_field() {
   for (index, change) in changes.into_iter().enumerate() {
     let mut other = slice;
     change(&mut other);
-    assert!(
-      !Picture::new(&nal, &other).unwrap().agrees(&first),
-      "field {index}"
-    );
+    assert!(!first.agrees(&nal, &other).unwrap(), "field {index}");
   }
 }
 
@@ -62,25 +67,21 @@ fn test_agrees_dependent_segment_inherits_only_absent_fields() {
   dependent.dependent_slice_segment_flag = 1;
   dependent.pic_output_flag = 0;
   dependent.pic_order_cnt_lsb = 99;
-  assert!(Picture::new(&nal, &dependent).unwrap().agrees(&first));
+  assert!(first.agrees(&nal, &dependent).unwrap());
   dependent.no_output_of_prior_pics_flag = 1;
-  assert!(!Picture::new(&nal, &dependent).unwrap().agrees(&first));
+  assert!(!first.agrees(&nal, &dependent).unwrap());
   dependent.no_output_of_prior_pics_flag = 0;
   dependent.pps = std::ptr::dangling_mut();
-  assert!(!Picture::new(&nal, &dependent).unwrap().agrees(&first));
+  assert!(!first.agrees(&nal, &dependent).unwrap());
   dependent.pps = slice.pps;
   for independent in [slice, dependent] {
-    assert!(Picture::new(&nal, &independent).unwrap().agrees(&first));
+    assert!(first.agrees(&nal, &independent).unwrap());
     let mut other = nal;
     other.temporal_id_plus1 += 1;
-    assert!(
-      !Picture::new(&other, &independent).unwrap().agrees(&first)
-    );
+    assert!(!first.agrees(&other, &independent).unwrap());
     other = nal;
     other.type_ += 1;
-    assert!(
-      !Picture::new(&other, &independent).unwrap().agrees(&first)
-    );
+    assert!(!first.agrees(&other, &independent).unwrap());
   }
 }
 
@@ -94,7 +95,28 @@ fn test_agrees_ignores_slice_local_fields_and_inactive_array_entries() {
   other.qp_delta = 4;
   other.lt_idx_sps[15] = 9;
   other.short_term_ref_pic_sets.deltapocs0[15] = 8;
-  assert!(Picture::new(&nal, &other).unwrap().agrees(&first));
+  assert!(first.agrees(&nal, &other).unwrap());
+}
+
+#[test]
+fn test_agrees_rejects_invalid_borrowed_counts_without_changing_first()
+{
+  let (nal, slice) = header();
+  let first = Picture::new(&nal, &slice).unwrap();
+  let changes: [fn(&mut ffi::GstH265SliceHdr); 3] = [
+    |s| s.num_long_term_pics = 16,
+    |s| s.short_term_ref_pic_sets.numnegativepics = 17,
+    |s| s.short_term_ref_pic_sets.numpositivepics = 17,
+  ];
+  for change in changes {
+    let mut other = slice;
+    change(&mut other);
+    assert!(first.agrees(&nal, &other).is_err());
+    assert!(first.agrees(&nal, &slice).unwrap());
+    // Dependent segments do not carry these reference lists.
+    other.dependent_slice_segment_flag = 1;
+    assert!(first.agrees(&nal, &other).unwrap());
+  }
 }
 
 #[test]

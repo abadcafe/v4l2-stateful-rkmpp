@@ -2,7 +2,7 @@
 //! public contract.
 use std::num::NonZeroU32;
 
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use super::output::{Output, Status};
 #[test]

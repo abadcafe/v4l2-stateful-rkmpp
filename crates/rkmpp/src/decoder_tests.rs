@@ -4,7 +4,7 @@
 //! test_new_all_supported_codecs_have_nonblocking_empty_frame_and_reset
 //! test_new_rejects_unknown_codec
 //! test_import_capture_and_ready_require_output_group
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 #[test]
 fn test_new_retains_callback_state_until_close_even_after_moving_decoder()

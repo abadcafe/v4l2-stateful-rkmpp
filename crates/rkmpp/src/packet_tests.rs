@@ -3,7 +3,7 @@
 //! entrypoints; entities: none; tests:
 //! test_prepare_checks_lengths_and_releases_lease_on_finish_or_drop
 //! test_input_packet_and_lease_retain_owned_mapping
-use dma_buf::Buffer;
+use dma_buf::memory::Buffer;
 
 use super::packet::Input;
 use crate::{MAX_PACKET_SIZE, Payload};

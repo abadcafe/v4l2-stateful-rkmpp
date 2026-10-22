@@ -4,12 +4,34 @@ operations: pytest cases; entities: none; tests: distributions, warmup, shape.
 No browser, service or hardware is started by these statistical contracts.
 """
 
+import errno
 import math
 
 import pytest
 
 from tests.support.outcome import Rejected, accepted
 from tests.tools.performance.report import Sample, describe, summarize
+
+
+@pytest.mark.parametrize(
+    "frequency", [10**400, -(10**400)], ids=["positive-overflow", "negative-overflow"]
+)
+def test_summarize_frequency_overflow_returns_error_and_preserves_input(
+    frequency: int,
+) -> None:
+    sample = Sample(
+        interval_start=0,
+        elapsed=1,
+        cpu={"bridge": 1},
+        gpu_percent=1,
+        gpu_frequency=frequency,
+        mpp_completed_window_load={"core": 1},
+    )
+    result = summarize((sample,), 0)
+    assert isinstance(result, Rejected) and result.code == errno.EINVAL
+    assert sample.gpu_frequency == frequency
+    sample.gpu_frequency = 800000000
+    assert accepted(summarize((sample,), 0)).gpu_frequency.mean == 800000000
 
 
 def test_describe_preserves_mean_extremes_and_interpolated_quantiles() -> None:

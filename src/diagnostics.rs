@@ -1,7 +1,8 @@
 //! module: diagnostics; responsibility: own a bounded read-only Unix
 //! endpoint. operations: Endpoint open/drop; entities: Endpoint; tests:
 //! diagnostics_tests, tests/service/test_diagnostics. The broker
-//! outlives this endpoint by borrowing.
+//! outlives this endpoint by borrowing. Resource pressure at accept
+//! backs off without failing the service or existing decode sessions.
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -20,6 +21,8 @@ mod identity_tests;
 mod status;
 #[cfg(test)]
 mod status_tests;
+
+const ADMISSION_BACKOFF: Duration = Duration::from_millis(100);
 
 pub struct Endpoint<'a> {
   path: PathBuf,
@@ -138,7 +141,33 @@ async fn run(
   status: status::Status,
 ) -> io::Result<()> {
   loop {
-    let (mut client, _) = listener.accept().await?;
+    let (mut client, _) = match listener.accept().await {
+      Ok(connection) => connection,
+      Err(error)
+        if matches!(
+          error.raw_os_error(),
+          Some(
+            libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM
+          )
+        ) =>
+      {
+        // A readable listener stays readable while accept cannot
+        // allocate a descriptor. Yield on a timer rather than
+        // spinning, and keep this endpoint alive for recovery.
+        eprintln!("rkmpp diagnostics: admission pressure: {error}");
+        tokio::time::sleep(ADMISSION_BACKOFF).await;
+        continue;
+      }
+      Err(error)
+        if matches!(
+          error.kind(),
+          io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+        ) =>
+      {
+        continue;
+      }
+      Err(error) => return Err(error),
+    };
     let response = match tokio::time::timeout(
       Duration::from_millis(200),
       respond(&mut client, &status),

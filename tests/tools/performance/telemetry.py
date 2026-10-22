@@ -21,7 +21,11 @@ def gpu_load(raw: str) -> Result[tuple[float, int]]:
     match = re.fullmatch(r"(\d+(?:\.\d+)?)@(\d+)Hz\s*", raw)
     if match is None:
         return Rejected(errno.EINVAL, "unrecognized GPU load")
-    percent, frequency = float(match[1]), int(match[2])
+    percent = float(match[1])
+    try:
+        frequency = int(match[2])
+    except ValueError:
+        return Rejected(errno.EINVAL, "GPU frequency exceeds integer conversion limits")
     if percent > 100 or frequency == 0:
         return Rejected(errno.EINVAL, "GPU load outside limits")
     return Ok((percent, frequency))

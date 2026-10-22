@@ -38,7 +38,9 @@ flowchart TD
 
 私有 UAPI 以 `kernel/bridge_uapi.h` 为唯一来源。`crates/rkmpp-bridge-uapi/` 在同一 crate 中提供 Rust wire 类型和 Python 模块 `rkmpp_bridge_uapi`，PyO3 绑定始终编译，没有可选绑定 feature。`rkmpp-bridge-uapi/Cargo.toml` 无条件启用 PyO3 的 `extension-module` feature，固定使用扩展模块链接模式，Python API 由加载扩展的解释器提供，主服务的运行时不依赖 libpython。bindgen 生成原始 ABI；Python 字段使用穷尽初始化，事件和回复使用穷尽匹配，协议字段或枚举发生不兼容变化时会直接产生编译错误。Rust 服务校验和 Python mock 行为分别实现。随扩展发布的 `.pyi` 用于类型检查，测试核对存根与实际公开字段、构造参数和枚举成员。`uv run pytest` 通过 maturin 在本地构建、安装该包，wheel 仅作为本地安装缓存，不对外发布。Cargo 和 uv 都跟踪头文件变化，构建脚本、workspace 锁文件、源码或存根变化也会使相应缓存失效。协议版本为 11，服务与内核需一起更新。内核端点封装 ABI 拷贝和 fd 回滚，通过状态迁移接口访问不透明会话；服务先将事件转换为强类型命令，再注册缓冲池。H.264/HEVC 的序列配置由接纳层保存为不可变快照，显示排序只读取归一化结果。
 
-主服务保留在根目录 `src/`；根 `Cargo.toml` 同时管理整个 workspace，默认只构建主服务及其依赖。`crates/rkmpp/` 封装 MPP 对象、缓冲组和非阻塞解码；`crates/codec-parser/` 封装 GStreamer codecparser ABI 和独立的语法解析；两者不依赖主服务或私有 UAPI。`crates/dma-buf/` 为 MPP 和 GPU 提供共享的 DMA-BUF 所有权、CPU 访问与图像视图。服务负责 V4L2 时间戳和场序转换。UAPI 的 Rust/Python 接口共同进入服务构建；内核 preload mock 位于独立的 `crates/v4l2-rkmpp-kernel-mock/`，不进入服务依赖链。所有包共用根锁文件和构建目录；preload mock 使用 nightly 编译器。
+主服务保留在根目录 `src/`；根 `Cargo.toml` 同时管理整个 workspace，默认构建并验证全部成员。`crates/rkmpp/` 封装 MPP 对象、缓冲组和非阻塞解码；`crates/codec-parser/` 封装 GStreamer codecparser ABI 和独立的语法解析；两者不依赖主服务或私有 UAPI。`crates/dma-buf/` 为 MPP 和 GPU 提供共享的 DMA-BUF 所有权、CPU 访问与图像视图。服务负责 V4L2 时间戳和场序转换。UAPI 的 Rust/Python 接口共同进入服务构建；内核 preload mock 位于独立的 `crates/v4l2-rkmpp-kernel-mock/`，不进入服务依赖链。所有包共用根锁文件和构建目录；全部成员使用 stable 编译器。
+
+本进程的 CPU 映射与 GPU 转换共享按存储身份建立的互斥状态。转换预留同时持有图像导入对象和访问权，从准备提交持续至完成回收或取消。设备同步继续使用 sync-file 与 Vulkan 屏障。
 
 ## 编译/安装/使用方式
 
@@ -96,18 +98,14 @@ HEVC、VP8、VP9 分别使用 `hevc_v4l2m2m`、`vp8_v4l2m2m`、`vp9_v4l2m2m`，�
 
 需要 RK3588 实机、Python 3.14+、uv、Rust nightly、FFmpeg、Chromium 及可用的桌面图形会话。使用 video 组普通用户，在项目根目录执行。内核集测要求控制设备空闲，且运行期间没有其他视频客户端创建会话；内核/浏览器集测要求模块已加载，且运行前手动停止现有桥接服务。浏览器集测发现已有服务会报错提示停止；请先运行 `cargo build`，浏览器集测只检查并使用当前目录的 `target/debug/v4l2-stateful-rkmpp`，负责启停但不自动编译，未构建时直接报错。修改源码后需自行重新构建服务。测试不检查已加载模块是否与源码一致，请自行更新模块；通过只代表实际加载的模块通过验收。实际内核身份和浏览器使用的服务身份分别记录在 pytest 临时目录的 `kernel-runtime*/` 和各浏览器 case 的 `service-identity.json`。
 
-测试拦截库使用 Rust 的 `c_variadic` 特性实现 C 可变参数接口，因此其 Clippy、编译和测试需要 nightly；主服务使用 stable。
+测试拦截库在 aarch64 和 x86_64 上通过稳定的裸函数 ABI 入口保留 C 可变参数寄存器；只有需要参数的系统调用才读取它。主服务、绑定与拦截库均由默认工作区命令构建和验证；nightly 仅用于格式化。
 
 ```sh
 cargo +nightly fmt --all
 cargo +nightly fmt --all --check
-cargo clippy --workspace --exclude v4l2-rkmpp-kernel-mock --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo build
-cargo test --workspace --exclude v4l2-rkmpp-kernel-mock --no-fail-fast
-
-cargo +nightly clippy -p v4l2-rkmpp-kernel-mock --all-targets -- -D warnings
-cargo +nightly build -p v4l2-rkmpp-kernel-mock
-cargo +nightly test -p v4l2-rkmpp-kernel-mock
+cargo test --workspace --no-fail-fast
 
 uv run ruff format
 uv run ruff format --check
