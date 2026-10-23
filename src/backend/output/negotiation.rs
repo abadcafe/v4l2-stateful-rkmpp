@@ -39,7 +39,9 @@ impl Negotiation {
     count: usize,
     reuse: bool,
   ) -> io::Result<()> {
-    if !(1..=32).contains(&count) || (reuse && !self.waiting()) {
+    if !(1..=32).contains(&count)
+      || (reuse && !self.waiting() && !self.active())
+    {
       return Err(io::Error::other("invalid CAPTURE activation"));
     }
     if reuse {

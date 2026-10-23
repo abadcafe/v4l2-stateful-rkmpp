@@ -2,42 +2,24 @@
 //! borrow their images. operations: from_raw, info, plane, pool_index;
 //! entities: Frame, FrameInfo, RawFrame, FrameBuffer, Storage; tests:
 //! frame_tests, tests/service.
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::ptr::NonNull;
 
 use dma_buf::image::{Plane, PlaneCache};
-#[link(name = "rockchip_mpp")]
-unsafe extern "C" {
-  fn mpp_frame_deinit(frame: *mut *mut c_void) -> i32;
-  fn mpp_frame_get_width(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_height(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_hor_stride(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_ver_stride(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_buf_size(frame: *mut c_void) -> usize;
-  fn mpp_frame_get_mode(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_dts(frame: *mut c_void) -> i64;
-  fn mpp_frame_get_pts(frame: *mut c_void) -> i64;
-  fn mpp_frame_get_errinfo(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_discard(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_eos(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_info_change(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_fmt(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_buffer(frame: *mut c_void) -> *mut c_void;
-  fn mpp_frame_get_color_primaries(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_colorspace(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_color_trc(frame: *mut c_void) -> u32;
-  fn mpp_frame_get_color_range(frame: *mut c_void) -> u32;
-  fn mpp_buffer_get_fd_with_caller(
-    buffer: *mut c_void,
-    caller: *const c_char,
-  ) -> i32;
-  fn mpp_buffer_get_index_with_caller(
-    buffer: *mut c_void,
-    caller: *const c_char,
-  ) -> i32;
-}
+
+use super::ffi::{
+  mpp_buffer_get_fd_with_caller, mpp_buffer_get_index_with_caller,
+  mpp_frame_deinit, mpp_frame_get_buf_size, mpp_frame_get_buffer,
+  mpp_frame_get_color_primaries, mpp_frame_get_color_range,
+  mpp_frame_get_color_trc, mpp_frame_get_colorspace,
+  mpp_frame_get_discard, mpp_frame_get_dts, mpp_frame_get_eos,
+  mpp_frame_get_errinfo, mpp_frame_get_fmt, mpp_frame_get_height,
+  mpp_frame_get_hor_stride, mpp_frame_get_info_change,
+  mpp_frame_get_mode, mpp_frame_get_pts, mpp_frame_get_ver_stride,
+  mpp_frame_get_width,
+};
 #[derive(Debug)]
 pub struct Frame {
   storage: Storage,

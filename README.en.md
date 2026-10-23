@@ -36,13 +36,27 @@ The service uses one Tokio orchestration thread for admission, session schedulin
 
 8-bit decoding uses registered CAPTURE buffers and waits for their return when the pool is exhausted. The service does not allocate temporary decode surfaces. It negotiates 18–32 CAPTURE buffers according to the stream’s reference/display storage budget. Vulkan handles images from retired pools or repeated presentations whose original buffer is still held by the client. 10-bit output negotiates a minimum of two CAPTURE buffers. Conversion writes directly to the final CAPTURE buffers. The bridge performs no full-frame CPU copies.
 
-`kernel/bridge_uapi.h` is the sole private UAPI source. `crates/rkmpp-bridge-uapi/` provides Rust wire types and the `rkmpp_bridge_uapi` Python module in one crate. PyO3 bindings always compile, without an optional binding feature. `rkmpp-bridge-uapi/Cargo.toml` unconditionally enables the PyO3 `extension-module` feature to fix extension-module linkage: the importing interpreter supplies Python APIs, and the service has no runtime dependency on libpython. Bindgen derives the raw ABI; exhaustive field initialization and event/reply matches make incompatible protocol field or enum changes compile errors. Service validation and Python mock behavior remain independent. The packaged `.pyi` supplies static types, with tests comparing its public fields, constructor parameters and enum members against the actual extension. `uv run pytest` builds and installs this local package through maturin; wheels are local installation/cache artifacts and are not published. Cargo and uv both track header changes; build scripts, the workspace lockfile, sources and stubs also invalidate their respective caches. Protocol version 11 requires updating the service and kernel together. The kernel endpoint encapsulates ABI copies and descriptor rollback behind transitions on an opaque session. The service validates typed commands before registering pools. Admission owns immutable normalized H.264/HEVC sequence snapshots; presentation ordering reads those snapshots.
+`kernel/bridge_uapi.h` is the sole private UAPI source. `crates/rkmpp-bridge-uapi/` provides Rust wire types and the `rkmpp_bridge_uapi` Python module in one crate. PyO3 bindings always compile, without an optional binding feature. `rkmpp-bridge-uapi/Cargo.toml` unconditionally enables the PyO3 `extension-module` feature to fix extension-module linkage: the importing interpreter supplies Python APIs, and the service has no runtime dependency on libpython. Bindgen derives the raw ABI; exhaustive field initialization and event/reply matches make incompatible protocol field or enum changes compile errors. Service validation and Python mock behavior remain independent. The packaged `.pyi` supplies static types, with tests comparing its public fields, constructor parameters and enum members against the actual extension. `uv run pytest` builds and installs this local package through maturin; wheels are local installation/cache artifacts and are not published. Cargo and uv both track header changes; build scripts, the workspace lockfile, sources and stubs also invalidate their respective caches. Protocol version 12 requires updating the service and kernel together. The kernel endpoint encapsulates ABI copies and descriptor rollback behind transitions on an opaque session. The service validates typed commands before registering pools. Admission owns immutable normalized H.264/HEVC sequence snapshots; presentation ordering reads those snapshots.
 
 The main service stays in root `src/`. The root Cargo manifest manages the workspace and builds and checks every member by default. `crates/rkmpp/` owns MPP objects, buffer groups and nonblocking decode; `crates/codec-parser/` owns the GStreamer codecparser ABI and independent syntax parsing. Neither depends on the service or private UAPI. `crates/dma-buf/` supplies shared DMA-BUF ownership, CPU access and image views to MPP and GPU clients. The service translates V4L2 timestamps and field order. The UAPI Rust/Python interfaces compile together as part of the service dependency graph. The independent preload mock lives in `crates/v4l2-rkmpp-kernel-mock/` outside that graph. All packages share the root lockfile and output directory; every member uses stable Rust.
 
 CPU maps and GPU conversions share process-local exclusion by storage identity. An opaque conversion reservation retains both image imports and access ownership from preparation until retirement or cancellation. Sync-files and Vulkan barriers provide device synchronization.
 
 ## Build, install, and use
+
+OUTPUT seeks preserve the independent streaming CAPTURE queue. After the stop
+acknowledgement, the kernel republishes its registration and queued slots in the
+new epoch, excluding images still held by the client. CAPTURE QBUF notifications
+also work while OUTPUT is stopped.
+
+An empty EOS LAST also refreshes CAPTURE permissions. The service pins retained
+storage and restores write access only for slots actually queued by the kernel.
+Clients can return LAST before START, while decoder reference state survives.
+
+`crates/rkmpp/build.rs` derives private MPP functions, structures and control
+constants from the selected SDK headers. `crates/native-sdk/` supplies shared
+pkg-config discovery, compiler arguments, library selection and cache tracking
+for MPP and GStreamer. Incompatible SDK declarations fail during compilation.
 
 Building requires Rust, Python 3.14+, a C toolchain, matching vendor kernel headers, pahole, glslang, libclang, GStreamer codecparsers development headers and library, pkg-config, rockchip-mpp, and vulkan-icd-loader. Run from the project root:
 

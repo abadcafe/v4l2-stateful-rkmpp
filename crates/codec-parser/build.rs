@@ -1,8 +1,6 @@
 //! module: codec parser build; responsibility: derive installed
 //! GStreamer ABI. operations: Cargo build entrypoint; entities:
 //! CodecSymbols; tests: parser contracts.
-#[path = "build/sdk.rs"]
-mod sdk;
 #[derive(Debug)]
 struct CodecSymbols;
 impl bindgen::callbacks::ParseCallbacks for CodecSymbols {
@@ -49,7 +47,7 @@ impl bindgen::callbacks::ParseCallbacks for CodecSymbols {
   }
 }
 fn codec_parsers(output: &std::path::Path) {
-  let flags = sdk::configure();
+  let flags = native_sdk::configure("gstreamer-codecparsers-1.0");
   bindgen::Builder::default()
     .formatter(bindgen::Formatter::Prettyplease)
     .header_contents(

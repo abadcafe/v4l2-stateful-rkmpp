@@ -7,5 +7,9 @@ publish = false
 [dependencies]
 dma-buf.workspace = true
 
+[build-dependencies]
+bindgen.workspace = true
+native-sdk.workspace = true
+
 [dev-dependencies]
 libc.workspace = true

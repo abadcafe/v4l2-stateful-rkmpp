@@ -1,10 +1,9 @@
-//! module: build::sdk; responsibility: discover one codec SDK for both
+//! module: native_sdk; responsibility: discover one native SDK for both
 //! compilation and linkage. operations: configure; entities: none;
-//! tests: tests/support/build_configuration_tests.py through Cargo.
+//! tests: tests/support/build_configuration_tests.py and
+//! mpp_sdk_tests.py through Cargo's public build protocol.
 use std::ffi::OsString;
 use std::process::Command;
-
-const PACKAGE: &str = "gstreamer-codecparsers-1.0";
 
 // Use pkg-config's Rust discovery precedence for every raw query too.
 // Otherwise headers/metadata can come from a different SDK than
@@ -47,8 +46,8 @@ fn query(arguments: &[&str]) -> String {
     .expect("pkg-config output must be UTF-8")
 }
 
-fn metadata_inputs() {
-  let mut pending = vec![PACKAGE.to_owned()];
+fn metadata_inputs(package: &str) {
+  let mut pending = vec![package.to_owned()];
   let mut seen = std::collections::HashSet::new();
   let mut directories = std::collections::BTreeSet::new();
   while let Some(package) = pending.pop() {
@@ -91,7 +90,7 @@ fn metadata_inputs() {
   }
 }
 
-pub(super) fn configure() -> Vec<String> {
+pub fn configure(package: &str) -> Vec<String> {
   // Cargo cannot observe environment reads in the pkg-config child.
   for variable in [
     "PKG_CONFIG",
@@ -127,16 +126,16 @@ pub(super) fn configure() -> Vec<String> {
   ] {
     println!("cargo:rerun-if-env-changed={variable}");
   }
-  metadata_inputs();
+  metadata_inputs(package);
   pkg_config::Config::new()
     .statik(false)
     .probe_cflags(false)
     .print_system_libs(false)
     .print_system_cflags(false)
-    .probe(PACKAGE)
-    .expect("discover codec SDK libraries");
+    .probe(package)
+    .expect("discover native SDK libraries");
   // Keep complete compiler arguments: Library's parsed fields omit
   // arbitrary flags and cannot represent every preprocessor definition.
-  shlex::split(&query(&["--cflags", PACKAGE]))
+  shlex::split(&query(&["--cflags", package]))
     .expect("pkg-config compiler flags must have valid shell quoting")
 }

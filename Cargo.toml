@@ -13,6 +13,7 @@ dma-buf = { path = "crates/dma-buf" }
 rkmpp = { path = "crates/rkmpp" }
 codec-parser = { path = "crates/codec-parser" }
 rkmpp-bridge-uapi = { path = "crates/rkmpp-bridge-uapi" }
+native-sdk = { path = "crates/native-sdk" }
 
 [profile.dev.build-override]
 debug = true

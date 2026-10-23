@@ -3,7 +3,7 @@
 //! configuration, reset/close; entities: Decoder, Submission.
 //! tests: decoder_tests, mpp_tests and public V4L2 codec/pixel/recovery
 //! tests.
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::io;
 use std::ptr::NonNull;
 
@@ -15,19 +15,10 @@ use super::group::Group;
 use super::packet::Packet;
 use super::reservation::Reservation;
 type Handle = *mut c_void;
-#[link(name = "rockchip_mpp")]
-unsafe extern "C" {
-  fn mpp_create(context: *mut Handle, api: *mut Handle) -> i32;
-  fn mpp_init(context: Handle, kind: u32, coding: u32) -> i32;
-  fn mpp_destroy(context: Handle) -> i32;
-  fn mpp_dec_cfg_init(config: *mut Handle) -> i32;
-  fn mpp_dec_cfg_deinit(config: Handle) -> i32;
-  fn mpp_dec_cfg_set_ptr(
-    config: Handle,
-    key: *const c_char,
-    value: Handle,
-  ) -> i32;
-}
+use super::ffi::{
+  mpp_create, mpp_dec_cfg_deinit, mpp_dec_cfg_init,
+  mpp_dec_cfg_set_ptr, mpp_destroy, mpp_init,
+};
 struct Config(Handle);
 impl Drop for Config {
   fn drop(&mut self) {
@@ -82,11 +73,15 @@ impl Decoder {
     notify: F,
   ) -> io::Result<Self> {
     let (coding, split) = match codec.to_le_bytes() {
-      [b'H', b'2', b'6', b'4'] => (7, 0u32),
-      [b'H', b'E', b'V', b'C'] => (0x01000004, 0),
-      [b'V', b'P', b'8', b'0'] => (9, 0),
-      [b'V', b'P', b'9', b'0'] => (10, 0),
-      [b'A', b'V', b'0', b'1'] => (0x01000008, 0),
+      [b'H', b'2', b'6', b'4'] => {
+        (super::ffi::MPP_VIDEO_CODING_AVC, 0u32)
+      }
+      [b'H', b'E', b'V', b'C'] => {
+        (super::ffi::MPP_VIDEO_CODING_HEVC, 0)
+      }
+      [b'V', b'P', b'8', b'0'] => (super::ffi::MPP_VIDEO_CODING_VP8, 0),
+      [b'V', b'P', b'9', b'0'] => (super::ffi::MPP_VIDEO_CODING_VP9, 0),
+      [b'A', b'V', b'0', b'1'] => (super::ffi::MPP_VIDEO_CODING_AV1, 0),
       _ => {
         return Err(io::Error::new(
           io::ErrorKind::InvalidInput,
@@ -123,36 +118,46 @@ impl Decoder {
       parked: false,
       info_wait: false,
       frames: std::collections::VecDeque::new(),
-      publish_on_completion: coding == 0x01000008,
+      publish_on_completion: coding == super::ffi::MPP_VIDEO_CODING_AV1,
       completion_packet: None,
       publication_pending: false,
       retired: Vec::new(),
       callback: Box::new(notify),
     };
-    decoder
-      .control(0x00310005, (&split as *const u32).cast_mut().cast())?;
+    decoder.control(
+      super::ffi::MPP_DEC_SET_PARSER_SPLIT_MODE,
+      (&split as *const u32).cast_mut().cast(),
+    )?;
     let zero = 0u32;
-    decoder
-      .control(0x0031000d, (&zero as *const u32).cast_mut().cast())?;
+    decoder.control(
+      super::ffi::MPP_DEC_SET_ENABLE_DEINTERLACE,
+      (&zero as *const u32).cast_mut().cast(),
+    )?;
     let one = 1u32;
-    decoder
-      .control(0x00200008, (&one as *const u32).cast_mut().cast())?;
-    decoder
-      .control(0x0031000c, (&one as *const u32).cast_mut().cast())?;
-    check("init", unsafe { mpp_init(context.as_ptr(), 0, coding) })?;
+    decoder.control(
+      super::ffi::MPP_SET_DISABLE_THREAD,
+      (&one as *const u32).cast_mut().cast(),
+    )?;
+    decoder.control(
+      super::ffi::MPP_DEC_SET_IMMEDIATE_OUT,
+      (&one as *const u32).cast_mut().cast(),
+    )?;
+    check("init", unsafe {
+      mpp_init(context.as_ptr(), super::ffi::MPP_CTX_DEC, coding)
+    })?;
     let timeout = 0i64;
     decoder.control(
-      0x00200007,
+      super::ffi::MPP_SET_OUTPUT_TIMEOUT,
       (&timeout as *const i64).cast_mut().cast(),
     )?;
     decoder.control(
-      0x00200006,
+      super::ffi::MPP_SET_INPUT_TIMEOUT,
       (&timeout as *const i64).cast_mut().cast(),
     )?;
     let mut config = std::ptr::null_mut();
     check("config init", unsafe { mpp_dec_cfg_init(&mut config) })?;
     let config = Config(config);
-    decoder.control(0x00310202, config.0)?;
+    decoder.control(super::ffi::MPP_DEC_GET_CFG, config.0)?;
     let callback = notify_ready::<F> as *const () as Handle;
     let context = (&*decoder.callback
       as *const (dyn Fn() -> io::Result<()> + Send + Sync))
@@ -165,7 +170,7 @@ impl Decoder {
         mpp_dec_cfg_set_ptr(config.0, key.as_ptr(), value)
       })?;
     }
-    decoder.control(0x00310201, config.0)?;
+    decoder.control(super::ffi::MPP_DEC_SET_CFG, config.0)?;
     Ok(decoder)
   }
 
@@ -293,7 +298,8 @@ impl Decoder {
 
   pub fn configure_output(&mut self, ten_bit: bool) -> io::Result<()> {
     let group = Group::new(ten_bit)?;
-    self.control(0x00310002, group.handle())?;
+    self
+      .control(super::ffi::MPP_DEC_SET_EXT_BUF_GROUP, group.handle())?;
     if let Some(previous) = self.group.replace(group) {
       self.retired.push(previous);
       self.retired.last_mut().unwrap().retire()?;
@@ -347,8 +353,11 @@ impl Decoder {
       .as_ref()
       .ok_or_else(|| io::Error::other("decoder has no output group"))?
       .handle();
-    self.control(0x00310002, group)?;
-    self.control(0x00310003, std::ptr::null_mut())?;
+    self.control(super::ffi::MPP_DEC_SET_EXT_BUF_GROUP, group)?;
+    self.control(
+      super::ffi::MPP_DEC_SET_INFO_CHANGE_READY,
+      std::ptr::null_mut(),
+    )?;
     self.info_wait = false;
     Ok(())
   }

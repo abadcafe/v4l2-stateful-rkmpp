@@ -36,11 +36,17 @@ flowchart TD
 
 8-bit 解码使用注册的 CAPTURE 缓冲区，池耗尽时等待缓冲区归还，不分配临时解码表面。最小 CAPTURE 数按流的参考/显示存储预算在 18–32 之间协商。来自旧缓冲池的图像、原缓冲区仍由客户端持有的重复显示由 Vulkan 处理。10-bit 输出只需协商至少 2 个 CAPTURE 缓冲区，转换直接写入最终 CAPTURE 缓冲区，桥接过程没有 CPU 整帧复制。
 
-私有 UAPI 以 `kernel/bridge_uapi.h` 为唯一来源。`crates/rkmpp-bridge-uapi/` 在同一 crate 中提供 Rust wire 类型和 Python 模块 `rkmpp_bridge_uapi`，PyO3 绑定始终编译，没有可选绑定 feature。`rkmpp-bridge-uapi/Cargo.toml` 无条件启用 PyO3 的 `extension-module` feature，固定使用扩展模块链接模式，Python API 由加载扩展的解释器提供，主服务的运行时不依赖 libpython。bindgen 生成原始 ABI；Python 字段使用穷尽初始化，事件和回复使用穷尽匹配，协议字段或枚举发生不兼容变化时会直接产生编译错误。Rust 服务校验和 Python mock 行为分别实现。随扩展发布的 `.pyi` 用于类型检查，测试核对存根与实际公开字段、构造参数和枚举成员。`uv run pytest` 通过 maturin 在本地构建、安装该包，wheel 仅作为本地安装缓存，不对外发布。Cargo 和 uv 都跟踪头文件变化，构建脚本、workspace 锁文件、源码或存根变化也会使相应缓存失效。协议版本为 11，服务与内核需一起更新。内核端点封装 ABI 拷贝和 fd 回滚，通过状态迁移接口访问不透明会话；服务先将事件转换为强类型命令，再注册缓冲池。H.264/HEVC 的序列配置由接纳层保存为不可变快照，显示排序只读取归一化结果。
+私有 UAPI 以 `kernel/bridge_uapi.h` 为唯一来源。`crates/rkmpp-bridge-uapi/` 在同一 crate 中提供 Rust wire 类型和 Python 模块 `rkmpp_bridge_uapi`，PyO3 绑定始终编译，没有可选绑定 feature。`rkmpp-bridge-uapi/Cargo.toml` 无条件启用 PyO3 的 `extension-module` feature，固定使用扩展模块链接模式，Python API 由加载扩展的解释器提供，主服务的运行时不依赖 libpython。bindgen 生成原始 ABI；Python 字段使用穷尽初始化，事件和回复使用穷尽匹配，协议字段或枚举发生不兼容变化时会直接产生编译错误。Rust 服务校验和 Python mock 行为分别实现。随扩展发布的 `.pyi` 用于类型检查，测试核对存根与实际公开字段、构造参数和枚举成员。`uv run pytest` 通过 maturin 在本地构建、安装该包，wheel 仅作为本地安装缓存，不对外发布。Cargo 和 uv 都跟踪头文件变化，构建脚本、workspace 锁文件、源码或存根变化也会使相应缓存失效。协议版本为 12，服务与内核需一起更新。内核端点封装 ABI 拷贝和 fd 回滚，通过状态迁移接口访问不透明会话；服务先将事件转换为强类型命令，再注册缓冲池。H.264/HEVC 的序列配置由接纳层保存为不可变快照，显示排序只读取归一化结果。
 
 主服务保留在根目录 `src/`；根 `Cargo.toml` 同时管理整个 workspace，默认构建并验证全部成员。`crates/rkmpp/` 封装 MPP 对象、缓冲组和非阻塞解码；`crates/codec-parser/` 封装 GStreamer codecparser ABI 和独立的语法解析；两者不依赖主服务或私有 UAPI。`crates/dma-buf/` 为 MPP 和 GPU 提供共享的 DMA-BUF 所有权、CPU 访问与图像视图。服务负责 V4L2 时间戳和场序转换。UAPI 的 Rust/Python 接口共同进入服务构建；内核 preload mock 位于独立的 `crates/v4l2-rkmpp-kernel-mock/`，不进入服务依赖链。所有包共用根锁文件和构建目录；全部成员使用 stable 编译器。
 
 本进程的 CPU 映射与 GPU 转换共享按存储身份建立的互斥状态。转换预留同时持有图像导入对象和访问权，从准备提交持续至完成回收或取消。设备同步继续使用 sync-file 与 Vulkan 屏障。
+
+OUTPUT seek 独立于 CAPTURE 队列：OUTPUT 停流确认后，内核在新 epoch 重发仍在流送的 CAPTURE 注册和实际已排队槽位；客户端持有的图片不会重新授权写入。CAPTURE 已启动时的 QBUF 不依赖 OUTPUT 是否启动。
+
+内核完成空 EOS LAST 时也会重发 CAPTURE 写入权限快照；服务先保留所有未再次排队的槽位，再按内核实际队列恢复写入权限。客户端可在 START 前合法归还 LAST，恢复解码仍保留编码参考状态。
+
+MPP 的函数、结构和控制码由 `crates/rkmpp/build.rs` 从选中的 SDK 头文件生成，私有 ABI 不再由服务手写。`crates/native-sdk/` 统一提供 MPP 和 GStreamer 的 pkg-config 发现、头文件参数、链接选择及构建缓存失效跟踪；SDK 不兼容在编译阶段暴露。
 
 ## 编译/安装/使用方式
 

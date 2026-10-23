@@ -4,56 +4,21 @@
 //! BufferInfo; tests: group_tests,
 //! tests/service/test_resources.
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd};
 use std::ptr::NonNull;
 
 use dma_buf::memory::Buffer;
 
+use super::ffi::{
+  MppBufferInfo as BufferInfo, mpp_buffer_get_with_tag,
+  mpp_buffer_group_clear, mpp_buffer_group_get,
+  mpp_buffer_group_limit_config, mpp_buffer_group_put,
+  mpp_buffer_group_unused, mpp_buffer_group_usage,
+  mpp_buffer_import_with_tag,
+};
 use super::reservation::Reservation;
-#[repr(C)]
-struct BufferInfo {
-  kind: u32,
-  size: usize,
-  ptr: *mut c_void,
-  handle: *mut c_void,
-  fd: i32,
-  index: i32,
-}
-#[link(name = "rockchip_mpp")]
-unsafe extern "C" {
-  fn mpp_buffer_group_get(
-    group: *mut *mut c_void,
-    kind: u32,
-    mode: u32,
-    tag: *const c_char,
-    caller: *const c_char,
-  ) -> i32;
-  fn mpp_buffer_get_with_tag(
-    group: *mut c_void,
-    buffer: *mut *mut c_void,
-    size: usize,
-    tag: *const c_char,
-    caller: *const c_char,
-  ) -> i32;
-  fn mpp_buffer_group_put(group: *mut c_void) -> i32;
-  fn mpp_buffer_group_clear(group: *mut c_void) -> i32;
-  fn mpp_buffer_group_unused(group: *mut c_void) -> i32;
-  fn mpp_buffer_group_usage(group: *mut c_void) -> usize;
-  fn mpp_buffer_group_limit_config(
-    group: *mut c_void,
-    size: usize,
-    count: i32,
-  ) -> i32;
-  fn mpp_buffer_import_with_tag(
-    group: *mut c_void,
-    info: *mut BufferInfo,
-    buffer: *mut *mut c_void,
-    tag: *const c_char,
-    caller: *const c_char,
-  ) -> i32;
-}
 pub(super) struct Group {
   handle: NonNull<c_void>,
   allocation: Allocation,
@@ -82,8 +47,12 @@ impl Group {
     let status = unsafe {
       mpp_buffer_group_get(
         &mut raw,
-        3,
-        u32::from(!ten_bit),
+        super::ffi::MPP_BUFFER_TYPE_DRM,
+        if ten_bit {
+          super::ffi::MPP_BUFFER_INTERNAL
+        } else {
+          super::ffi::MPP_BUFFER_EXTERNAL
+        },
         c"v4l2-stateful-rkmpp".as_ptr(),
         c"group_new".as_ptr(),
       )
@@ -158,10 +127,10 @@ impl Group {
     buffer: Buffer,
   ) -> io::Result<Registered> {
     let mut info = BufferInfo {
-      kind: 3,
+      type_: super::ffi::MPP_BUFFER_TYPE_DRM,
       size: buffer.size(),
       ptr: std::ptr::null_mut(),
-      handle: std::ptr::null_mut(),
+      hnd: std::ptr::null_mut(),
       fd: buffer.as_fd().as_raw_fd(),
       index: i32::try_from(index)
         .map_err(|_| io::Error::other("capture index overflow"))?,

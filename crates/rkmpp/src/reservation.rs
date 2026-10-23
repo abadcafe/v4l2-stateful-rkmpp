@@ -2,24 +2,14 @@
 //! buffer ownership during a GPU copy and subsequent display.
 //! operations: retain, imported, index; entities: Reservation. tests:
 //! reservation_tests, service lifecycle tests.
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::io;
 use std::ptr::NonNull;
-#[link(name = "rockchip_mpp")]
-unsafe extern "C" {
-  fn mpp_buffer_inc_ref_with_caller(
-    buffer: *mut c_void,
-    caller: *const c_char,
-  ) -> i32;
-  fn mpp_buffer_put_with_caller(
-    buffer: *mut c_void,
-    caller: *const c_char,
-  ) -> i32;
-  fn mpp_buffer_get_index_with_caller(
-    buffer: *mut c_void,
-    caller: *const c_char,
-  ) -> i32;
-}
+
+use super::ffi::{
+  mpp_buffer_get_index_with_caller, mpp_buffer_inc_ref_with_caller,
+  mpp_buffer_put_with_caller,
+};
 pub struct Reservation(NonNull<c_void>);
 impl Reservation {
   /// SAFETY: the caller owns the live group containing this buffer.

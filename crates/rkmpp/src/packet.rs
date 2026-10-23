@@ -11,27 +11,14 @@ use std::rc::Rc;
 
 use dma_buf::memory::Buffer;
 use dma_buf::memory::persistent::{InputMap, ReadAccess};
-#[link(name = "rockchip_mpp")]
-unsafe extern "C" {
-  fn mpp_packet_init(
-    packet: *mut *mut c_void,
-    data: *mut c_void,
-    size: usize,
-  ) -> i32;
-  fn mpp_packet_deinit(packet: *mut *mut c_void) -> i32;
-  fn mpp_packet_set_data(packet: *mut c_void, data: *mut c_void);
-  fn mpp_packet_set_size(packet: *mut c_void, size: usize);
-  fn mpp_packet_set_flag(packet: *mut c_void, flags: u32);
-  fn mpp_packet_has_meta(packet: *mut c_void) -> i32;
-  fn mpp_packet_get_buffer(packet: *mut c_void) -> *mut c_void;
-  fn mpp_packet_get_segment_nb(packet: *mut c_void) -> u32;
-  fn mpp_packet_set_pos(packet: *mut c_void, position: *mut c_void);
-  fn mpp_packet_set_length(packet: *mut c_void, length: usize);
-  fn mpp_packet_get_length(packet: *mut c_void) -> usize;
-  fn mpp_packet_set_eos(packet: *mut c_void);
-  fn mpp_packet_set_dts(packet: *mut c_void, dts: i64);
-  fn mpp_packet_set_pts(packet: *mut c_void, pts: i64);
-}
+
+use super::ffi::{
+  mpp_packet_deinit, mpp_packet_get_buffer, mpp_packet_get_length,
+  mpp_packet_get_segment_nb, mpp_packet_has_meta, mpp_packet_init,
+  mpp_packet_set_data, mpp_packet_set_dts, mpp_packet_set_eos,
+  mpp_packet_set_flag, mpp_packet_set_length, mpp_packet_set_pos,
+  mpp_packet_set_pts, mpp_packet_set_size,
+};
 #[derive(Default)]
 struct Cache(RefCell<Vec<NonNull<c_void>>>);
 impl Drop for Cache {

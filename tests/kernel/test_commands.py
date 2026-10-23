@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from rkmpp_bridge_uapi import VERSION, Event, Message, Reply
+from rkmpp_bridge_uapi import MAX_BATCH, VERSION, Event, Message, Reply
 
 from tests.support.event_abi import DecoderCommand, Subscription
 from tests.support.kernel_peer import Peer
@@ -96,7 +96,24 @@ def test_decoder_drain_defers_new_input_until_completed_and_resumed(
     assert accepted(peer.service.exchange()).event_count == 0
     eos = drain.clone()
     eos.kind = Reply.EOS
-    assert present(accepted(peer.service.exchange([eos])).result(0)) == 0
+    refreshed = accepted(peer.service.exchange([eos]))
+    assert present(refreshed.result(0)) == 0
+    snapshot: list[Message] = []
+    while True:
+        snapshot.extend(
+            present(refreshed.event(i)) for i in range(refreshed.event_count)
+        )
+        if refreshed.event_count < MAX_BATCH:
+            break
+        refreshed = accepted(peer.service.exchange())
+    # Protocol 12 refreshes retained write permissions after the empty LAST.
+    # Receive the complete snapshot before inspecting subsequent control events.
+    assert len(snapshot) == 18
+    assert snapshot[0].kind == Event.CAPTURE
+    assert snapshot[0].flags == Message.CAPTURE_REUSE
+    assert snapshot[0].count == 18
+    assert [message.index for message in snapshot[1:]] == list(range(1, 18))
+    assert all(message.kind == Event.RECYCLE for message in snapshot[1:])
     result = peer.video.start()
     assert isinstance(result, Rejected) and result.code == errno.EBUSY
     last = accepted(capture.dequeue())

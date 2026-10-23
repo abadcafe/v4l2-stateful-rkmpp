@@ -126,31 +126,47 @@ impl Output {
     let mut negotiation = self.negotiation.clone();
     negotiation.start(count, reuse)?;
     if reuse {
-      if !self.waiting() {
+      if !self.waiting() && !self.active() {
         return Err(io::Error::other(
-          "capture reuse without pending layout",
+          "capture reuse without negotiated layout",
         ));
       }
-      let format = self.format.as_ref().ok_or_else(|| {
-        io::Error::other("capture reuse without geometry")
-      })?;
-      let layout = format.message();
-      if count != self.capture.registration().1
-        || !self
-          .capture
-          .fits(layout.count as usize, layout.size as usize)
-      {
+      if count != self.capture.registration().1 {
         return Err(io::Error::other(
           "CAPTURE reuse does not satisfy negotiated layout",
         ));
       }
-      let decoder = decoder.as_deref_mut().ok_or_else(|| {
-        io::Error::other("capture reuse without decoder")
-      })?;
-      let reservations = decoder.reuse_output(format.ten())?;
-      self
-        .capture
-        .reuse(format.message().size as usize, reservations)?;
+      let (size, reservations) = if let Some(format) = &self.format {
+        let layout = format.message();
+        if !self
+          .capture
+          .fits(layout.count as usize, layout.size as usize)
+        {
+          return Err(io::Error::other(
+            "CAPTURE reuse does not satisfy negotiated layout",
+          ));
+        }
+        let decoder = decoder.as_deref_mut().ok_or_else(|| {
+          io::Error::other("capture reuse without decoder")
+        })?;
+        // An unchanged internal ten-bit group retains its codec
+        // references across a completed drain.
+        let reservations = if self.active() && format.ten() {
+          None
+        } else {
+          decoder.reuse_output(format.ten())?
+        };
+        (layout.size as usize, reservations)
+      } else {
+        if !self.active() {
+          return Err(io::Error::other(
+            "capture reuse without geometry",
+          ));
+        }
+        // Empty-stream drains have no decoder storage to pin.
+        (0, None)
+      };
+      self.capture.reuse(size, reservations)?;
     }
     self.negotiation = negotiation;
     self.ready(decoder)

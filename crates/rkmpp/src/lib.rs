@@ -8,6 +8,7 @@ mod api_tests;
 mod decoder;
 #[cfg(test)]
 mod decoder_tests;
+mod ffi;
 mod frame;
 #[cfg(test)]
 mod frame_tests;

@@ -33,7 +33,7 @@ payload. Original coded submissions retain their complete bytes for MPP.
 | K05 | Frame metadata preserves field, timestamp, source, crop and color | frames/fields, odd crop, same-size metadata change, allocation-size change; color enums reject out-of-domain wire values before narrowing to V4L2 fields | kernel/test_metadata.py, kernel/test_layout_reply.py, kernel/test_colorimetry.py, service/test_metadata.py, src/backend/output/format_tests.rs (all field-arrangement transitions, including TOP/BOTTOM parity) |
 | K06 | Source change separates old output from new-layout admission | LAST, blocked DQBUF, sufficient pool reuse, undersized pool rejection, replacement; stale layout generations cannot roll back the format or publish another event | kernel/test_reconfigure.py, kernel/test_layout_reply.py, service/test_reconfigure.py |
 | K07 | Drain completes preceding input only; START preserves decoder references | explicit/natural EOS, deferred input, repeated START/STOP, empty stream; EOS requires drain, exactly one completion, no frames until resume, same/later batch | src/backend/flow_tests.rs, kernel/test_commands.py, service/test_continuation.py, service/test_bitstream.py |
-| K08 | CAPTURE stop preserves OUTPUT; OUTPUT stop invalidates its epoch | running/draining/reconfiguring, acknowledgement/disconnect/timeout | kernel/test_lifecycle.py, kernel/test_stop_serialization.py, service/test_lifecycle.py |
+| K08 | CAPTURE stop preserves OUTPUT; OUTPUT seek reconstructs retained CAPTURE ownership in its new epoch | running/draining/reconfiguring, acknowledgement/disconnect/timeout, CAPTURE QBUF before OUTPUT starts, held images, seek without CAPTURE streamoff for every codec/depth | kernel/test_lifecycle.py, kernel/test_stop_serialization.py, kernel/test_capture_ownership.py, kernel/test_decode_lifecycle.py, service/test_lifecycle.py |
 | K09 | Blocking calls do not prevent progress or mutate each other's transaction | event wait, DQBUF wait, concurrent stop and mutations | kernel/test_blocking_events.py, kernel/test_stop_serialization.py |
 | K10 | Failure ends one decoding incarnation; complete teardown permits same-fd initialization | close/disconnect, fd exhaustion, fatal reply; every reply after FAILED in the same/later batch rejects mutation; START/STOP/S_FMT/STREAMON reject before both queues are stopped and freed; replacement service endpoint cannot share ownership with the failed incarnation | kernel/test_sessions.py, kernel/test_reinitialize.py, service/test_concurrency.py, service/test_recovery.py |
 | P01 | Wire validation precedes resource transfer or state mutation | version, batch/message reserved, every event including CLOSE, all undefined flags, validation before pool registration/state mutation, clean FAILED reply, count, epoch, generation, pool, slot, unsupported message | kernel/test_batch.py, kernel/test_reply_validation.py, kernel/test_pool.py, service/test_protocol.py, service/test_protocol_validation.py, service/test_registration.py |
@@ -206,6 +206,13 @@ notifications separately from pixel-bearing frames. Recoverable parser errors
 must be asserted through these replies, not inferred from stderr messages.
 
 ## Validation and known external failure
+
+Native SDK declarations are compiler inputs. MPP functions, dispatch-table and
+buffer-info layouts, codec values and control constants come from the selected
+headers. `support/mpp_sdk_tests.py` removes an SDK operation in an isolated header
+fixture and requires Cargo to reject the consumer. MPP and GStreamer share the
+same native-sdk discovery and invalidation contract, also exercised through
+`support/build_configuration_tests.py`.
 
 Run formatting, static checks, Rust tests, preload tests, kernel build, the full
 Python integration suite and v4l2-compliance. Do not filter out failed cases.

@@ -8,7 +8,7 @@
 #define V4L2_RKMPP_BRIDGE_UAPI_H
 #include <linux/ioctl.h>
 #include <linux/types.h>
-#define RB_VERSION 11
+#define RB_VERSION 12
 #define RB_BATCH_MAX 16
 #define RB_MAX_BUFFERS 32
 #define RB_MIN_CAPTURE 2
@@ -69,6 +69,10 @@ enum rb_reply {
   RB_DRAINING
 };
 #define RB_CAPTURE_REUSE 1U
+/* CAPTURE_REUSE republishes retained storage permissions, including after the
+ * kernel consumes an empty EOS LAST. It is followed by RECYCLE only for slots
+ * still queued in the kernel; every other slot remains pinned until QBUF.
+ * It also acknowledges a pending LAYOUT when the client requests that reuse. */
 #define RB_RESET_CAPTURE_ONLY (1U << 16)
 #define RB_RESET_ABORT_DRAIN (1U << 17)
 /* PACKET.count and RECYCLE.count are nonzero queue-submission identities,

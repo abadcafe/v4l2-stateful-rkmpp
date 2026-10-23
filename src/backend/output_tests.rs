@@ -6,6 +6,7 @@
 //! test_register_rejects_invalid_identity_and_capacity_atomically,
 //! test_start_invalid_count_preserves_stopped_pool,
 //! test_start_reuse_validates_storage_before_changing_decoder.
+//! test_start_empty_drain_snapshot_replaces_previous_write_permissions.
 use std::num::NonZeroU32;
 
 use dma_buf::memory::Buffer;
@@ -46,7 +47,25 @@ fn test_stop_requires_explicit_start_before_replacement_can_run() {
   assert_eq!(output.status(), Status::Stopped);
   output.start(1, false, None).unwrap();
   assert_ne!(output.status(), Status::Stopped);
-  assert!(output.start(1, true, None).is_err());
+}
+
+#[test]
+fn test_start_empty_drain_snapshot_replaces_previous_write_permissions()
+{
+  let mut output = Output::new(crate::quantize::Factory::default());
+  output
+    .register(1, vec![Buffer::allocate(4096).unwrap()], None)
+    .unwrap();
+  output.start(1, false, None).unwrap();
+  output.recycle(1, 0, NonZeroU32::new(1).unwrap(), None).unwrap();
+  output.start(1, true, None).unwrap();
+  assert_eq!(output.status(), Status::Active);
+  output.recycle(1, 0, NonZeroU32::new(2).unwrap(), None).unwrap();
+  assert!(
+    output.recycle(1, 0, NonZeroU32::new(3).unwrap(), None).is_err()
+  );
+  assert!(output.start(2, true, None).is_err());
+  assert_eq!(output.status(), Status::Active);
 }
 
 #[test]

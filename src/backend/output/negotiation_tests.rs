@@ -3,7 +3,8 @@
 //! operations: test entrypoints; entities: none; tests:
 //! test_announce_old_pool_cannot_acknowledge_new_layout,
 //! test_stop_retains_pending_decoder_ack_until_new_pool_is_ready,
-//! test_start_rejects_invalid_capacity_and_reuse_without_a_layout_change.
+//! test_start_rejects_invalid_capacity_and_reuse_without_a_layout.
+//! test_start_refreshes_active_storage_without_a_decoder_acknowledgement.
 use super::negotiation::Negotiation;
 #[test]
 fn test_announce_old_pool_cannot_acknowledge_new_layout() {
@@ -35,8 +36,7 @@ fn test_stop_retains_pending_decoder_ack_until_new_pool_is_ready() {
   assert!(n.commit(18));
 }
 #[test]
-fn test_start_rejects_invalid_capacity_and_reuse_without_a_layout_change()
- {
+fn test_start_rejects_invalid_capacity_and_reuse_without_a_layout() {
   let mut n = Negotiation::default();
   for count in [0, 33, usize::MAX] {
     assert!(n.start(count, false).is_err());
@@ -47,5 +47,16 @@ fn test_start_rejects_invalid_capacity_and_reuse_without_a_layout_change()
   n.start(32, false).unwrap();
   assert!(!n.commit(31));
   assert!(n.commit(32));
-  assert!(n.start(32, true).is_err());
+}
+
+#[test]
+fn test_start_refreshes_active_storage_without_a_decoder_acknowledgement()
+ {
+  let mut n = Negotiation::default();
+  n.start(18, false).unwrap();
+  assert!(n.commit(18));
+  n.start(18, true).unwrap();
+  assert!(n.waiting() && !n.retiring() && !n.acknowledge());
+  assert!(n.commit(18));
+  assert!(n.active());
 }

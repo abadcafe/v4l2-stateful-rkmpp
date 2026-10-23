@@ -168,6 +168,7 @@ static void submit_queued(struct rb_session *s) {
                       queued_entry) if (b->state == VB2_BUF_STATE_ACTIVE)
       submit_packet(s, b);
 }
+static void publish_capture(struct rb_session *s, u32 flags);
 static bool last_buffer(struct rb_session *s) {
   unsigned i;
   for (i = 0; i < s->capture.num_buffers; i++)
@@ -179,6 +180,11 @@ static bool last_buffer(struct rb_session *s) {
         vb2_set_plane_payload(b, p, 0);
       vb2_buffer_done(b, VB2_BUF_STATE_DONE);
       s->eos = false;
+      /* The service did not emit FRAME for this empty marker. Refresh its
+       * write permissions before accepting any new QBUF or RESUME. Layout
+       * changes retain their explicit client acknowledgement instead. */
+      if (s->flow == RB_FLOW_DRAINED)
+        publish_capture(s, RB_CAPTURE_REUSE);
       return true;
     }
   return false;
@@ -206,7 +212,7 @@ static void queued(struct vb2_buffer *b) {
     }
     s->capture_token[b->index] = ++s->capture_serial;
     s->available[b->index] = true;
-    if (s->cap_started && s->out_started) {
+    if (s->cap_started) {
       if (s->eos) {
         complete_last(s);
         if (!s->available[b->index])
@@ -232,24 +238,29 @@ static bool capture_fits(struct rb_session *s) {
   return rb_capture_fits(s->capture_contract, s->capture.num_buffers,
                          capture_capacity(s));
 }
-static void activate_capture(struct rb_session *s) {
-  if (WARN_ON_ONCE(rb_capture_activate(
-          s->capture_contract, s->capture.num_buffers, capture_capacity(s))))
-    return;
-  s->eos = false;
-  s->capture.last_buffer_dequeued = false;
+/* Publish the complete authoritative CAPTURE ownership in this epoch. A
+ * decoder reset invalidates service-side registrations, but never transfers
+ * a displayed buffer back from its client or stops the independent queue. */
+static void publish_capture(struct rb_session *s, u32 flags) {
   push(s, (struct rb_message){.type = RB_CAPTURE,
                               .count = s->capture.num_buffers,
-                              .flags = RB_CAPTURE_REUSE});
+                              .flags = flags});
   for (unsigned i = 0; i < s->capture.num_buffers; i++)
     if (s->available[i])
       push(s, (struct rb_message){.type = RB_RECYCLE,
                                   .index = i,
                                   .count = s->capture_token[i]});
 }
+static void activate_capture(struct rb_session *s) {
+  if (WARN_ON_ONCE(rb_capture_activate(
+          s->capture_contract, s->capture.num_buffers, capture_capacity(s))))
+    return;
+  s->eos = false;
+  s->capture.last_buffer_dequeued = false;
+  publish_capture(s, RB_CAPTURE_REUSE);
+}
 static int start(struct vb2_queue *q, unsigned count) {
   struct rb_session *s = vb2_get_drv_priv(q);
-  unsigned i;
   if (s->failed) {
     return_all(q, VB2_BUF_STATE_QUEUED);
     return -EIO;
@@ -272,12 +283,7 @@ static int start(struct vb2_queue *q, unsigned count) {
       return 0;
     }
     complete_last(s);
-    push(s, (struct rb_message){.type = RB_CAPTURE, .count = q->num_buffers});
-    for (i = 0; i < q->num_buffers; i++)
-      if (s->available[i])
-        push(s, (struct rb_message){.type = RB_RECYCLE,
-                                    .index = i,
-                                    .count = s->capture_token[i]});
+    publish_capture(s, 0);
     if (drain_complete(s)) {
       s->flow = RB_FLOW_RUNNING;
       memset(s->before_stop, 0, sizeof(s->before_stop));
@@ -337,6 +343,14 @@ static void stop(struct vb2_queue *q) {
     memset(s->before_stop, 0, sizeof(s->before_stop));
   }
   rb_capture_stop(s->capture_contract);
+  if (!capture_only && s->cap_started && !s->failed && !s->closed) {
+    s->capture.last_buffer_dequeued = false;
+    /* An old completed LAST can still be in done_list. Its later DQBUF must
+     * not put the new epoch back into EPIPE after new frames are published. */
+    for (unsigned i = 0; i < s->capture.num_buffers; i++)
+      to_vb2_v4l2_buffer(s->capture.bufs[i])->flags &= ~V4L2_BUF_FLAG_LAST;
+    publish_capture(s, 0);
+  }
 }
 static const struct vb2_ops queue_ops = {.queue_setup = setup,
                                          .buf_prepare = prepare,
