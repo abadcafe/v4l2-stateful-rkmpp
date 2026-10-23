@@ -6,6 +6,8 @@ HTML stays inline and all hosted files are explicit caller-owned inputs.
 """
 
 import errno
+import os
+import re
 import socket
 import threading
 from functools import partial
@@ -16,6 +18,28 @@ from typing import final, override
 from tests.support.outcome import Ok, Rejected, Result
 
 type _Request = socket.socket | tuple[bytes, socket.socket]
+
+
+def _range(header: str, size: int) -> Result[tuple[int, int] | None]:
+    # Unsupported units, malformed syntax and multiple ranges may be
+    # ignored (RFC 9110 section 14). Ordinary GET still serves the file.
+    match = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", header)
+    if match is None or not (match[1] or match[2]):
+        return Ok(None)
+    try:
+        if match[1]:
+            start = int(match[1])
+            end = int(match[2]) + 1 if match[2] else size
+            if match[2] and end <= start:
+                return Ok(None)
+        else:
+            suffix = int(match[2])
+            start, end = max(0, size - suffix), size
+    except ValueError:
+        return Ok(None)
+    if start >= size:
+        return Rejected(errno.ERANGE, "unsatisfiable media range")
+    return Ok((start, min(end, size)))
 
 
 class _Server(ThreadingHTTPServer):
@@ -76,9 +100,55 @@ class _Handler(SimpleHTTPRequestHandler):
                 self.end_headers()
                 _ = self.wfile.write(self._page)
             else:
-                super().do_GET()
+                requested = self.headers.get("Range")
+                if (
+                    requested is None
+                    or any(
+                        name in self.headers
+                        for name in ("If-Range", "If-Modified-Since", "If-None-Match")
+                    )
+                    or not self._serve_range(requested)
+                ):
+                    super().do_GET()
         except BrokenPipeError, ConnectionResetError:
             return
+
+    def _serve_range(self, requested: str) -> bool:
+        path = self.translate_path(self.path)
+        try:
+            source = open(path, "rb")
+        except OSError:
+            return False
+        with source:
+            metadata = os.fstat(source.fileno())
+            interval = _range(requested, metadata.st_size)
+            if isinstance(interval, Rejected):
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{metadata.st_size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return True
+            if interval.value is None:
+                return False
+            start, end = interval.value
+            self.send_response(206)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Type", self.guess_type(path))
+            self.send_header("Content-Length", str(end - start))
+            self.send_header(
+                "Content-Range", f"bytes {start}-{end - 1}/{metadata.st_size}"
+            )
+            self.send_header("Last-Modified", self.date_time_string(metadata.st_mtime))
+            self.end_headers()
+            _ = source.seek(start)
+            remaining = end - start
+            while remaining:
+                block = source.read(min(remaining, 64 * 1024))
+                if not block:
+                    break
+                _ = self.wfile.write(block)
+                remaining -= len(block)
+            return True
 
     @override
     def log_message(self, format: str, *args: object) -> None:

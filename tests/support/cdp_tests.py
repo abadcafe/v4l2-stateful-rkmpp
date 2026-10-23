@@ -199,6 +199,33 @@ def test_call_rejects_duplicate_reply_from_completed_command(peer: PeerFactory) 
         assert isinstance(result, Rejected) and result.code == errno.EPROTO
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-json",
+        '{"id":99,"result":{}}',
+        '{"id":1,"result":{},"error":{"code":-1,"message":"ambiguous"}}',
+        '{"id":1,"method":"Example.changed","result":{}}',
+        '{"method":"Example.changed","result":{}}',
+        '{"id":1}',
+    ],
+)
+def test_call_protocol_damage_retires_connection_and_preserves_first_error(
+    peer: PeerFactory, payload: str
+) -> None:
+    def handle(connection: ServerConnection) -> None:
+        _ = connection.recv()
+        connection.send(payload)
+        # Protocol damage must retire the connection; no later command may
+        # reuse a stream whose outstanding reply/event history is ambiguous.
+        assert tuple(connection) == ()
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        failure = cdp.call("Example.damaged")
+        assert isinstance(failure, Rejected) and failure.code == errno.EPROTO
+        assert cdp.call("Example.next") == failure
+
+
 def test_call_expired_deadline_does_not_consume_buffered_messages(
     peer: PeerFactory,
 ) -> None:

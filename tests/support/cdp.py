@@ -89,7 +89,7 @@ class Cdp:
         if self._failure is not None:
             return self._failure
         if len(self._expired) >= _MAX_EXPIRED:
-            return self._overflow("too many unanswered CDP commands")
+            return self._retire(errno.ENOBUFS, "too many unanswered CDP commands")
         self._sequence += 1
         deadline = time.monotonic() + timeout
         try:
@@ -107,10 +107,19 @@ class Cdp:
                 try:
                     envelope = _Envelope.model_validate_json(raw, strict=True)
                 except ValidationError as error:
-                    return Rejected(errno.EPROTO, str(error))
+                    return self._retire(errno.EPROTO, str(error))
+                if (
+                    envelope.id is not None
+                    and envelope.method is not None
+                    or envelope.result is not None
+                    and envelope.error is not None
+                    or envelope.id is None
+                    and (envelope.result is not None or envelope.error is not None)
+                ):
+                    return self._retire(errno.EPROTO, "ambiguous CDP envelope")
                 if envelope.id is None:
                     if envelope.method is None:
-                        return Rejected(
+                        return self._retire(
                             errno.EPROTO, "CDP response has neither id nor method"
                         )
                     size = len(raw.encode()) if isinstance(raw, str) else len(raw)
@@ -118,8 +127,9 @@ class Cdp:
                         len(self._events) >= _MAX_EVENTS
                         or self._event_bytes + size > _MAX_EVENT_BYTES
                     ):
-                        return self._overflow(
-                            "unconsumed CDP notifications exceed capacity"
+                        return self._retire(
+                            errno.ENOBUFS,
+                            "unconsumed CDP notifications exceed capacity",
                         )
                     self._events.append(
                         Notification(method=envelope.method, params=envelope.params)
@@ -132,17 +142,19 @@ class Cdp:
                     self._expired.remove(envelope.id)
                     continue
                 if envelope.id != self._sequence:
-                    return Rejected(errno.EPROTO, "unexpected CDP response id")
+                    return self._retire(errno.EPROTO, "unexpected CDP response id")
                 if envelope.error is not None:
                     return Rejected(envelope.error.code, envelope.error.message)
                 if envelope.result is None:
-                    return Rejected(errno.EPROTO, "CDP reply has no result or error")
+                    return self._retire(
+                        errno.EPROTO, "CDP reply has no result or error"
+                    )
                 return Ok(envelope.result)
         except TimeoutError:
             self._expired.add(self._sequence)
             return Rejected(errno.ETIMEDOUT, "CDP " + method)
         except (ConnectionClosed, OSError) as error:
-            return Rejected(errno.ECONNRESET, str(error))
+            return self._retire(errno.ECONNRESET, str(error))
 
     def evaluate[T](self, expression: str, model: type[T]) -> Result[T]:
         result = self.call(
@@ -175,10 +187,10 @@ class Cdp:
         self._event_bytes = 0
         return events
 
-    def _overflow(self, message: str) -> Rejected:
+    def _retire(self, code: int, message: str) -> Rejected:
         # A missing event or forgotten response ID would make later replies
         # ambiguous. Surface the loss and retire this connection permanently.
-        self._failure = Rejected(errno.ENOBUFS, message)
+        self._failure = Rejected(code, message)
         self.close()
         return self._failure
 

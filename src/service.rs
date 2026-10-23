@@ -45,7 +45,7 @@ async fn run(path: &Path, diagnostics: &Path) -> Result<(), String> {
         break Err("hardware executor terminated".into());
       },
       result = endpoint.terminated() => {
-        if let Err(error) = result && error.is_panic() { panic = Some(error.into_panic()); }
+        if let Err(payload) = result { panic = Some(payload); }
         break Err("diagnostics task terminated".into());
       },
       result = sessions.join_next(), if !sessions.is_empty() => {
@@ -103,10 +103,10 @@ async fn run(path: &Path, diagnostics: &Path) -> Result<(), String> {
       panic = Some(error);
     }
   }
-  if let Err(error) = endpoint.close().await {
-    result = Err(format!("diagnostics task failed: {error}"));
-    if error.is_panic() && panic.is_none() {
-      panic = Some(error.into_panic());
+  if let Err(payload) = endpoint.close().await {
+    result = Err("diagnostics executor panicked".into());
+    if panic.is_none() {
+      panic = Some(payload);
     }
   }
   drop(control);

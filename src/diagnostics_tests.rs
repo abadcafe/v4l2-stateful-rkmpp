@@ -161,3 +161,37 @@ async fn test_measure_accepts_fragmented_request_without_resource_inventory()
   assert!(value.get("fds").is_none());
   endpoint.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_close_joins_inventory_worker_and_releases_queued_clients()
+{
+  let path = path("inventory-close");
+  let file = File::open("/dev/null").unwrap();
+  let signals = Signals::install().unwrap();
+  let endpoint =
+    Endpoint::open(&path, file.as_fd(), &signals.shutdown())
+      .await
+      .unwrap();
+  let mut clients = Vec::new();
+  for _ in 0..16 {
+    let mut client = UnixStream::connect(&path).await.unwrap();
+    client.write_all(b"snapshot\n").await.unwrap();
+    clients.push(client);
+  }
+  // Closing during queued inventory must retire accepted work without
+  // retaining sockets or an execution thread beyond close completion.
+  endpoint.close().await.unwrap();
+  assert!(!path.exists());
+  for mut client in clients {
+    let mut response = Vec::new();
+    let result = tokio::time::timeout(
+      Duration::from_secs(1),
+      client.read_to_end(&mut response),
+    )
+    .await
+    .unwrap();
+    if let Err(error) = result {
+      assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+    }
+  }
+}

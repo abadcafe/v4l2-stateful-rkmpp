@@ -3,9 +3,11 @@
 //! diagnostics_tests, tests/service/test_diagnostics. The broker
 //! outlives this endpoint by borrowing. Resource pressure at accept
 //! backs off without failing the service or existing decode sessions.
+use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, io};
 
@@ -13,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
+use crate::execution::{Client, Limits, Pool};
 use crate::shutdown::Shutdown;
 
 mod identity;
@@ -28,6 +31,7 @@ pub struct Endpoint<'a> {
   path: PathBuf,
   inode: (u64, u64),
   task: Option<JoinHandle<()>>,
+  worker: Option<Pool<()>>,
   _broker: BorrowedFd<'a>,
 }
 
@@ -39,17 +43,31 @@ impl<'a> Endpoint<'a> {
   ) -> io::Result<Self> {
     let status = status::Status::current(broker, shutdown)?;
     reclaim(path).await?;
+    // A timeout cannot preempt synchronous procfs calls on the runtime.
+    // Bound both running and queued inventory independently of clients.
+    let worker = Pool::start(
+      "rkmpp-status",
+      Limits {
+        workers: NonZeroUsize::new(1).unwrap(),
+        backlog: NonZeroUsize::new(1).unwrap(),
+      },
+      || (),
+      |_| {},
+    )?;
+    let client = worker.router().lane();
     let listener = UnixListener::bind(path)?;
     let metadata = fs::symlink_metadata(path)?;
     let mut owner = Self {
       path: path.to_owned(),
       inode: (metadata.dev(), metadata.ino()),
       task: None,
+      worker: Some(worker),
       _broker: broker,
     };
     fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
     owner.task = Some(tokio::spawn(async move {
-      if let Err(error) = run(listener, status).await {
+      if let Err(error) = run(listener, Arc::new(status), client).await
+      {
         eprintln!("rkmpp diagnostics: {error}");
       }
     }));
@@ -58,24 +76,36 @@ impl<'a> Endpoint<'a> {
 }
 
 impl Endpoint<'_> {
-  pub async fn terminated(
-    &mut self,
-  ) -> Result<(), tokio::task::JoinError> {
-    let result = self.task.as_mut().unwrap().await;
-    self.task = None;
-    result
+  pub async fn terminated(&mut self) -> std::thread::Result<()> {
+    tokio::select! {
+      result = self.task.as_mut().unwrap() => {
+        self.task = None;
+        match result {
+          Err(error) if error.is_panic() => Err(error.into_panic()),
+          _ => Ok(()),
+        }
+      },
+      result = self.worker.as_mut().unwrap().terminated() => {
+        result
+      },
+    }
   }
 
-  pub async fn close(mut self) -> Result<(), tokio::task::JoinError> {
-    if let Some(task) = self.task.take() {
+  pub async fn close(mut self) -> std::thread::Result<()> {
+    let result = if let Some(task) = self.task.take() {
       task.abort();
       match task.await {
-        Err(error) if error.is_cancelled() => Ok(()),
-        result => result,
+        Err(error) if error.is_panic() => Err(error.into_panic()),
+        _ => Ok(()),
       }
     } else {
       Ok(())
-    }
+    };
+    let joined = match self.worker.take() {
+      Some(worker) => worker.close().await,
+      None => Ok(()),
+    };
+    result.and(joined)
   }
 }
 
@@ -138,10 +168,11 @@ async fn reclaim(path: &Path) -> io::Result<()> {
 
 async fn run(
   listener: UnixListener,
-  status: status::Status,
+  status: Arc<status::Status>,
+  worker: Client<()>,
 ) -> io::Result<()> {
   loop {
-    let (mut client, _) = match listener.accept().await {
+    let (client, _) = match listener.accept().await {
       Ok(connection) => connection,
       Err(error)
         if matches!(
@@ -168,9 +199,14 @@ async fn run(
       }
       Err(error) => return Err(error),
     };
+    // A queued inventory operation retains the actual client
+    // descriptor, even if the async deadline expires. It must never
+    // scan using a raw descriptor number that another client could
+    // have reused.
+    let (read, mut write) = client.into_split();
     let response = match tokio::time::timeout(
       Duration::from_millis(200),
-      respond(&mut client, &status),
+      respond(read, &status, &worker),
     )
     .await
     {
@@ -187,15 +223,16 @@ async fn run(
       .expect("serialize error text")
     });
     let _ = tokio::time::timeout(Duration::from_millis(200), async {
-      client.write_all(&response).await?;
-      client.write_all(b"\n").await
+      write.write_all(&response).await?;
+      write.write_all(b"\n").await
     })
     .await;
   }
 }
 async fn respond(
-  client: &mut UnixStream,
-  status: &status::Status,
+  mut client: tokio::net::unix::OwnedReadHalf,
+  status: &Arc<status::Status>,
+  worker: &Client<()>,
 ) -> io::Result<Vec<u8>> {
   let mut request = [0u8; 64];
   let mut length = 0;
@@ -220,9 +257,24 @@ async fn respond(
       ));
     }
   };
+  let status = status.clone();
   let response = match &request[..end] {
-    b"snapshot\n" => status.snapshot(client.as_fd())?,
-    b"measure\n" => status.measure()?,
+    b"snapshot\n" => {
+      worker
+        .call(move |_| status.snapshot(client.as_ref().as_fd()))
+        .await?
+    }
+    b"measure\n" => {
+      worker
+        .call(move |_| {
+          // Retain the stream until this accepted operation has
+          // completed.
+          let response = status.measure();
+          drop(client);
+          response
+        })
+        .await?
+    }
     _ => {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,

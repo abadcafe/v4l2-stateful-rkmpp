@@ -11,8 +11,46 @@ from http.client import HTTPConnection
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import pytest
+
 from tests.support.browser.site import Site
 from tests.support.outcome import Rejected, accepted
+
+
+@pytest.mark.parametrize(
+    "requested,expected,status,extent",
+    [
+        ("bytes=2-5", b"2345", 206, "bytes 2-5/10"),
+        ("bytes=7-", b"789", 206, "bytes 7-9/10"),
+        ("bytes=-3", b"789", 206, "bytes 7-9/10"),
+        ("bytes=7-999", b"789", 206, "bytes 7-9/10"),
+        ("bytes=10-", b"", 416, "bytes */10"),
+        ("bytes=-0", b"", 416, "bytes */10"),
+        ("bytes=5-2", b"0123456789", 200, None),
+        ("unknown=2-5", b"0123456789", 200, None),
+        ("bytes=0-1,4-5", b"0123456789", 200, None),
+    ],
+)
+def test_open_media_range_transfers_only_requested_bytes(
+    tmp_path: Path, requested: str, expected: bytes, status: int, extent: str | None
+) -> None:
+    source = tmp_path / "video.webm"
+    _ = source.write_bytes(b"0123456789")
+    site = accepted(Site.open(tmp_path / "site", (source,)))
+    try:
+        address = urlsplit(site.origin)
+        assert address.hostname is not None
+        connection = HTTPConnection(address.hostname, address.port, timeout=2)
+        try:
+            connection.request("GET", "/video.webm", headers={"Range": requested})
+            response = connection.getresponse()
+            assert response.status == status
+            assert response.getheader("Content-Range") == extent
+            assert response.read() == expected
+        finally:
+            connection.close()
+    finally:
+        accepted(site.close())
 
 
 def test_close_releases_clients_with_unfinished_http_requests(tmp_path: Path) -> None:
