@@ -1,5 +1,7 @@
-//! Public decoded-to-CAPTURE format contract, independent of the
-//! parser.
+//! module: output::format_tests; responsibility: define
+//! decoded-to-CAPTURE geometry negotiation. operations: test
+//! entrypoints; entities: none; tests: format creation, storage/crop
+//! bounds, color and field changes.
 use rkmpp::FrameInfo;
 
 use super::format::Format;

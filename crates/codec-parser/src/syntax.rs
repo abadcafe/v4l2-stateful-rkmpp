@@ -12,9 +12,6 @@ mod h264_tests;
 pub mod hevc;
 #[cfg(test)]
 mod hevc_tests;
-pub(crate) mod parameters;
-#[cfg(test)]
-mod parameters_tests;
 mod restriction;
 #[cfg(test)]
 mod restriction_tests;

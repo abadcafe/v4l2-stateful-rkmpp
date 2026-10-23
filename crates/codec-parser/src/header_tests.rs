@@ -1,5 +1,8 @@
 //! module: header_tests; responsibility: owned admission-result
 //! lifetime.
+//! operations: test entrypoints; entities: none; tests:
+//! test_validate_annexb_retains_owned_picture_headers,
+//! test_validate_normalized_sequence_is_shared_and_bad_metadata_is_atomic.
 
 #[test]
 fn test_validate_annexb_retains_owned_picture_headers() {
@@ -94,7 +97,7 @@ fn test_validate_normalized_sequence_is_shared_and_bad_metadata_is_atomic()
       _ => panic!("wrong normalized codec"),
     }
     let configuration = parser.configuration();
-    let mut malformed = configuration.clone();
+    let mut malformed = configuration.to_vec();
     malformed.extend_from_slice(if codec == *b"H264" {
       &[0, 0, 1, 0x67]
     } else {

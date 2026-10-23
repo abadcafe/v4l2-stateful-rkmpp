@@ -1,5 +1,6 @@
 //! module: syntax::hevc; responsibility: parse HEVC SPS
 //! limits and geometry. operations: parse; tests: hevc_tests.
+//! entities: Sequence;
 use std::io;
 
 use crate::syntax::geometry::Geometry;

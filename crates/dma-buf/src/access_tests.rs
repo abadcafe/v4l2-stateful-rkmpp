@@ -1,6 +1,12 @@
 //! module: dma_buf::access_tests; responsibility: specify CPU
 //! ownership, transient synchronization retries and terminal release
 //! failures.
+//! operations: test entrypoints; entities: Storage; tests:
+//! test_new_excludes_aliases_until_finish_or_drop,
+//! test_new_failed_start_releases_claim,
+//! test_finish_retries_transient_start_and_end_failures,
+//! test_finish_terminal_failure_prevents_alias_reentry,
+//! test_drop_terminal_failure_prevents_alias_reentry.
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};

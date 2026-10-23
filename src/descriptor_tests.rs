@@ -1,5 +1,7 @@
 //! module: descriptor_tests; responsibility: shared fd lifetime and
 //! identity.
+//! operations: test entrypoints; entities: none; tests:
+//! test_clone_shares_descriptor_until_final_owner_is_released.
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd};
 

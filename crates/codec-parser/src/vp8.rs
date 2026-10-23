@@ -1,6 +1,6 @@
 //! module: codec_parser::vp8; responsibility: validate VP8 frame
 //! headers and partition bounds across a sequence. operations: new,
-//! validate; entities: Validator; tests: vp8_tests.
+//! validate, reset; entities: Validator; tests: vp8_tests.
 use std::io;
 
 mod native;
@@ -14,6 +14,11 @@ pub(crate) struct Validator {
 impl Validator {
   pub(crate) fn new() -> io::Result<Self> {
     Ok(Self { parser: native::Parser::new(), needs_keyframe: true })
+  }
+
+  pub(crate) fn reset(&mut self) {
+    self.parser.reset();
+    self.needs_keyframe = true;
   }
 
   pub(crate) fn validate(

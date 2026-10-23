@@ -1,5 +1,5 @@
 //! module: codec_parser::vp9; responsibility: validate VP9 superframes
-//! and frame-header bounds. operations: new, validate;
+//! and frame-header bounds. operations: new, validate, reset;
 //! entities: Validator; tests: vp9_tests.
 use std::io;
 
@@ -14,6 +14,12 @@ pub(crate) struct Validator {
 impl Validator {
   pub(crate) fn new() -> io::Result<Self> {
     Ok(Self { parser: native::Parser::new()?, needs_keyframe: true })
+  }
+
+  pub(crate) fn reset(&mut self) -> io::Result<()> {
+    self.needs_keyframe = true;
+    self.parser = native::Parser::new()?;
+    Ok(())
   }
 
   pub(crate) fn validate(

@@ -1,5 +1,10 @@
 //! module: rpc::memory_tests; responsibility: define kernel-checked
 //! user-address copies through the memory module's public interface.
+//! operations: test entrypoints; entities: Mapping; tests:
+//! test_read_and_write_copy_exact_live_extent,
+//! test_read_and_write_invalid_addresses_return_efault,
+//! test_write_readonly_mapping_returns_efault_without_mutation,
+//! test_read_and_write_partial_page_copy_returns_efault.
 use super::memory::{read, write};
 
 struct Mapping {

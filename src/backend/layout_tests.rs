@@ -1,5 +1,16 @@
 //! module: backend::layout_tests; responsibility: identity and geometry
 //! lifetime contracts, including hidden tasks and complementary fields.
+//! operations: test entrypoints; entities: none; tests:
+//! test_take_preserves_reordered_identity_with_identical_timestamps,
+//! test_peek_checks_parsed_geometry_and_resolves_decoder_geometry,
+//! test_push_rejects_out_of_bounds_geometry_without_consuming_identity,
+//! test_complete_bufferless_error_restores_and_reclaims_provenance,
+//! test_finish_reclaims_hidden_tasks_without_display_notifications,
+//! test_take_pairs_only_explicit_complementary_fields,
+//! test_complete_info_change_does_not_consume_picture_provenance,
+//! test_finish_retains_pending_presentation_until_it_is_published,
+//! test_drained_requires_every_display_and_field_to_be_completed,
+//! test_plan_is_available_only_while_task_obligation_is_live.
 use codec_parser::Limits;
 
 use super::layout::Layouts;

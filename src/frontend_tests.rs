@@ -1,8 +1,116 @@
-//! Public codec admission contract across all five framed formats.
+//! module: frontend_tests; responsibility: define uniform codec
+//! admission. operations: test entrypoints; entities: none; tests: all
+//! five codecs, metadata, task identity, budget/semantic rollback and
+//! damage recovery.
 use rkmpp::Payload;
 
 use crate::frontend::Frontend;
 use crate::timestamp::Source;
+
+#[test]
+fn test_admit_semantic_rejection_cannot_install_parameter_sets() {
+  let packet =
+    &include_bytes!("../tests/artifacts/h264-yuv420p.h264")[..4454];
+  let codec = u32::from_le_bytes(*b"H264");
+  let prefix = codec_parser::Validator::new(codec)
+    .unwrap()
+    .validate(packet, 1)
+    .unwrap()[0]
+    .prefix;
+  let mut damaged = packet[..prefix].to_vec();
+  // Native header validation accepts SEI framing; recovery-point
+  // semantics reject this truncated Exp-Golomb payload in the service
+  // admission layer.
+  damaged.extend_from_slice(&[0, 0, 1, 6, 6, 1, 0, 0x80]);
+  damaged.extend_from_slice(&packet[prefix..]);
+  assert!(
+    codec_parser::Validator::new(codec)
+      .unwrap()
+      .validate(&damaged, 1)
+      .is_ok()
+  );
+  let mut frontend = Frontend::new(codec).unwrap();
+  assert_eq!(
+    frontend.admit(&damaged, 0, Source::End, 1).err().unwrap().kind(),
+    std::io::ErrorKind::InvalidData
+  );
+  assert!(
+    frontend.admit(&packet[prefix..], 1, Source::End, 1).is_err()
+  );
+  assert_eq!(
+    frontend.admit(packet, 2, Source::End, 1).unwrap().tasks.len(),
+    1
+  );
+}
+
+#[test]
+fn test_admit_annexb_budget_rejection_preserves_committed_configuration()
+ {
+  for (codec, packet) in [
+    (
+      *b"H264",
+      &include_bytes!("../tests/artifacts/h264-yuv420p.h264")[..4454],
+    ),
+    (
+      *b"HEVC",
+      &include_bytes!("../tests/artifacts/hevc-yuv420p.hevc")[..5496],
+    ),
+  ] {
+    let fourcc = u32::from_le_bytes(codec);
+    let prefix = codec_parser::Validator::new(fourcc)
+      .unwrap()
+      .validate(packet, 1)
+      .unwrap()[0]
+      .prefix;
+    let mut frontend = Frontend::new(fourcc).unwrap();
+    assert!(frontend.admit(packet, 0, Source::End, 0).is_err());
+    assert!(
+      frontend.admit(&packet[prefix..], 1, Source::End, 1).is_err(),
+      "rejected {codec:?} input installed new parameter sets"
+    );
+    assert_eq!(
+      frontend.admit(packet, 2, Source::End, 1).unwrap().tasks.len(),
+      1
+    );
+  }
+}
+
+#[test]
+fn test_admit_annexb_metadata_does_not_require_a_picture_budget() {
+  for (codec, packet) in [
+    (
+      *b"H264",
+      &include_bytes!("../tests/artifacts/h264-yuv420p.h264")[..4454],
+    ),
+    (
+      *b"HEVC",
+      &include_bytes!("../tests/artifacts/hevc-yuv420p.hevc")[..5496],
+    ),
+  ] {
+    let fourcc = u32::from_le_bytes(codec);
+    let prefix = codec_parser::Validator::new(fourcc)
+      .unwrap()
+      .validate(packet, 1)
+      .unwrap()[0]
+      .prefix;
+    let mut frontend = Frontend::new(fourcc).unwrap();
+    assert!(
+      frontend
+        .admit(&packet[..prefix], 0, Source::End, 0)
+        .unwrap()
+        .tasks
+        .is_empty()
+    );
+    assert_eq!(
+      frontend
+        .admit(&packet[prefix..], 1, Source::End, 1)
+        .unwrap()
+        .tasks
+        .len(),
+      1
+    );
+  }
+}
 
 #[test]
 fn test_admit_repeated_damage_restores_standalone_av1_configuration() {

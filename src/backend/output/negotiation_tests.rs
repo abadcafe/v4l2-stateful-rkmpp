@@ -1,5 +1,9 @@
 //! module: output::negotiation_tests; responsibility: CAPTURE
 //! transition matrix.
+//! operations: test entrypoints; entities: none; tests:
+//! test_announce_old_pool_cannot_acknowledge_new_layout,
+//! test_stop_retains_pending_decoder_ack_until_new_pool_is_ready,
+//! test_start_rejects_invalid_capacity_and_reuse_without_a_layout_change.
 use super::negotiation::Negotiation;
 #[test]
 fn test_announce_old_pool_cannot_acknowledge_new_layout() {

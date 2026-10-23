@@ -1,5 +1,8 @@
 //! module: dma_buf::storage_tests; responsibility: specify shared
 //! storage identity across imports and allocation retirement.
+//! operations: test entrypoints; entities: none; tests:
+//! test_state_shares_only_live_matching_storage,
+//! test_state_preserves_live_aliases_across_registry_collection.
 use std::sync::Arc;
 
 use super::storage::state;

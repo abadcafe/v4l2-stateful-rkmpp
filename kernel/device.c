@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Device registration; session ownership is hidden in session.c. */
+/* module: device; responsibility: register the bridge's device endpoints.
+ * operations: bridge_init, bridge_exit; entities: none;
+ * tests: tests/kernel/test_sessions.py and test_lifecycle.py.
+ * Session ownership is hidden in session.c. */
 #include "session.h"
 #include <linux/miscdevice.h>
 #include <linux/module.h>

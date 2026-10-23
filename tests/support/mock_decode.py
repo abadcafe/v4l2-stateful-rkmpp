@@ -548,6 +548,11 @@ def play(
             Packet(data=p.data, timestamp=t)
             for p, t in zip(chunks, timestamps, strict=True)
         )
+    # Packet times are microseconds; the bridge wire carries u64 nanoseconds.
+    # Reject before DMA allocation or session admission, rather than allowing
+    # the native record constructor to raise during a streaming transaction.
+    if any(not 0 <= packet.timestamp <= ((1 << 64) - 1) // 1000 for packet in chunks):
+        return Rejected(errno.EINVAL, "timestamp outside bridge nanosecond domain")
     if not 2 <= capture_count <= 32:
         return Rejected(errno.EINVAL, "invalid capture buffer count")
     if not 0 <= capture_delay < capture_count:

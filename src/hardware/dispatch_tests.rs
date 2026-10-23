@@ -1,5 +1,8 @@
 //! module: hardware::dispatch_tests; responsibility: define bounded
 //! ordered execution.
+//! operations: test entrypoints; entities: none; tests:
+//! test_advance_executes_ordered_batch_and_reuses_storage,
+//! test_event_enforces_bounded_pending_work.
 use super::dispatch::Dispatch;
 use crate::backend::Backend;
 use crate::protocol::command::Command;

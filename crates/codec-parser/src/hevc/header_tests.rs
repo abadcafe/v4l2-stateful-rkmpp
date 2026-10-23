@@ -1,5 +1,10 @@
 //! module: header_tests; responsibility: specify owned HEVC reference
 //! snapshots independently of codecparser storage lifetime.
+//! operations: test entrypoints; entities: none; tests:
+//! test_own_retains_following_references_and_accumulates_long_cycles,
+//! test_own_selects_sps_reference_set_and_preserves_unspecified_long_msb,
+//! test_own_rejects_reference_storage_overflow,
+//! test_own_preserves_current_usage_from_local_and_sps_reference_lists.
 #![forbid(unsafe_code)]
 use super::super::ffi;
 use super::header::own;

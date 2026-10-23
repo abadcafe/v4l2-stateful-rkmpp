@@ -1,4 +1,7 @@
 //! module: hevc_tests; responsibility: HEVC syntax output eligibility.
+//! operations: test entrypoints; entities: none; tests:
+//! test_inspect_first_idr_selects_active_temporal_limits,
+//! test_inspect_rejects_missing_current_reference_and_resumes_at_idr.
 use super::codec::Syntax;
 use super::hevc::Hevc;
 #[test]

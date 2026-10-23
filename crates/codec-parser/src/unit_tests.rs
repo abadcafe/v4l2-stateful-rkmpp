@@ -1,5 +1,8 @@
 //! module: codec_parser::unit_tests; responsibility: ordered AU
 //! termination.
+//! operations: test entrypoints; entities: none; tests:
+//! test_termination_preserves_payload_extent_and_final_boundary,
+//! test_stream_end_without_sequence_end_retains_exact_extent.
 use super::unit::{Boundary, Unit};
 #[test]
 fn test_termination_preserves_payload_extent_and_final_boundary() {

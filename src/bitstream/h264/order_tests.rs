@@ -1,5 +1,10 @@
 //! module: order_tests; responsibility: specify ordering from validated
 //! H264 headers. operations: tests; entities: none.
+//! tests: test_observe_non_idr_marking_exposes_mmco5_boundary,
+//! test_observe_idr_exposes_prior_output_suppression,
+//! test_observe_rejects_nonzero_idr_and_repeated_frame_identity,
+//! test_observe_checks_canonical_difference_overflow_and_accepts_zero_encoding,
+//! test_observe_mmco5_field_pair_uses_normalized_reference_identity.
 use codec_parser::header::{H264, Marking, Operation};
 
 use super::order::Order;

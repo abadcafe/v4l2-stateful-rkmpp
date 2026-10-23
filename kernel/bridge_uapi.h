@@ -1,4 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+/* module: bridge_uapi; responsibility: define the shared bridge wire ABI.
+ * operations: accept, exchange and pool registration records;
+ * entities: rb_message, rb_batch, rb_registered_buffer, rb_pool, event/reply
+ * enums; tests: Rust wire_tests, tests/support/native_tests.py and kernel
+ * protocol validation tests. */
 #ifndef V4L2_RKMPP_BRIDGE_UAPI_H
 #define V4L2_RKMPP_BRIDGE_UAPI_H
 #include <linux/ioctl.h>

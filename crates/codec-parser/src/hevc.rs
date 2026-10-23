@@ -1,15 +1,15 @@
 //! module: codec_parser::hevc; responsibility: validate one
-//! client-framed HEVC AU or metadata packet. operations: new, validate;
-//! entities: Validator; tests: hevc_tests.
+//! client-framed HEVC AU or metadata packet. operations: new, validate,
+//! reset; entities: Validator; tests: hevc_tests.
 use std::collections::BTreeMap;
 use std::io;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use super::ffi;
+use crate::configuration::{Configuration, Parameters};
 use crate::syntax::bits::Bits;
 use crate::syntax::hevc::Sequence;
-use crate::syntax::parameters::Parameters;
 mod header;
 #[cfg(test)]
 mod header_tests;
@@ -38,31 +38,42 @@ impl Validator {
       })
   }
 
-  pub(super) fn configuration(&self) -> Vec<u8> {
+  pub(super) fn configuration(&self) -> Configuration {
     self.sets.configuration()
   }
 
   pub(super) fn validate(
     &mut self,
     bytes: &[u8],
+    budget: usize,
   ) -> io::Result<super::unit::Unit> {
     // Inspection only interprets input. Classify its syntax failures
     // before recovery, whose native allocation can fail independently.
-    let result = self.inspect(bytes).map_err(|error| {
+    let result = self.inspect(bytes, budget).map_err(|error| {
       io::Error::new(io::ErrorKind::InvalidData, error)
     });
     if result.is_err() {
-      let configuration = self.configuration();
-      let mut restored = Self::new()?;
-      if !configuration.is_empty() {
-        restored.inspect(&configuration)?;
-      }
-      *self = restored;
+      self.reset()?;
     }
     result
   }
 
-  fn inspect(&mut self, bytes: &[u8]) -> io::Result<super::unit::Unit> {
+  pub(super) fn reset(&mut self) -> io::Result<()> {
+    let configuration = self.configuration();
+    let mut restored = Self::new()?;
+    restored.sets = std::mem::take(&mut self.sets);
+    if !configuration.is_empty() {
+      restored.inspect(&configuration, 0)?;
+    }
+    *self = restored;
+    Ok(())
+  }
+
+  fn inspect(
+    &mut self,
+    bytes: &[u8],
+    budget: usize,
+  ) -> io::Result<super::unit::Unit> {
     if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
       return Err(invalid());
     }
@@ -204,6 +215,12 @@ impl Validator {
     }
     if offset == 0 {
       return Err(invalid());
+    }
+    if budget == 0 && picture.is_some() {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "coded frame budget exhausted",
+      ));
     }
     self.sets.commit(
       &changes

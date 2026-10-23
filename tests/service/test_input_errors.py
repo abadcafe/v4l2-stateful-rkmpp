@@ -15,6 +15,40 @@ from tests.support.reference import frame_hashes
 from tests.support.stream import Codec, Packet, load
 
 
+@pytest.mark.parametrize("input_count", [1, 8])
+def test_semantic_rejection_does_not_configure_the_following_submission(
+    mock_service: Process, artifacts: Path, input_count: int
+) -> None:
+    source = artifacts / "h264-yuv420p.h264"
+    good = accepted(load(Codec.H264, source))
+    first = good[0].data
+    picture = first.find(b"\x00\x00\x01\x65")
+    assert picture > 0
+    # SPS/PPS are valid, but recovery_point has a truncated Exp-Golomb value.
+    # Rejecting its semantics must also roll back those new parameter sets.
+    damaged = first[:picture] + bytes.fromhex("0000010606010080") + first[picture:]
+    inputs = (
+        Packet(data=damaged, timestamp=0),
+        Packet(data=first[picture:], timestamp=1000),
+    ) + good
+    result = accepted(
+        play(
+            mock_service,
+            Codec.H264,
+            source,
+            input_count=input_count,
+            submissions=inputs,
+        )
+    )
+    assert result.eos and not result.errors
+    assert [done.flags & 2 for done in result.input_completions] == [2, 2] + [0] * len(
+        good
+    )
+    assert tuple(frame.digest for frame in result.frames) == accepted(
+        frame_hashes(source, 8, 256, 128)
+    )
+
+
 def test_h264_invalid_sei_escape_rejects_only_its_submission(
     mock_service: Process, artifacts: Path
 ) -> None:

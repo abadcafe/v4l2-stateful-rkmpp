@@ -1,5 +1,11 @@
 //! module: submission_tests; responsibility: bounded compressed payload
 //! ownership, exact assembly and transactional failure.
+//! operations: test entrypoints; entities: none; tests:
+//! test_compose_without_prefix_borrows_the_exact_input_range,
+//! test_compose_preserves_configuration_metadata_and_picture_once,
+//! test_append_and_compose_enforce_bound_before_mutating_prefix,
+//! test_compose_large_picture_remains_borrowed_with_small_prefix,
+//! test_compose_invalid_range_preserves_prefix_until_clear.
 use rkmpp::{MAX_PACKET_SIZE, Payload};
 
 use crate::submission::Prefix;

@@ -1,5 +1,7 @@
 //! module: quantize::device_tests; responsibility: verify hardware
 //! device admission.
+//! operations: test entrypoints; entities: none; tests:
+//! test_new_accepts_dma_buf_memory_on_hardware_device.
 use std::os::fd::AsFd;
 
 use dma_buf::memory::Buffer;

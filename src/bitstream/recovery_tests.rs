@@ -1,5 +1,11 @@
 //! module: bitstream::recovery_tests; responsibility: recovery output
 //! contract.
+//! operations: test entrypoints; entities: none; tests:
+//! test_recovery_waits_for_reference_frame_number_and_output_order,
+//! test_recovery_zero_and_reset,
+//! test_sei_parses_recovery_and_rejects_truncated_payload,
+//! test_parse_reserved_sei_does_not_hide_recovery_point,
+//! test_parse_validates_following_messages_and_trailing_bits.
 use super::recovery::{Point, Recovery};
 #[test]
 fn test_recovery_waits_for_reference_frame_number_and_output_order() {

@@ -64,15 +64,18 @@ class Socket:
             endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         except OSError as error:
             return Rejected(error.errno or 0, "create Unix listener")
+        owner = cls(endpoint)
         try:
             endpoint.bind(str(path))
-            endpoint.listen(32)
             metadata = path.lstat()
+            owner._binding = _Binding(path, metadata.st_dev, metadata.st_ino)
+            endpoint.listen(32)
         except OSError as error:
-            endpoint.close()
-            return Rejected(error.errno or 0, "bind Unix listener")
-        owner = cls(endpoint)
-        owner._binding = _Binding(path, metadata.st_dev, metadata.st_ino)
+            closed = owner.close()
+            details = "bind Unix listener"
+            if isinstance(closed, Rejected):
+                details += "; cleanup: " + closed.operation
+            return Rejected(error.errno or 0, details)
         return Ok(owner)
 
     @classmethod

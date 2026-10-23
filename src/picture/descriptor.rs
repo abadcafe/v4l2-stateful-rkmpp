@@ -1,6 +1,7 @@
 //! module: picture::descriptor; responsibility: bind a coded submission
 //! to its presentation metadata. operations/entities: Descriptor,
 //! Geometry; tests: backend/layout_tests and frontend_tests.
+//! operations: Descriptor construction;
 use super::plan::Plan;
 use crate::timestamp::Source;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

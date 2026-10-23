@@ -3,7 +3,8 @@
 #define RB_BROKER_H
 #include <linux/fs.h>
 /* module: session/broker; responsibility: offer video sessions to one service.
- * operations: publish, withdraw, destroy, file operations; entity: rb_offer;
+ * operations: publish, reoffer, withdraw, destroy, file operations;
+ * entity: rb_offer;
  * tests: tests/kernel/test_sessions.py, test_lifecycle.py.
  * The callback runs while the offer is protected against withdrawal.
  * Accept consumes the offer even on failure. The callback must either attach

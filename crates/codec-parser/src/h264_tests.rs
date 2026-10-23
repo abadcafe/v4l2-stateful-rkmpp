@@ -1,4 +1,7 @@
-//! Public H.264 complete-access-unit admission contract.
+//! module: h264_tests; responsibility: define complete H.264 AU
+//! admission. operations: test entrypoints; entities: none; tests:
+//! metadata, picture boundaries, reference marking consistency,
+//! malformed input and recovery.
 use super::h264::Validator;
 #[test]
 fn test_validate_complete_access_unit_and_metadata() {
@@ -7,9 +10,9 @@ fn test_validate_complete_access_unit_and_metadata() {
     "/../../tests/artifacts/h264-yuv420p.h264"
   ));
   let mut v = Validator::new().unwrap();
-  assert!(v.validate(&bytes[..4454]).is_ok());
-  assert!(v.validate(&bytes[4454..6728]).is_ok());
-  assert!(v.validate(&[0, 0, 1, 11]).is_ok());
+  assert!(v.validate(&bytes[..4454], 1).is_ok());
+  assert!(v.validate(&bytes[4454..6728], 1).is_ok());
+  assert!(v.validate(&[0, 0, 1, 11], 1).is_ok());
 }
 #[test]
 fn test_validate_rejects_multiple_pictures_and_truncated_headers() {
@@ -17,10 +20,12 @@ fn test_validate_rejects_multiple_pictures_and_truncated_headers() {
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/artifacts/h264-yuv420p.h264"
   ));
-  assert!(Validator::new().unwrap().validate(&bytes[..6728]).is_err());
+  assert!(
+    Validator::new().unwrap().validate(&bytes[..6728], 1).is_err()
+  );
   for data in [&[][..], &[0, 0, 1], &[0, 0, 1, 0x65, 0xb8], &[5, 6, 7]]
   {
-    assert!(Validator::new().unwrap().validate(data).is_err());
+    assert!(Validator::new().unwrap().validate(data, 1).is_err());
   }
 }
 
@@ -37,9 +42,9 @@ fn test_validate_rejects_conflicting_idr_marking_and_recovers() {
     let mut bad = good.to_vec();
     bad[3150] ^= mask;
     let mut parser = Validator::new().unwrap();
-    assert!(parser.validate(good).is_ok());
-    assert!(parser.validate(&bad).is_err());
-    assert!(parser.validate(good).is_ok());
+    assert!(parser.validate(good, 1).is_ok());
+    assert!(parser.validate(&bad, 1).is_err());
+    assert!(parser.validate(good, 1).is_ok());
   }
 }
 
@@ -55,12 +60,12 @@ fn test_validate_multi_slice_mmco_operands_must_agree() {
   assert_eq!(stream.len(), boundaries[8]);
   let mut parser = Validator::new().unwrap();
   for range in boundaries.windows(2) {
-    parser.validate(&stream[range[0]..range[1]]).unwrap();
+    parser.validate(&stream[range[0]..range[1]], 1).unwrap();
   }
   let mut bad = stream[10155..11415].to_vec();
   // Second slice MMCO1 difference_of_pic_nums_minus1: 3 -> 4,
   // equal-length Exp-Golomb codes 00100 -> 00101, bit 47 of the NAL.
   bad[10633 - 10155] ^= 1;
-  assert!(parser.validate(&bad).is_err());
-  parser.validate(&stream[..3733]).unwrap();
+  assert!(parser.validate(&bad, 1).is_err());
+  parser.validate(&stream[..3733], 1).unwrap();
 }

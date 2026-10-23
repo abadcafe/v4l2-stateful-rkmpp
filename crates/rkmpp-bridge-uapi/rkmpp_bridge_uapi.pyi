@@ -1,4 +1,8 @@
-"""Typed public interface to the shared Rust/Python bridge UAPI."""
+"""module: rkmpp_bridge_uapi; responsibility: declare the typed bridge ABI.
+
+operations: constants, enums and wire record interfaces; entities: Event, Reply,
+Message, Batch, Descriptor, Pool; tests: tests/support/native_tests.py.
+"""
 
 from enum import IntEnum, auto
 from typing import ClassVar

@@ -1,5 +1,9 @@
 //! module: rkmpp::api_tests; responsibility: specify foreign dispatch
 //! table validation through the public import boundary.
+//! operations: test entrypoints; entities: Producer; tests:
+//! test_read_rejects_short_allocation_before_borrowing_table,
+//! test_read_requires_every_used_entry,
+//! test_read_detaches_validated_entries_from_table_storage.
 use std::ffi::c_void;
 use std::ptr::NonNull;
 

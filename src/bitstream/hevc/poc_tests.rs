@@ -1,4 +1,6 @@
-//! Public H.265 8.3.1 POC and prevTid0Pic contract.
+//! module: hevc::poc_tests; responsibility: define H.265 picture order.
+//! operations: test entrypoints; entities: none; tests: prevTid0
+//! selection, wrap, random access and parameter bounds via Counter.
 use super::poc::{Counter, Picture};
 fn picture(lsb: u32) -> Picture {
   Picture {

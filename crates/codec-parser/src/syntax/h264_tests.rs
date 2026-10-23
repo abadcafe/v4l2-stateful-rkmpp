@@ -1,4 +1,7 @@
-//! Public H264 SPS geometry contract.
+//! module: syntax::h264_tests; responsibility: define normalized H.264
+//! SPS. operations: test entrypoints; entities: none; tests: geometry,
+//! buffering inference, level constraints and truncated syntax via
+//! parse.
 #[test]
 fn test_parse_rejects_truncated_sps() {
   for length in 0..20 {

@@ -5,12 +5,32 @@ operations: pytest cases; entities: none; tests: message/fd/endpoint lifetimes.
 
 import errno
 import os
+import socket
 from pathlib import Path
 
 import pytest
 
 from tests.support.outcome import Rejected, accepted
 from tests.support.seqpacket import Socket
+
+
+def test_listen_failure_releases_bound_path_and_allows_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "peer.sock"
+
+    def fail_listen(endpoint: socket.socket, backlog: int = 0) -> None:
+        assert endpoint.fileno() >= 0 and backlog == 32
+        raise OSError(errno.ENOBUFS, "injected listener pressure")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(socket.socket, "listen", fail_listen)
+        result = Socket.listen(path)
+    assert isinstance(result, Rejected) and result.code == errno.ENOBUFS
+    assert not path.exists()
+    with accepted(Socket.listen(path)):
+        assert path.is_socket()
+    assert not path.exists()
 
 
 def test_pair_preserves_packet_boundaries_and_owned_cloexec_descriptors() -> None:

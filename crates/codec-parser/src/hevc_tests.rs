@@ -1,4 +1,7 @@
-//! Public HEVC complete-access-unit admission contract.
+//! module: hevc_tests; responsibility: define complete HEVC AU
+//! admission. operations: test entrypoints; entities: none; tests:
+//! temporal headers, picture boundaries, malformed input and
+//! parameter-state recovery.
 use super::hevc::Validator;
 
 #[test]
@@ -15,7 +18,7 @@ fn test_validate_temporal_id_zero_constraints_before_configuration_commit()
         if kind >= 36 {
           bad.extend_from_slice(&[0, 0, 1, kind << 1, 1]);
         }
-        Validator::new().unwrap().validate(&bad).unwrap();
+        Validator::new().unwrap().validate(&bad, 1).unwrap();
         let offset = bad
           .windows(4)
           .position(|data| data == [0, 0, 1, kind << 1])
@@ -25,19 +28,19 @@ fn test_validate_temporal_id_zero_constraints_before_configuration_commit()
         bad[offset + 1] = temporal_id + 1;
         let mut validator = Validator::new().unwrap();
         if established {
-          validator.validate(good).unwrap();
+          validator.validate(good, 1).unwrap();
         }
         let configuration = validator.configuration();
         // Native header parsing does not enforce this NAL constraint;
         // the project owns admission before native state can change.
-        let result = validator.validate(&bad);
+        let result = validator.validate(&bad, 1);
         assert!(result.is_err());
         assert_eq!(
           result.err().unwrap().kind(),
           std::io::ErrorKind::InvalidData
         );
         assert_eq!(validator.configuration(), configuration);
-        validator.validate(good).unwrap();
+        validator.validate(good, 1).unwrap();
       }
     }
   }
@@ -50,9 +53,9 @@ fn test_validate_complete_access_unit_and_metadata() {
     "/../../tests/artifacts/hevc-yuv420p.hevc"
   ));
   let mut v = Validator::new().unwrap();
-  assert!(v.validate(&bytes[..5496]).is_ok());
-  assert!(v.validate(&bytes[5496..7063]).is_ok());
-  assert!(v.validate(&[0, 0, 1, 0x4a, 1]).is_ok());
+  assert!(v.validate(&bytes[..5496], 1).is_ok());
+  assert!(v.validate(&bytes[5496..7063], 1).is_ok());
+  assert!(v.validate(&[0, 0, 1, 0x4a, 1], 1).is_ok());
 }
 #[test]
 fn test_validate_rejects_multiple_pictures_and_truncated_headers() {
@@ -60,11 +63,13 @@ fn test_validate_rejects_multiple_pictures_and_truncated_headers() {
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/artifacts/hevc-yuv420p.hevc"
   ));
-  assert!(Validator::new().unwrap().validate(&bytes[..7063]).is_err());
+  assert!(
+    Validator::new().unwrap().validate(&bytes[..7063], 1).is_err()
+  );
   for data in
     [&[][..], &[0, 0, 1], &[0, 0, 1, 0x26, 1, 0xe0], &[5, 6, 7]]
   {
-    assert!(Validator::new().unwrap().validate(data).is_err());
+    assert!(Validator::new().unwrap().validate(data, 1).is_err());
   }
 }
 
@@ -82,7 +87,7 @@ fn test_validate_multi_slice_picture_rejects_conflicting_prior_output()
   let mut bad = good.to_vec();
   bad[5721] ^= 0x40;
   let mut validator = Validator::new().unwrap();
-  assert!(validator.validate(good).is_ok());
-  assert!(validator.validate(&bad).is_err());
-  assert!(validator.validate(good).is_ok());
+  assert!(validator.validate(good, 1).is_ok());
+  assert!(validator.validate(&bad, 1).is_err());
+  assert!(validator.validate(good, 1).is_ok());
 }

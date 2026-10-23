@@ -1,5 +1,7 @@
 //! module: transport::ioctl_tests; responsibility: define borrowed ABI
 //! transaction boundaries. operations: tests; entities: none.
+//! tests: test_exchange_failure_preserves_the_callers_owned_request,
+//! test_exchange_invalid_header_is_rejected_before_ioctl.
 use std::fs::File;
 use std::os::fd::OwnedFd;
 

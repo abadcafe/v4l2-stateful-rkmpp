@@ -1,5 +1,7 @@
-//! Public H.264 8.2.1 picture order contract; no decoder implementation
-//! access.
+//! module: h264::poc_tests; responsibility: define H.264 picture order.
+//! operations: test entrypoints; entities: none; tests: POC modes,
+//! fields, wrap, reset, overflow and rejected-state preservation via
+//! Counter.
 use codec_parser::syntax::h264::Poc as Parameters;
 
 use super::poc::{Counter, Field, Picture};

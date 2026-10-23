@@ -1,5 +1,16 @@
 //! module: rpc_tests; responsibility: specify mock RPC transactions.
 //! operations: tests; entities: none; all tests use module public API.
+//! tests:
+//! test_intercept_preserves_one_packet_for_zero_and_maximum_ioctl_extents,
+//! test_intercept_empty_descriptor_message_closes_received_owners,
+//! test_decode_payload_is_exact_and_wake_is_separate,
+//! test_decode_error_preserves_kernel_errno,
+//! test_decode_transfers_cloexec_fd_and_supports_alias_patch,
+//! test_decode_unpublished_or_failed_copyout_closes_received_descriptors,
+//! test_decode_invalid_wire_or_patch_closes_every_received_fd,
+//! test_decode_truncated_wrong_magic_or_reserved_is_rejected,
+//! test_decode_wake_requires_zero_length_and_no_ownership,
+//! test_decode_unused_or_overlapping_descriptor_patches_close_all_owners.
 use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;

@@ -5,7 +5,7 @@
 #include <linux/videodev2.h>
 /* module: format; responsibility: negotiate decoder image geometry.
  * operations: new/free, layout/input, normalize/capture, set/update,
- * enumerate/sizes/selection; entity: opaque rb_format;
+ * enumerate/sizes/selection/field; entity: opaque rb_format;
  * tests: tests/kernel/test_formats.py, test_layout_reply.py. */
 struct rb_format;
 enum v4l2_field rb_format_field(u32 field);

@@ -4,6 +4,245 @@
 use crate::Validator;
 
 #[test]
+fn test_admit_rejected_update_restores_nonempty_preceding_configuration()
+ {
+  for (codec, previous, replacement) in [
+    (
+      *b"H264",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/h264-yuv420p.h264"
+      ))[..4454],
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/h264-512.h264"
+      ))[..7374],
+    ),
+    (
+      *b"HEVC",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/hevc-yuv420p.hevc"
+      ))[..5496],
+      include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/hevc-main10.hevc"
+      ))
+      .as_slice(),
+    ),
+  ] {
+    let mut parser = Validator::new(u32::from_le_bytes(codec)).unwrap();
+    let unit = parser.validate(previous, 1).unwrap().remove(0);
+    let configuration = parser.configuration();
+    let result: std::io::Result<()> =
+      parser.admit(replacement, 1, |candidate, _| {
+        assert_ne!(candidate.configuration(), configuration);
+        Err(std::io::Error::new(
+          std::io::ErrorKind::InvalidData,
+          "reject changed configuration",
+        ))
+      });
+    assert!(result.is_err());
+    assert_eq!(parser.configuration(), configuration);
+    assert_eq!(
+      parser.validate(&previous[unit.prefix..], 1).unwrap().len(),
+      1
+    );
+  }
+}
+
+#[test]
+fn test_admit_consumer_rejection_restores_preceding_configuration() {
+  let ivf = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/av1-yuv420p.ivf"
+  ));
+  let size =
+    u32::from_le_bytes(ivf[32..36].try_into().unwrap()) as usize;
+  for (codec, packet) in [
+    (
+      *b"H264",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/h264-yuv420p.h264"
+      ))[..4454],
+    ),
+    (
+      *b"HEVC",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/hevc-yuv420p.hevc"
+      ))[..5496],
+    ),
+    (*b"AV01", &ivf[44..44 + size]),
+  ] {
+    for established in [false, true] {
+      let mut validator =
+        Validator::new(u32::from_le_bytes(codec)).unwrap();
+      if established {
+        validator.validate(packet, 1).unwrap();
+      }
+      let previous = validator.configuration();
+      let result: std::io::Result<()> =
+        validator.admit(packet, 1, |parser, units| {
+          assert_eq!(units.len(), 1);
+          assert!(!parser.configuration().is_empty());
+          Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "semantic rejection",
+          ))
+        });
+      assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+      );
+      assert_eq!(validator.configuration(), previous);
+      assert_eq!(validator.configuration().as_ptr(), previous.as_ptr());
+      assert_eq!(
+        validator.admit(packet, 1, |_, units| Ok(units.len())).unwrap(),
+        1
+      );
+    }
+  }
+}
+
+#[test]
+fn test_reset_preserves_configuration_storage_and_accepts_fresh_keyframes()
+ {
+  for (codec, packet) in [
+    (
+      *b"H264",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/h264-yuv420p.h264"
+      ))[..4454],
+    ),
+    (
+      *b"HEVC",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/hevc-yuv420p.hevc"
+      ))[..5496],
+    ),
+  ] {
+    let mut validator =
+      Validator::new(u32::from_le_bytes(codec)).unwrap();
+    validator.validate(packet, 1).unwrap();
+    let configuration = validator.configuration();
+    for _ in 0..8 {
+      validator.reset().unwrap();
+      assert_eq!(
+        configuration.as_ptr(),
+        validator.configuration().as_ptr()
+      );
+      assert_eq!(configuration, validator.configuration());
+      validator.validate(packet, 1).unwrap();
+    }
+  }
+  for (codec, ivf) in [
+    (
+      *b"VP80",
+      include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/vp8-yuv420p.ivf"
+      ))
+      .as_slice(),
+    ),
+    (
+      *b"VP90",
+      include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/vp9-yuv420p.ivf"
+      ))
+      .as_slice(),
+    ),
+    (
+      *b"AV01",
+      include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/av1-yuv420p.ivf"
+      ))
+      .as_slice(),
+    ),
+  ] {
+    let size =
+      u32::from_le_bytes(ivf[32..36].try_into().unwrap()) as usize;
+    let key = &ivf[44..44 + size];
+    let next = 44 + size;
+    let size =
+      u32::from_le_bytes(ivf[next..next + 4].try_into().unwrap())
+        as usize;
+    let predicted = &ivf[next + 12..next + 12 + size];
+    let mut validator =
+      Validator::new(u32::from_le_bytes(codec)).unwrap();
+    validator.reset().unwrap();
+    validator.validate(key, 32).unwrap();
+    let configuration = validator.configuration();
+    for _ in 0..8 {
+      validator.reset().unwrap();
+      assert_eq!(
+        configuration.as_ptr(),
+        validator.configuration().as_ptr()
+      );
+      assert!(validator.validate(predicted, 32).is_err());
+      validator.validate(key, 32).unwrap();
+    }
+  }
+}
+
+#[test]
+fn test_configuration_snapshots_share_storage_through_damage_recovery()
+{
+  let ivf = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/av1-yuv420p.ivf"
+  ));
+  let size =
+    u32::from_le_bytes(ivf[32..36].try_into().unwrap()) as usize;
+  for (codec, packet) in [
+    (
+      *b"H264",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/h264-yuv420p.h264"
+      ))[..4454],
+    ),
+    (
+      *b"HEVC",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/hevc-yuv420p.hevc"
+      ))[..5496],
+    ),
+    (*b"AV01", &ivf[44..44 + size]),
+  ] {
+    let mut validator =
+      Validator::new(u32::from_le_bytes(codec)).unwrap();
+    validator.validate(packet, 1).unwrap();
+    let configuration = validator.configuration();
+    assert!(!configuration.is_empty());
+    for _ in 0..8 {
+      assert_eq!(
+        validator.configuration().as_ptr(),
+        configuration.as_ptr()
+      );
+      assert!(validator.validate(&[0xff], 1).is_err());
+      assert_eq!(
+        validator.configuration().as_ptr(),
+        configuration.as_ptr()
+      );
+      validator.validate(packet, 1).unwrap();
+      assert_eq!(
+        validator.configuration().as_ptr(),
+        configuration.as_ptr()
+      );
+    }
+    drop(validator);
+    assert!(!configuration.is_empty());
+  }
+}
+
+#[test]
 fn test_new_rejects_unknown_codecs() {
   for codec in [0, u32::from_le_bytes(*b"NONE")] {
     assert!(Validator::new(codec).is_err());

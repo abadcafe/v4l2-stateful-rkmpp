@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* module: memory; responsibility: own DMA heap-backed queue storage.
+ * operations: rb_heap_memops, rb_memory_export; entities: opaque rb_memory;
+ * tests: tests/kernel/test_buffers.py and test_plane_storage.py. */
 #ifndef RB_MEMORY_H
 #define RB_MEMORY_H
 #include <media/videobuf2-core.h>

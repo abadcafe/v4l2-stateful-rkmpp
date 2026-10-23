@@ -1,5 +1,15 @@
 //! module: presentation_tests; responsibility: normative output
 //! scheduling.
+//! operations: test entrypoints; entities: Spec; tests:
+//! test_picture_reorders_and_drain_preserves_continuation,
+//! test_prepare_discards_prior_before_source_change_barrier,
+//! test_picture_bumps_at_declared_capacity_not_hardware_maximum,
+//! test_prepare_lower_nonreference_picture_uses_direct_output,
+//! test_latency_counts_only_later_decoded_lower_poc_output_pictures,
+//! test_hidden_picture_updates_references_without_becoming_output,
+//! test_prepare_applies_new_reorder_bound_before_decoding,
+//! test_prepare_applies_new_latency_bound_before_decoding,
+//! test_picture_duplicate_identity_counts_once_toward_capacity.
 use codec_parser::Limits;
 
 use super::presentation::Presentation;

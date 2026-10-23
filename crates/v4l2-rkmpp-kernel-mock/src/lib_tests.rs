@@ -1,5 +1,11 @@
 //! module: lib_tests; responsibility: specify native C ABI forwarding.
 //! operations: tests; entities: none.
+//! tests: test_open64_creation_preserves_mode_and_descriptor_flags,
+//! test_open64_unrelated_missing_path_retains_native_errno,
+//! test_ioctl_unrelated_descriptor_retains_native_errno,
+//! test_ioctl_native_pointer_receives_exact_pending_byte_count,
+//! test_ioctl_accept_without_payload_retains_native_errno,
+//! test_ioctl_argumentless_native_commands_preserve_descriptor_flags.
 unsafe extern "C" {
   fn open64(
     pathname: *const libc::c_char,

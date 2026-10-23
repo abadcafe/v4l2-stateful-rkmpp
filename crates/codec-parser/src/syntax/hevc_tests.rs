@@ -1,4 +1,7 @@
-//! Public HEVC SPS geometry contract.
+//! module: syntax::hevc_tests; responsibility: define normalized HEVC
+//! SPS. operations: test entrypoints; entities: none; tests: geometry,
+//! temporal nesting, buffering/reorder/latency bounds and invalid
+//! syntax via parse.
 #[test]
 fn test_parse_rejects_truncated_sps() {
   for length in 0..20 {

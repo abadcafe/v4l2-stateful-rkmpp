@@ -3,6 +3,7 @@
 //! H264, Hevc, Short, Long, Marking, Operation; tests:
 //! packet_syntax_tests and codec-specific admission tests. No parser
 //! pointers escape admission.
+//! operations: owned coded-picture header construction;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operation {
   ForgetShort(u32),

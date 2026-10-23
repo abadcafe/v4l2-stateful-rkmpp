@@ -22,10 +22,13 @@ enum Codec {
 }
 pub(crate) struct Frontend {
   codec: Codec,
-  fourcc: u32,
+  frames: Framed,
+}
+#[derive(Default)]
+struct Framed {
   serial: u64,
   metadata: crate::submission::Prefix,
-  configuration: Vec<u8>,
+  configuration: codec_parser::Configuration,
 }
 impl Frontend {
   pub(crate) fn new(fourcc: u32) -> io::Result<Self> {
@@ -35,13 +38,7 @@ impl Frontend {
       }
       _ => Codec::Framed(codec_parser::Validator::new(fourcc)?),
     };
-    Ok(Self {
-      codec,
-      fourcc,
-      serial: 0,
-      metadata: crate::submission::Prefix::default(),
-      configuration: Vec::new(),
-    })
+    Ok(Self { codec, frames: Framed::default() })
   }
 
   pub(crate) fn admit(
@@ -54,14 +51,7 @@ impl Frontend {
     let budget = budget.min(32);
     match &mut self.codec {
       Codec::Annexb(parser) => {
-        let report = parser.admit(bytes)?;
-        if report.units.len() > budget {
-          parser.seek()?;
-          return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "coded frame budget exhausted",
-          ));
-        }
+        let report = parser.admit(bytes, budget)?;
         let tasks = report
           .units
           .into_iter()
@@ -85,30 +75,34 @@ impl Frontend {
             "compressed input exceeds limit",
           ));
         }
-        let ranges = match validator.validate(bytes, budget) {
-          Ok(ranges) => ranges,
-          Err(error) => {
-            // Native recovery belongs to Validator. Preserve its
-            // restored configuration for MPP and discard only this
-            // layer's unsubmitted metadata, without rebuilding and
-            // replaying the native parser a second time.
-            self.metadata.clear();
-            self.configuration = validator.configuration();
-            return Err(error);
-          }
-        };
-        let result = self.framed(bytes, timestamp, source, ranges);
-        // Composition may fail after native admission has committed
-        // reference headers. That path still requires a full seek.
+        let result = validator.admit(bytes, budget, |_, ranges| {
+          self.frames.compose(bytes, timestamp, source, ranges)
+        });
         if result.is_err() {
-          self.seek()?;
+          self.frames.metadata.clear();
+          self.frames.configuration = validator.configuration();
         }
         result
       }
     }
   }
 
-  fn framed(
+  pub(crate) fn seek(&mut self) -> io::Result<()> {
+    match &mut self.codec {
+      Codec::Annexb(parser) => parser.seek(),
+      Codec::Framed(validator) => {
+        validator.reset()?;
+        let configuration = validator.configuration();
+        self.frames.metadata.clear();
+        self.frames.configuration = configuration;
+        Ok(())
+      }
+    }
+  }
+}
+
+impl Framed {
+  fn compose(
     &mut self,
     bytes: &[u8],
     timestamp: u64,
@@ -143,7 +137,7 @@ impl Frontend {
       };
       let payload =
         self.metadata.compose(configuration, bytes, unit.range)?;
-      self.configuration.clear();
+      self.configuration = codec_parser::Configuration::default();
       tasks.push(Task {
         payload,
         descriptor: Descriptor {
@@ -155,22 +149,5 @@ impl Frontend {
       });
     }
     Ok(Admission { tasks, end: false })
-  }
-
-  pub(crate) fn seek(&mut self) -> io::Result<()> {
-    match &mut self.codec {
-      Codec::Annexb(parser) => parser.seek(),
-      Codec::Framed(validator) => {
-        let configuration = validator.configuration();
-        let mut validator = codec_parser::Validator::new(self.fourcc)?;
-        if !configuration.is_empty() {
-          validator.validate(&configuration, 0)?;
-        }
-        self.codec = Codec::Framed(validator);
-        self.metadata.clear();
-        self.configuration = configuration;
-        Ok(())
-      }
-    }
   }
 }

@@ -1,4 +1,8 @@
 //! module: restriction_tests; responsibility: VUI buffering limits.
+//! operations: test entrypoints; entities: none; tests:
+//! test_h264_retains_reorder_and_buffering_independently,
+//! test_h264_rejects_inconsistent_or_truncated_restrictions,
+//! test_h264_absent_restriction_uses_sequence_inference.
 use super::bits::Bits;
 use super::restriction;
 fn vui(reorder: u32, buffering: u32) -> Vec<u8> {

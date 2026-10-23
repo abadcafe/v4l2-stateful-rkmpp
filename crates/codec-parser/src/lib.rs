@@ -1,9 +1,13 @@
 //! module: codec_parser; responsibility: admit framed compressed input
-//! using codec-specific syntax state. operations: new, validate,
-//! configuration; entities: Validator; tests: packet_syntax_tests and
-//! codec child tests. This parses headers/partition bounds, never
-//! reconstructs pixels.
+//! using codec-specific syntax state. operations: new, validate, admit,
+//! reset, configuration; entities: Validator; tests:
+//! packet_syntax_tests and codec child tests. This parses
+//! headers/partition bounds, never reconstructs pixels.
 use std::io;
+mod configuration;
+#[cfg(test)]
+mod configuration_tests;
+pub use configuration::Configuration;
 mod av1;
 #[cfg(test)]
 mod av1_tests;
@@ -24,6 +28,39 @@ enum Codec {
   Av1(Box<av1::Validator>),
 }
 impl Validator {
+  /// Validate native syntax and the consumer's semantic admission as
+  /// one transaction. A consumer rejection restores the previously
+  /// committed configuration and discards prediction state before
+  /// returning.
+  pub fn admit<T>(
+    &mut self,
+    bytes: &[u8],
+    budget: usize,
+    inspect: impl FnOnce(&Self, Vec<unit::Unit>) -> io::Result<T>,
+  ) -> io::Result<T> {
+    let configuration = self.configuration();
+    let units = self.validate(bytes, budget)?;
+    let result = inspect(self, units);
+    if result.is_err() {
+      if self.configuration() == configuration {
+        self.reset()?;
+      } else {
+        let codec = match &self.0 {
+          Codec::H264(_) => *b"H264",
+          Codec::Hevc(_) => *b"HEVC",
+          Codec::Vp8(_) => *b"VP80",
+          Codec::Vp9(_) => *b"VP90",
+          Codec::Av1(_) => *b"AV01",
+        };
+        *self = Self::new(u32::from_le_bytes(codec))?;
+        if !configuration.is_empty() {
+          self.validate(&configuration, 0)?;
+        }
+      }
+    }
+    result
+  }
+
   pub fn new(codec: u32) -> io::Result<Self> {
     match &codec.to_le_bytes() {
       b"H264" => Ok(Self(Codec::H264(h264::Validator::new()?))),
@@ -38,12 +75,28 @@ impl Validator {
     }
   }
 
-  pub fn configuration(&self) -> Vec<u8> {
+  /// Discard prediction state while retaining committed decoder
+  /// configuration. Recovery and explicit seeking use the same
+  /// codec-owned transaction.
+  pub fn reset(&mut self) -> io::Result<()> {
+    match &mut self.0 {
+      Codec::H264(parser) => parser.reset(),
+      Codec::Hevc(parser) => parser.reset(),
+      Codec::Av1(parser) => parser.reset(),
+      Codec::Vp8(parser) => {
+        parser.reset();
+        Ok(())
+      }
+      Codec::Vp9(parser) => parser.reset(),
+    }
+  }
+
+  pub fn configuration(&self) -> Configuration {
     match &self.0 {
       Codec::Av1(parser) => parser.configuration(),
       Codec::H264(parser) => parser.configuration(),
       Codec::Hevc(parser) => parser.configuration(),
-      _ => Vec::new(),
+      _ => Configuration::default(),
     }
   }
 
@@ -57,23 +110,14 @@ impl Validator {
     bytes: &[u8],
     budget: usize,
   ) -> io::Result<Vec<unit::Unit>> {
-    // Annex B always returns a unit, including metadata. Budget
-    // rejection cannot commit its parameter changes. Framed codecs
-    // own their prediction recovery even on an exhausted budget; AV1
-    // may still admit metadata without a frame.
-    if budget == 0 && matches!(&self.0, Codec::H264(_) | Codec::Hevc(_))
-    {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "coded frame budget exhausted",
-      ));
-    }
+    // Each codec checks picture capacity before committing syntax
+    // state.
     match &mut self.0 {
       Codec::H264(parser) => {
-        parser.validate(bytes).map(|unit| vec![unit])
+        parser.validate(bytes, budget).map(|unit| vec![unit])
       }
       Codec::Hevc(parser) => {
-        parser.validate(bytes).map(|unit| vec![unit])
+        parser.validate(bytes, budget).map(|unit| vec![unit])
       }
       Codec::Vp8(parser) => {
         parser.validate(bytes, budget).map(|unit| vec![unit])

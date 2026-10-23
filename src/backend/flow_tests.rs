@@ -1,5 +1,9 @@
 //! module: backend::flow_tests; responsibility: explicit/natural drain
 //! matrix.
+//! operations: test entrypoints; entities: none; tests:
+//! test_complete_resume_preserves_explicit_references_and_resets_natural_sequence,
+//! test_abort_waits_for_inflight_drain_and_never_emits_eos,
+//! test_abort_completed_or_unsubmitted_drain_returns_to_running.
 use super::flow::{Completion, End, Flow};
 #[test]
 fn test_complete_resume_preserves_explicit_references_and_resets_natural_sequence()

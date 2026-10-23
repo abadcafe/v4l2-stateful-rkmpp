@@ -1,5 +1,8 @@
 //! module: picture::plan_tests; responsibility: immutable semantic
 //! plans.
+//! operations: test entrypoints; entities: none; tests:
+//! test_complete_pair_combines_picture_order_and_final_reference_state,
+//! test_complete_pair_rejects_invalid_field_roles_without_mutation.
 use codec_parser::Limits;
 
 use super::{Boundary, Id, Output, Part, Plan};

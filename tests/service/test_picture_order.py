@@ -4,6 +4,10 @@ Public fixtures: FFmpeg samples V-codecs/h264/PAFF/DVD500k.mp4 (first 12
 frames, Annex B remux); FATE hevc-conformance/NoOutPrior_{A,B}_Qualcomm_1.bit;
 FATE h264-conformance/MR5_TANDBERG_C.264 (first 40 frames, stream copy).
 operations: pytest cases; entities: none.
+
+tests: test_presentation_matches_conformance_pixels,
+test_h264_recovery_point_waits_until_clean_output,
+test_maximum_dpb_pressure_reclaims_working_surfaces_across_restarts.
 """
 
 from pathlib import Path

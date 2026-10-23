@@ -1,4 +1,7 @@
 //! module: h264_tests; responsibility: H264 syntax public eligibility.
+//! operations: test entrypoints; entities: none; tests:
+//! test_inspect_validated_idr_and_metadata_boundary,
+//! test_inspect_metadata_recovery_point_applies_once_without_replaying_bytes.
 use super::codec::Syntax;
 use super::h264::H264;
 #[test]

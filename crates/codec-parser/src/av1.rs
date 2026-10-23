@@ -1,10 +1,11 @@
 //! module: codec_parser::av1; responsibility: validate AV1 OBU/frame
-//! transactions and reference headers. operations: new, validate;
-//! entities: Validator, Pending; tests: av1_tests.
+//! transactions and reference headers. operations: new, validate,
+//! reset; entities: Validator, Pending; tests: av1_tests.
 use std::io;
 use std::ptr::NonNull;
 
 use super::ffi;
+use crate::Configuration;
 struct Pending<'a> {
   header: ffi::GstAV1FrameHeaderOBU,
   payload: &'a [u8],
@@ -13,7 +14,7 @@ struct Pending<'a> {
 }
 pub(crate) struct Validator {
   parser: NonNull<ffi::GstAV1Parser>,
-  sequence: Vec<u8>,
+  sequence: Configuration,
 }
 impl Validator {
   pub(crate) fn new() -> io::Result<Self> {
@@ -24,10 +25,10 @@ impl Validator {
           "allocate native AV1 parser",
         )
       })?;
-    Ok(Self { parser, sequence: Vec::new() })
+    Ok(Self { parser, sequence: Configuration::default() })
   }
 
-  pub(crate) fn configuration(&self) -> Vec<u8> {
+  pub(crate) fn configuration(&self) -> Configuration {
     self.sequence.clone()
   }
 
@@ -38,17 +39,18 @@ impl Validator {
   ) -> io::Result<Vec<super::unit::Unit>> {
     let result = self.packet(bytes, budget);
     if result.is_err() {
-      // A failed header must not leave partially updated reference
-      // state. Keep the last committed sequence so a later
-      // keyframe can recover even when the sender does not repeat
-      // its sequence header.
-      unsafe { ffi::gst_av1_parser_reset(self.parser.as_ptr(), 0) };
-      let sequence = std::mem::take(&mut self.sequence);
-      if !sequence.is_empty() {
-        self.packet(&sequence, 0)?;
-      }
+      self.reset()?;
     }
     result
+  }
+
+  pub(crate) fn reset(&mut self) -> io::Result<()> {
+    unsafe { ffi::gst_av1_parser_reset(self.parser.as_ptr(), 0) };
+    let sequence = self.sequence.clone();
+    if !sequence.is_empty() {
+      self.packet(&sequence, 0)?;
+    }
+    Ok(())
   }
 
   fn packet(
@@ -119,15 +121,17 @@ impl Validator {
       }
       if obu.obu_type == 1 {
         configures_decoder = true;
-        sequence = Some(bytes[..consumed as usize].to_vec());
+        sequence = Some(&bytes[..consumed as usize]);
       }
       bytes = &bytes[consumed as usize..];
     }
     if pending.is_some() {
       return Err(invalid());
     }
-    if let Some(sequence) = sequence {
-      self.sequence = sequence;
+    if let Some(sequence) = sequence
+      && sequence != self.sequence.as_slice()
+    {
+      self.sequence = Configuration::new(sequence.to_vec());
     }
     if let Some(last) = ranges.last_mut() {
       last.range.end = total;

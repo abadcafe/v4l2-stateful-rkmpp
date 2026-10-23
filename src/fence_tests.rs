@@ -1,4 +1,8 @@
 //! module: fence_tests; responsibility: define sync-file completion.
+//! operations: test entrypoints; entities: none; tests:
+//! test_ready_preserves_completed_dma_fence_and_shared_descriptor_lifetime,
+//! test_ready_rejects_readability_without_sync_file_completion_status,
+//! test_ready_completed_export_needs_no_descriptor.
 use std::os::fd::AsFd;
 
 use crate::fence::Fence;

@@ -1,5 +1,7 @@
 //! module: registration_tests; responsibility: registered resource wire
 //! layout.
+//! operations: test entrypoints; entities: none; tests:
+//! test_request_initializes_metadata_and_no_owned_file_descriptors.
 use super::registration::{Descriptor, MAX_BUFFERS, Pool, request};
 #[test]
 fn test_request_initializes_metadata_and_no_owned_file_descriptors() {

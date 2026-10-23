@@ -1,5 +1,9 @@
 //! module: bitstream::codec_tests; responsibility: Annex B NAL
 //! boundaries.
+//! operations: test entrypoints; entities: none; tests:
+//! test_nals_handles_mixed_start_codes_and_adjacent_empty_units,
+//! test_nals_rejects_unframed_bytes_without_panicking,
+//! test_nals_excludes_annexb_framing_zeros_from_parameter_payload.
 use super::codec::nals;
 #[test]
 fn test_nals_handles_mixed_start_codes_and_adjacent_empty_units() {

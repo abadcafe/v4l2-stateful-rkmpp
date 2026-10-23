@@ -1,5 +1,38 @@
 //! module: bitstream::reference_tests; responsibility: reference
 //! identity contract.
+//! operations: test entrypoints; entities: Input; tests:
+//! test_reset_clears_reference_and_field_state_but_preserves_identity,
+//! test_apply_borrows_canonical_operations_without_retaining_their_storage,
+//! test_apply_long_assignment_requires_an_active_limit,
+//! test_apply_long_limit_cannot_exceed_current_sps_capacity,
+//! test_apply_long_limit_persists_and_reduction_retires_high_indices,
+//! test_apply_long_assignment_obeys_command_order_and_inclusive_upper_bound,
+//! test_apply_reset_boundaries_clear_long_limit_until_explicitly_reopened,
+//! test_apply_long_idr_initializes_only_index_zero,
+//! test_apply_reference_commands_require_an_existing_target,
+//! test_apply_reference_targets_are_checked_after_each_command,
+//! test_apply_gap_placeholders_can_be_forgotten_but_not_promoted,
+//! test_apply_frame_commands_require_both_reference_fields,
+//! test_apply_frame_commands_accept_complete_frames_and_complementary_pairs,
+//! test_apply_large_gap_retains_only_final_synthetic_references,
+//! test_apply_gap_cannot_overcommit_a_pool_of_long_term_references,
+//! test_sliding_window_retains_only_newest_short_references,
+//! test_apply_rejects_adaptive_marking_that_exceeds_reference_capacity,
+//! test_apply_rejects_sliding_window_without_an_evictable_reference,
+//! test_mmco_short_long_and_reset,
+//! test_fields_share_identity_and_disposable_pictures_do_not_become_references,
+//! test_frame_wrap_and_long_term_limit,
+//! test_idr_clears_prior_references_and_zero_capacity_retains_none,
+//! test_apply_pairing_requires_same_reference_class_and_no_new_boundary,
+//! test_apply_long_index_replacement_retires_other_pair_completely,
+//! test_apply_gaps_generate_logical_references_and_evict_old_pictures,
+//! test_apply_forbidden_gap_reports_loss_without_mutating_reference_state,
+//! test_apply_reset_restarts_gap_tracking_and_field_identity,
+//! test_apply_rejects_out_of_domain_marking_before_changing_references,
+//! test_apply_mmco5_first_field_normalizes_pair_identity_and_occupancy,
+//! test_apply_rejects_duplicate_and_forbidden_command_combinations,
+//! test_apply_later_commands_cannot_retire_current_long_assignment,
+//! test_apply_permitted_command_order_and_current_complement_survive.
 use codec_parser::header::Operation;
 
 use super::reference::{Marking, Memory, Picture};

@@ -31,9 +31,11 @@ use report::Report;
 
 use crate::submission::Prefix;
 pub struct Parser {
-  syntax: Box<dyn Syntax>,
   validator: codec_parser::Validator,
-  codec: u32,
+  state: SyntaxState,
+}
+struct SyntaxState {
+  syntax: Box<dyn Syntax>,
   restore_configuration: bool,
   metadata: Prefix,
 }
@@ -50,38 +52,42 @@ impl Parser {
       }
     };
     Ok(Self {
-      syntax,
       validator: codec_parser::Validator::new(codec)?,
-      codec,
-      restore_configuration: false,
-      metadata: Prefix::default(),
+      state: SyntaxState {
+        syntax,
+        restore_configuration: false,
+        metadata: Prefix::default(),
+      },
     })
   }
 
-  pub fn admit(&mut self, bytes: &[u8]) -> io::Result<Report> {
-    let validated = match self.validator.validate(bytes, 1) {
-      Ok(validated) => validated,
-      Err(error) => {
-        // Validator owns native syntax rollback. Its error already
-        // leaves a restored configuration; only our presentation and
-        // unsubmitted metadata still need recovery here.
-        self.reset_syntax();
-        return Err(error);
-      }
-    };
-    match self.inspect(bytes, validated) {
-      Ok(report) => Ok(report),
-      Err(error) => {
-        self.seek()?;
-        Err(error)
-      }
+  pub fn admit(
+    &mut self,
+    bytes: &[u8],
+    budget: usize,
+  ) -> io::Result<Report> {
+    let result =
+      self.validator.admit(bytes, budget, |validator, units| {
+        self.state.inspect(bytes, units, validator)
+      });
+    if result.is_err() {
+      self.state.reset();
     }
+    result
   }
 
+  pub fn seek(&mut self) -> io::Result<()> {
+    self.validator.reset()?;
+    self.state.reset();
+    Ok(())
+  }
+}
+impl SyntaxState {
   fn inspect(
     &mut self,
     bytes: &[u8],
     validated: Vec<codec_parser::unit::Unit>,
+    validator: &codec_parser::Validator,
   ) -> io::Result<Report> {
     let unit = validated
       .into_iter()
@@ -111,9 +117,9 @@ impl Parser {
       })?;
     if let Some(picture) = picture {
       let configuration = if self.restore_configuration {
-        self.validator.configuration()
+        validator.configuration()
       } else {
-        Vec::new()
+        codec_parser::Configuration::default()
       };
       // Restore only parameters absent from this AU's metadata. A
       // complete resume point already supplies the decoder
@@ -196,18 +202,7 @@ impl Parser {
     Ok(Report { units, end: false })
   }
 
-  pub fn seek(&mut self) -> io::Result<()> {
-    let configuration = self.validator.configuration();
-    let mut validator = codec_parser::Validator::new(self.codec)?;
-    if !configuration.is_empty() {
-      validator.validate(&configuration, 1)?;
-    }
-    self.validator = validator;
-    self.reset_syntax();
-    Ok(())
-  }
-
-  fn reset_syntax(&mut self) {
+  fn reset(&mut self) {
     self.syntax.seek();
     self.metadata.clear();
     self.restore_configuration = true;

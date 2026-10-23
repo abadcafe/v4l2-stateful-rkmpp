@@ -1,5 +1,11 @@
 //! module: backend::output_tests; responsibility: CAPTURE transaction
 //! public contract.
+//! operations: test entrypoints; entities: none; tests:
+//! test_register_duplicate_pool_and_unknown_recycle_do_not_change_ownership,
+//! test_stop_requires_explicit_start_before_replacement_can_run,
+//! test_register_rejects_invalid_identity_and_capacity_atomically,
+//! test_start_invalid_count_preserves_stopped_pool,
+//! test_start_reuse_validates_storage_before_changing_decoder.
 use std::num::NonZeroU32;
 
 use dma_buf::memory::Buffer;

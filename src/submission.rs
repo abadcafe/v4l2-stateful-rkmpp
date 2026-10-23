@@ -3,6 +3,7 @@
 //! MAX_PACKET_SIZE; tests: submission_tests, backend/input_tests and
 //! frontend_tests. Payload ranges refer to the caller's retained read
 //! lease.
+//! operations: Origin construction; Prefix append, clear and compose;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Origin(u64);
 impl Origin {

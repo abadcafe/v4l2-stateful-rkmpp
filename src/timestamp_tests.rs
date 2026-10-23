@@ -1,4 +1,6 @@
-//! Timestamp source wire contract.
+//! module: timestamp_tests; responsibility: define timestamp source
+//! admission. operations: test entrypoints; entities: none; tests:
+//! defined V4L2 source values and rejection of unrepresentable origins.
 use crate::timestamp::Source;
 #[test]
 fn test_source_accepts_only_defined_v4l2_timestamp_origins() {

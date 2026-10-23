@@ -1,6 +1,13 @@
 //! module: backend::capture_tests; responsibility: CAPTURE
 //! write/display leases. Public operations only; MPP group allocation
 //! is independently observable.
+//! operations: test entrypoints; entities: none; tests:
+//! test_prepare_write_requires_queue_and_commit_holds_until_recycle,
+//! test_prepare_write_abandoning_target_returns_ownership_without_qbuf,
+//! test_prepare_write_retains_mpp_lease_for_error_or_gpu_output,
+//! test_reuse_needs_requeue_and_preserves_registered_ownership,
+//! test_fits_requires_capacity_and_every_allocation,
+//! test_recycle_duplicate_queue_preserves_original_submission.
 use std::num::NonZeroU32;
 
 use dma_buf::memory::Buffer;

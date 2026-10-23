@@ -2,6 +2,7 @@
 //! contracts. operations/entities: buffering limits, identity, plan and
 //! output policy; tests: child contract tests and backend presentation
 //! tests.
+//! operations: picture identity, geometry and output-plan contracts;
 mod plan;
 pub use plan::{Id, Part, Plan};
 mod output;
