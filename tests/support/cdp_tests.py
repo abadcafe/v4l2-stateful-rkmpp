@@ -14,17 +14,64 @@ operations: pytest cases; entities: Answer; tests:
 Public CDP operations against an owned WebSocket protocol peer.
 """
 
+import base64
 import errno
 import json
+import os
 import threading
+import time
 
 import pytest
 from pydantic import BaseModel, JsonValue, TypeAdapter
-from websockets.sync.server import ServerConnection
+from websockets.sync.server import ServerConnection, serve
 
 from tests.conftest import PeerFactory
 from tests.support.cdp import Cdp
 from tests.support.outcome import Rejected, accepted
+
+
+def test_call_deadline_bounds_a_backpressured_send() -> None:
+    release = threading.Event()
+
+    def handle(connection: ServerConnection) -> None:
+        # Fill the server's frame queue without application reads.
+        # A peer's eventual close must not supply the client's deadline.
+        _ = connection
+        _ = release.wait(2)
+
+    with serve(
+        handle,
+        "127.0.0.1",
+        0,
+        max_queue=1,
+        max_size=32 * 1024 * 1024,
+        compression=None,
+        close_timeout=0.1,
+    ) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with accepted(
+                Cdp.open(f"ws://127.0.0.1:{server.socket.getsockname()[1]}")
+            ) as cdp:
+                first = cdp.call("Example.pause_reader", timeout=0.02)
+                assert isinstance(first, Rejected) and first.code == errno.ETIMEDOUT
+                second = cdp.call("Example.fill_reader", timeout=0.02)
+                assert isinstance(second, Rejected) and second.code == errno.ETIMEDOUT
+                payload = base64.b64encode(os.urandom(8 * 1024 * 1024)).decode()
+                started = time.monotonic()
+                result = cdp.call(
+                    "Example.blocked_send", {"data": payload}, timeout=0.1
+                )
+                elapsed = time.monotonic() - started
+                assert isinstance(result, Rejected) and result.code == errno.ETIMEDOUT
+                assert elapsed < 0.5
+                assert cdp.call("Example.after_failed_send") == result
+        finally:
+            release.set()
+            server.shutdown()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
 
 
 def test_call_bounds_unconsumed_notifications_and_latches_overflow(

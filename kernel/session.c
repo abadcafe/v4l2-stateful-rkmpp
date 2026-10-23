@@ -10,6 +10,7 @@
 #include "session/broker.h"
 #include "session/capture.h"
 #include "session/endpoint.h"
+#include "session/identity.h"
 #include "session/reply.h"
 #include <linux/dma-buf.h>
 #include <linux/file.h>
@@ -144,11 +145,11 @@ static int prepare(struct vb2_buffer *b) {
 static void submit_packet(struct rb_session *s, struct vb2_buffer *b) {
   if (s->output_sent[b->index] || s->flow != RB_FLOW_RUNNING)
     return;
-  if (s->input_serial == U32_MAX) {
+  if (rb_identity_next32(s->input_serial, &s->input_serial)) {
     fail(s);
     return;
   }
-  s->output_serial[b->index] = ++s->input_serial;
+  s->output_serial[b->index] = s->input_serial;
   s->output_sent[b->index] = true;
   push(s, (struct rb_message){.type = RB_PACKET,
                               .count = s->input_serial,
@@ -206,11 +207,11 @@ static void queued(struct vb2_buffer *b) {
     if (s->out_started)
       submit_packet(s, b);
   } else {
-    if (s->capture_serial == U32_MAX) {
+    if (rb_identity_next32(s->capture_serial, &s->capture_serial)) {
       fail(s);
       return;
     }
-    s->capture_token[b->index] = ++s->capture_serial;
+    s->capture_token[b->index] = s->capture_serial;
     s->available[b->index] = true;
     if (s->cap_started) {
       if (s->eos) {
@@ -300,7 +301,8 @@ static void stop(struct vb2_queue *q) {
   bool capture_only = !V4L2_TYPE_IS_OUTPUT(q->type);
   bool abort_drain = capture_only && s->flow != RB_FLOW_RUNNING;
   if (!s->attached && !capture_only) {
-    s->epoch++;
+    if (rb_identity_next64(s->epoch, &s->epoch))
+      fail(s);
     s->tail = s->head;
   }
   /* A dead service poisons the session: its buffers are never reused. */
@@ -308,15 +310,16 @@ static void stop(struct vb2_queue *q) {
     s->stopping = true;
     s->stopped = false;
     if (!capture_only) {
-      s->epoch++;
+      if (rb_identity_next64(s->epoch, &s->epoch))
+        fail(s);
       s->tail = s->head;
     }
-    if (s->reset_serial == U32_MAX)
+    if (rb_identity_next32(s->reset_serial, &s->reset_serial))
       fail(s);
-    else
+    if (!s->failed)
       push(s, (struct rb_message){
                   .type = RB_RESET,
-                  .count = ++s->reset_serial,
+                  .count = s->reset_serial,
                   .flags = (capture_only ? RB_RESET_CAPTURE_ONLY : 0) |
                            (abort_drain ? RB_RESET_ABORT_DRAIN : 0)});
     mutex_unlock(&s->lock);
@@ -366,7 +369,7 @@ static int querycap(struct file *f, void *p, struct v4l2_capability *c) {
   return 0;
 }
 static int enum_fmt(struct file *f, void *p, struct v4l2_fmtdesc *d) {
-  return rb_format_enumerate(session(p)->format, d);
+  return rb_format_enumerate(d);
 }
 static int try_fmt(struct file *f, void *p, struct v4l2_format *fmt) {
   struct rb_session *s = session(p);
@@ -426,15 +429,25 @@ static int selection(struct file *f, void *p, struct v4l2_selection *sel) {
 static int reqbufs(struct file *f, void *p, struct v4l2_requestbuffers *r) {
   struct rb_session *s = session(p);
   struct vb2_queue *q = queue_for(s, r->type);
+  u32 *id, next;
+  bool exhausted;
   int ret;
+  if (!q)
+    return -EINVAL;
   if (r->count && (s->failed || s->stopping))
     return -EIO;
-  ret = q ? vb2_reqbufs(q, r) : -EINVAL;
-  if (!ret) {
-    u32 *id = V4L2_TYPE_IS_OUTPUT(r->type) ? &s->output_pool : &s->capture_pool;
-    if (++*id == 0)
-      ++*id;
+  id = V4L2_TYPE_IS_OUTPUT(r->type) ? &s->output_pool : &s->capture_pool;
+  exhausted = rb_identity_next32(*id, &next) != 0;
+  if (r->count && exhausted) {
+    fail(s);
+    return -EOVERFLOW;
   }
+  ret = vb2_reqbufs(q, r);
+  if (!ret && exhausted)
+    /* REQBUFS(0) must still release storage and permit incarnation recovery. */
+    fail(s);
+  else if (!ret)
+    *id = next;
   return ret;
 }
 /* mmap offsets are opaque cookies, independent of allocation sizes. */
@@ -676,9 +689,14 @@ static int video_release(struct file *f) {
 /* Called with the video ioctl transaction held, but without session.lock:
  * broker callbacks acquire session.lock, so withdrawal must precede it. */
 static int reinitialize(struct rb_session *s) {
-  struct rb_format *format = rb_format_new();
+  struct rb_format *format;
   struct rb_capture *capture;
   struct v4l2_event discarded;
+  u64 epoch, incarnation;
+  if (rb_identity_next64(s->epoch, &epoch) ||
+      rb_identity_next64(s->incarnation, &incarnation))
+    return -EOVERFLOW;
+  format = rb_format_new();
   if (!format)
     return -ENOMEM;
   capture = rb_capture_new(rb_format_layout(format)->size);
@@ -693,11 +711,12 @@ static int reinitialize(struct rb_session *s) {
    * callers must finish observing that teardown before initialization. */
   while (!v4l2_event_dequeue(&s->fh, &discarded, 1))
     ;
-  s->incarnation++;
-  s->epoch++;
+  s->incarnation = incarnation;
+  s->epoch = epoch;
   s->attached = false;
   s->head = s->tail = 0;
   s->generation = 0;
+  s->output_pool = s->capture_pool = 0;
   s->codec = V4L2_PIX_FMT_H264;
   s->input_size = 1024 * 1024;
   s->sequence = s->output_sequence = s->input_serial = s->capture_serial = 0;
@@ -832,6 +851,7 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
   struct vb2_buffer *b;
   struct v4l2_event ev = {0};
   unsigned i;
+  u32 generation;
   int admitted;
   if (rb_reply_validate(m))
     return -EINVAL;
@@ -844,7 +864,7 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
   case RB_LAYOUT:
     if (m->generation != s->generation)
       return -ESTALE;
-    if (s->generation == U32_MAX)
+    if (rb_identity_next32(s->generation, &generation))
       return -EOVERFLOW;
     if (rb_format_update(s->format, m))
       return -EINVAL;
@@ -854,7 +874,7 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
       if (s->cap_started)
         complete_last(s);
     }
-    s->generation++;
+    s->generation = generation;
     ev.type = V4L2_EVENT_SOURCE_CHANGE;
     ev.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION;
     v4l2_event_queue_fh(&s->fh, &ev);

@@ -9,7 +9,7 @@ use super::{Buffer, CpuAccess, Map};
 pub struct InputMap(Map);
 impl InputMap {
   pub fn new(buffer: Buffer) -> io::Result<Self> {
-    Map::new(buffer, false).map(Self)
+    Map::new(buffer).map(Self)
   }
 
   pub fn read(

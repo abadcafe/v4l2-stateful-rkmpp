@@ -16,7 +16,9 @@ from tests.support.outcome import Rejected, accepted
 from tests.support.pixels import Rgb, crop_rgb, decode_png
 
 
-def test_decode_png_reads_actual_rgb_pixels() -> None:
+def _png(pixels: bytes) -> bytes:
+    assert pixels and len(pixels) % 3 == 0
+
     def chunk(kind: bytes, data: bytes) -> bytes:
         return (
             struct.pack(">I", len(data))
@@ -25,18 +27,29 @@ def test_decode_png_reads_actual_rgb_pixels() -> None:
             + struct.pack(">I", zlib.crc32(kind + data))
         )
 
-    png = (
+    return (
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">2I5B", 2, 1, 8, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00\x00\xff\x00"))
+        + chunk(b"IHDR", struct.pack(">2I5B", len(pixels) // 3, 1, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00" + pixels))
         + chunk(b"IEND", b"")
     )
+
+
+def test_decode_png_reads_actual_rgb_pixels() -> None:
+    png = _png(b"\xff\x00\x00\x00\xff\x00")
     image = accepted(decode_png(png))
     assert (image.width, image.height, image.pixels) == (
         2,
         1,
         b"\xff\x00\x00\x00\xff\x00",
     )
+
+
+def test_decode_png_bounds_decoding_to_the_first_image() -> None:
+    first = _png(b"\xff\x00\x00")
+    following = _png(b"\x00\xff\x00")
+    image = accepted(decode_png(first + following * 128))
+    assert (image.width, image.height, image.pixels) == (1, 1, b"\xff\x00\x00")
 
 
 def test_decode_png_invalid_or_truncated_input_is_rejected() -> None:

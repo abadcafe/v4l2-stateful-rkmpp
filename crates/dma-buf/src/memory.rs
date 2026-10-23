@@ -5,7 +5,6 @@
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::{access, storage, system};
@@ -97,62 +96,36 @@ impl AsFd for Buffer {
 type CpuAccess = access::Lease<Buffer>;
 struct Map {
   buffer: Buffer,
-  ptr: NonNull<u8>,
+  mapping: memmap2::Mmap,
 }
 impl Map {
-  fn new(buffer: Buffer, write: bool) -> io::Result<Self> {
-    let protection =
-      libc::PROT_READ | if write { libc::PROT_WRITE } else { 0 };
-    // SAFETY: owned fd and validated size remain alive until munmap.
-    let raw = unsafe {
-      libc::mmap(
-        std::ptr::null_mut(),
-        buffer.size(),
-        protection,
-        libc::MAP_SHARED,
-        buffer.as_fd().as_raw_fd(),
-        0,
-      )
-    };
-    if raw == libc::MAP_FAILED {
-      return Err(io::Error::last_os_error());
-    }
-    let Some(ptr) = NonNull::new(raw.cast()) else {
-      unsafe {
-        libc::munmap(raw, buffer.size());
-      }
-      return Err(io::Error::other("null input mapping"));
-    };
-    Ok(Self { buffer, ptr })
+  fn new(buffer: Buffer) -> io::Result<Self> {
+    // SAFETY: validated DMA storage has a fixed allocation size. Map
+    // retains its owner, and bytes are exposed only under a CPU lease.
+    let mapping = unsafe {
+      memmap2::MmapOptions::new()
+        .len(buffer.size())
+        .map(buffer.as_fd().as_raw_fd())
+    }?;
+    Ok(Self { buffer, mapping })
   }
 
   fn bytes(&self) -> &[u8] {
-    // SAFETY: Map owns the live, size-checked mapping. All callers
-    // retain an exclusive CPU lease throughout the returned borrow.
-    unsafe {
-      std::slice::from_raw_parts(self.ptr.as_ptr(), self.buffer.size())
-    }
-  }
-}
-impl Drop for Map {
-  fn drop(&mut self) {
-    unsafe {
-      libc::munmap(self.ptr.as_ptr().cast(), self.buffer.size());
-    }
+    &self.mapping
   }
 }
 pub struct ReadMapping {
-  lease: Option<CpuAccess>,
+  lease: CpuAccess,
   map: Map,
 }
 impl ReadMapping {
   fn new(buffer: Buffer) -> io::Result<Self> {
     let lease = buffer.begin(false)?;
-    Ok(Self { map: Map::new(buffer, false)?, lease: Some(lease) })
+    Ok(Self { map: Map::new(buffer)?, lease })
   }
 
-  pub fn finish(mut self) -> io::Result<()> {
-    self.lease.take().unwrap().finish()
+  pub fn finish(self) -> io::Result<()> {
+    self.lease.finish()
   }
 }
 impl Deref for ReadMapping {
@@ -163,33 +136,36 @@ impl Deref for ReadMapping {
   }
 }
 pub struct WriteMapping {
-  lease: Option<CpuAccess>,
-  map: Map,
+  lease: CpuAccess,
+  mapping: memmap2::MmapMut,
 }
 impl WriteMapping {
   fn new(buffer: Buffer) -> io::Result<Self> {
     let lease = buffer.begin(true)?;
-    Ok(Self { map: Map::new(buffer, true)?, lease: Some(lease) })
+    // SAFETY: the exclusive CPU lease retains the fixed-size DMA
+    // allocation and excludes local CPU/device aliases for every slice
+    // borrow. External producers transfer ownership before CPU START.
+    let mapping = unsafe {
+      memmap2::MmapOptions::new()
+        .len(buffer.size())
+        .map_mut(buffer.as_fd().as_raw_fd())
+    };
+    Ok(Self { mapping: mapping?, lease })
   }
 
-  pub fn finish(mut self) -> io::Result<()> {
-    self.lease.take().unwrap().finish()
+  pub fn finish(self) -> io::Result<()> {
+    self.lease.finish()
   }
 }
 impl Deref for WriteMapping {
   type Target = [u8];
 
   fn deref(&self) -> &[u8] {
-    self.map.bytes()
+    &self.mapping
   }
 }
 impl DerefMut for WriteMapping {
   fn deref_mut(&mut self) -> &mut [u8] {
-    unsafe {
-      std::slice::from_raw_parts_mut(
-        self.map.ptr.as_ptr(),
-        self.map.buffer.size(),
-      )
-    }
+    &mut self.mapping
   }
 }

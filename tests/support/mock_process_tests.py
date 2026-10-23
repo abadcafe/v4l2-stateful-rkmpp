@@ -8,16 +8,78 @@ import os
 import select
 import signal
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from rkmpp_bridge_uapi import EXCHANGE, VERSION, Batch, Event
 
+from tests.support import mock_process
 from tests.support.mock_process import Peer, Process
 from tests.support.mock_wire import Reply, Request
-from tests.support.outcome import Rejected, accepted, present
+from tests.support.outcome import Rejected, Result, accepted, present
 from tests.support.seqpacket import Socket
 from tests.support.syscalls import OwnedFd
+
+
+def test_close_joins_sessions_still_being_accepted(
+    executable: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    constructing, publish = threading.Event(), threading.Event()
+    handling, release = threading.Event(), threading.Event()
+    listener_closed = threading.Event()
+
+    class DelayedPeer(Peer):
+        def __init__(self, endpoint: Socket, handler: mock_process.Handler) -> None:
+            super().__init__(endpoint, handler)
+            constructing.set()
+            assert publish.wait(5)
+
+    def handle(request: Request) -> Reply:
+        assert request.command == EXCHANGE
+        handling.set()
+        assert release.wait(5)
+        return Reply(code=errno.EPIPE)
+
+    monkeypatch.setattr(mock_process, "Peer", DelayedPeer)
+    library = executable.parent / "libv4l2_rkmpp_kernel_mock.so"
+    process = accepted(Process.open(executable, library, tmp_path / "mock"))
+    close_socket = Socket.close
+
+    def terminate_observed() -> None:
+        # End the owned daemon immediately so its own graceful shutdown
+        # cannot accidentally supply the missing handler join.
+        process.process.kill()
+        _ = process.process.wait(timeout=5)
+
+    def close_observed(endpoint: Socket) -> Result[None]:
+        result = close_socket(endpoint)
+        listener_closed.set()
+        return result
+
+    monkeypatch.setattr(Socket, "close", close_observed)
+    monkeypatch.setattr(process.process, "terminate", terminate_observed)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        opening = executor.submit(process.session, handle)
+        closing = None
+        try:
+            assert constructing.wait(5) and handling.wait(5)
+            closing = executor.submit(process.close)
+            assert listener_closed.wait(5)
+            publish.set()
+            _ = accepted(opening.result(timeout=5))
+            # Accepted handlers remain owned until they finish, even if
+            # acceptance was preempted before publishing the peer.
+            _ = threading.Event().wait(0.1)
+            assert not closing.done()
+        finally:
+            publish.set()
+            release.set()
+            if closing is not None:
+                closing.result(timeout=5)
+            else:
+                process.close()
 
 
 def test_close_forced_exit_observes_terminal_status_before_releasing_resources(

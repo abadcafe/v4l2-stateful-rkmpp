@@ -238,3 +238,27 @@ def test_output_format_cannot_invalidate_allocated_capture(video: Video) -> None
     _ = accepted(capture.request(18))
     result = set_format(video.fd, QueueType.OUTPUT, Codec.HEVC.fourcc)
     assert isinstance(result, Rejected) and result.code == errno.EBUSY
+
+
+@pytest.mark.parametrize("operation", [5, 64], ids=["set", "try"])
+def test_format_normalizes_unused_compressed_storage(
+    video: Video, operation: int
+) -> None:
+    payload = Format(kind=QueueType.OUTPUT)
+    data = bytearray(b"\xff" * 200)
+    struct.pack_into("<5I", data, 0, 128, 64, Codec.H264.fourcc, 0, 3)
+    struct.pack_into("<I", data, 20, 1024 * 1024)
+    data[180] = 8
+    payload.fmt.data[:] = data
+    _ = accepted(
+        ioctl(video.fd, command(3, "V", operation, ctypes.sizeof(payload)), payload)
+    )
+    normalized = bytes(payload.fmt.data)
+    assert normalized[24:180] == bytes(156)
+    assert normalized[180:192] == bytes([1]) + bytes(11)
+    if operation == 5:
+        queried = Format(kind=QueueType.OUTPUT)
+        _ = accepted(
+            ioctl(video.fd, command(3, "V", 4, ctypes.sizeof(queried)), queried)
+        )
+        assert bytes(queried.fmt.data)[:192] == normalized[:192]

@@ -14,7 +14,6 @@ use crate::notify::Notify;
 use crate::pool::{Direction, Pool};
 use crate::protocol::command::{Action, Command, Stop};
 use crate::protocol::{Message, Reply, VERSION};
-use crate::submission::Origin;
 mod presentation;
 #[cfg(test)]
 mod presentation_tests;
@@ -45,13 +44,16 @@ enum Queued {
     timestamp: u64,
     source: crate::timestamp::Source,
     token: NonZeroU32,
-    origin: Origin,
   },
   Task {
     packet: Packet,
     serial: u64,
   },
-  Release(usize, NonZeroU32),
+  Release {
+    index: usize,
+    token: NonZeroU32,
+    damaged: bool,
+  },
   Eos(Option<u32>),
 }
 mod flow;
@@ -114,9 +116,7 @@ impl Backend {
       // Release is executed only at the head of the input queue, after
       // all of this input's synchronous decode tasks. InputPool owns
       // the lease; no second completion/order ledger is needed.
-      if self.inputs.complete(message.index as usize)? {
-        message.flags |= Flags::FrameError as u32;
-      }
+      self.inputs.complete(message.index as usize)?;
       self.inputs.id()
     } else {
       self.output.id()
@@ -215,7 +215,7 @@ impl Backend {
             move || notify.signal()
           })?);
         }
-        let origin = self.inputs.prepare(
+        self.inputs.prepare(
           index.get(),
           extent.offset(),
           extent.length(),
@@ -225,7 +225,6 @@ impl Backend {
           timestamp,
           source,
           token,
-          origin,
         });
         Ok(())
       }
@@ -303,7 +302,7 @@ impl Backend {
     if !matches!(self.packets.front(), Some(Queued::Analyze { .. })) {
       return Ok(false);
     }
-    let Queued::Analyze { index, timestamp, source, token, origin } =
+    let Queued::Analyze { index, timestamp, source, token } =
       self.packets.pop_front().unwrap()
     else {
       unreachable!()
@@ -318,8 +317,11 @@ impl Backend {
       Ok(admission) => admission,
       Err(error) if error.kind() == io::ErrorKind::InvalidData => {
         eprintln!("damaged input: {error}");
-        self.inputs.damage(&[origin]);
-        self.packets.push_front(Queued::Release(index, token));
+        self.packets.push_front(Queued::Release {
+          index,
+          token,
+          damaged: true,
+        });
         return Ok(true);
       }
       Err(error) => return Err(error),
@@ -331,7 +333,11 @@ impl Backend {
         self.inputs.task(index, task.payload, serial, source)?;
       self.prepared_tasks.push(Queued::Task { packet, serial });
     }
-    self.prepared_tasks.push(Queued::Release(index, token));
+    self.prepared_tasks.push(Queued::Release {
+      index,
+      token,
+      damaged: false,
+    });
     if admission.end {
       self.prepared_tasks.push(Queued::Eos(Some(token.get())));
     }
@@ -352,7 +358,7 @@ impl Backend {
       && let Some(queued) = self.packets.front()
     {
       let accepted = match queued {
-        Queued::Release(..) | Queued::Analyze { .. } => {
+        Queued::Release { .. } | Queued::Analyze { .. } => {
           return Ok(true);
         }
         Queued::Task { packet, .. } => {
@@ -405,13 +411,15 @@ impl Backend {
     }
 
     if self.state.flow.running()
-      && let Some(Queued::Release(index, token)) = self.packets.front()
+      && let Some(Queued::Release { index, token, damaged }) =
+        self.packets.front()
     {
-      let (index, token) = (*index, *token);
+      let (index, token, damaged) = (*index, *token, *damaged);
       self.emit(Message {
         kind: Reply::InputDone as u32,
         index: index as u32,
         count: token.get(),
+        flags: if damaged { Flags::FrameError as u32 } else { 0 },
         ..Default::default()
       })?;
       self.packets.pop_front();

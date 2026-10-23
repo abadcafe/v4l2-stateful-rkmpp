@@ -11,7 +11,7 @@ crate-type = ["rlib", "cdylib"]
 bytemuck.workspace = true
 pyo3 = { version = "0.29", features = ["extension-module"] }
 libc.workspace = true
-memmap2 = "0.9"
+memmap2.workspace = true
 
 [build-dependencies]
 bindgen.workspace = true

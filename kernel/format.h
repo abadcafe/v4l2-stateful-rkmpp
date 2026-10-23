@@ -18,7 +18,7 @@ void rb_format_capture(const struct rb_format *f,
                        struct v4l2_pix_format_mplane *p);
 void rb_format_set(struct rb_format *f, const struct v4l2_pix_format_mplane *p);
 int rb_format_update(struct rb_format *f, const struct rb_message *m);
-int rb_format_enumerate(const struct rb_format *f, struct v4l2_fmtdesc *d);
+int rb_format_enumerate(struct v4l2_fmtdesc *d);
 int rb_format_sizes(struct v4l2_frmsizeenum *e);
 int rb_format_selection(const struct rb_format *f, struct v4l2_selection *s);
 #endif

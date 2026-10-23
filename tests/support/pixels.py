@@ -34,6 +34,11 @@ def decode_png(png: bytes) -> Result[Rgb]:
                 "image2pipe",
                 "-i",
                 "pipe:0",
+                # Screenshot decoding owns one image. image2pipe may
+                # contain further images; don't collect an unbounded
+                # decoded stream before checking the expected RGB size.
+                "-frames:v",
+                "1",
                 "-pix_fmt",
                 "rgb24",
                 "-f",

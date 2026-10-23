@@ -1,17 +1,10 @@
 //! module: submission; responsibility: express compressed-input
-//! ownership. operations/entities: Origin, Payload, Prefix,
+//! ownership. operations/entities: Payload, Prefix,
 //! MAX_PACKET_SIZE; tests: submission_tests, backend/input_tests and
 //! frontend_tests. Payload ranges refer to the caller's retained read
 //! lease.
-//! operations: Origin construction; Prefix append, as_slice, clear and
+//! operations: Prefix append, as_slice, clear and
 //! compose;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Origin(u64);
-impl Origin {
-  pub(crate) fn new(value: u64) -> Self {
-    Self(value)
-  }
-}
 use rkmpp::{MAX_PACKET_SIZE, Payload};
 
 /// Unsubmitted metadata. Bounds are checked before allocation or

@@ -51,16 +51,25 @@ void rb_format_normalize(struct v4l2_pix_format_mplane *p) {
   for (i = 0; i < ARRAY_SIZE(codecs); i++)
     if (codecs[i] == (*p).pixelformat)
       break;
-  if (i == ARRAY_SIZE(codecs))
-    (*p).pixelformat = V4L2_PIX_FMT_H264;
-  (*p).width = clamp_t(u32, (*p).width, 64, 8192);
-  (*p).height = clamp_t(u32, (*p).height, 64, 8192);
-  if (!(*p).colorspace || (*p).colorspace > V4L2_COLORSPACE_DCI_P3)
-    (*p).colorspace = V4L2_COLORSPACE_REC709;
-  (*p).num_planes = 1;
-  (*p).field = V4L2_FIELD_NONE;
-  (*p).plane_fmt[0].sizeimage =
-      clamp_t(u32, (*p).plane_fmt[0].sizeimage, 1024 * 1024, 16 * 1024 * 1024);
+  /* Accept arbitrary client hints, but publish only the supported compressed
+   * format. Reconstructing the result also clears unused planes, reserved
+   * bytes, unsupported flags and bytesperline (undefined for compressed data).
+   */
+  *p = (struct v4l2_pix_format_mplane){
+      .pixelformat = i == ARRAY_SIZE(codecs) ? V4L2_PIX_FMT_H264 : codecs[i],
+      .width = clamp_t(u32, p->width, 64, 8192),
+      .height = clamp_t(u32, p->height, 64, 8192),
+      .colorspace = !p->colorspace || p->colorspace > V4L2_COLORSPACE_DCI_P3
+                        ? V4L2_COLORSPACE_REC709
+                        : p->colorspace,
+      .xfer_func = p->xfer_func > V4L2_XFER_FUNC_SMPTE2084 ? 0 : p->xfer_func,
+      .ycbcr_enc = p->ycbcr_enc > V4L2_YCBCR_ENC_SMPTE240M ? 0 : p->ycbcr_enc,
+      .quantization =
+          p->quantization > V4L2_QUANTIZATION_LIM_RANGE ? 0 : p->quantization,
+      .num_planes = 1,
+      .field = V4L2_FIELD_NONE,
+      .plane_fmt[0].sizeimage = clamp_t(u32, p->plane_fmt[0].sizeimage,
+                                        1024 * 1024, 16 * 1024 * 1024)};
 }
 int rb_format_sizes(struct v4l2_frmsizeenum *e) {
   unsigned i;
@@ -130,7 +139,7 @@ int rb_format_update(struct rb_format *f, const struct rb_message *m) {
   f->input.height = m->coded_height;
   return 0;
 }
-int rb_format_enumerate(const struct rb_format *f, struct v4l2_fmtdesc *d) {
+int rb_format_enumerate(struct v4l2_fmtdesc *d) {
   if (V4L2_TYPE_IS_OUTPUT(d->type)) {
     if (d->index >= ARRAY_SIZE(codecs))
       return -EINVAL;

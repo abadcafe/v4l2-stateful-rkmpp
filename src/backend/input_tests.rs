@@ -12,24 +12,19 @@ use super::input::InputPool;
 use crate::timestamp::Source;
 
 #[test]
-fn test_damage_only_marks_the_matching_live_submission() {
+fn test_complete_releases_only_the_selected_input() {
+  let first = Buffer::allocate(4096).unwrap();
+  let second = Buffer::allocate(4096).unwrap();
   let mut pool =
-    InputPool::new(1, vec![Buffer::allocate(4096).unwrap()]).unwrap();
-  let first = pool.prepare(0, 0, 4).unwrap();
-  assert!(pool.damage(&[first]));
-  assert!(pool.damage(&[first]));
-  assert!(pool.complete(0).unwrap());
-  let second = pool.prepare(0, 0, 4).unwrap();
-  assert_ne!(first, second);
-  assert!(!pool.damage(&[first]));
-  assert!(!pool.complete(0).unwrap());
-  assert!(!pool.damage(&[second]));
-  let mut replacement =
-    InputPool::new(2, vec![Buffer::allocate(4096).unwrap()]).unwrap();
-  let third = replacement.prepare(0, 0, 4).unwrap();
-  assert_ne!(third, first);
-  assert!(!replacement.damage(&[first, second]));
-  assert!(!replacement.complete(0).unwrap());
+    InputPool::new(1, vec![first.clone(), second.clone()]).unwrap();
+  pool.prepare(0, 0, 4).unwrap();
+  pool.prepare(1, 0, 4).unwrap();
+  pool.complete(0).unwrap();
+  first.write().unwrap().finish().unwrap();
+  assert!(second.write().is_err());
+  assert_eq!(pool.bytes(1).unwrap().len(), 4);
+  pool.complete(1).unwrap();
+  second.write().unwrap().finish().unwrap();
 }
 
 #[test]

@@ -5,6 +5,7 @@ resolver = "3"
 
 [workspace.dependencies]
 libc = "=0.2.189"
+memmap2 = "0.9"
 bindgen = { version = "=0.73.2", default-features = false, features = ["runtime", "prettyplease"] }
 shlex = "2"
 pkg-config = "0.3"

@@ -243,11 +243,13 @@ class Process:
         self._stop.set()
         if self.process.poll() is None:
             self.process.terminate()
-        for peer in self._peers:
-            peer.close()
         assert isinstance(self._listener.close(), Ok)
         self._thread.join(timeout=5)
         assert not self._thread.is_alive()
+        # Acceptance may already be constructing a Peer when stop is set.
+        # Join that producer before consuming its final session inventory.
+        for peer in self._peers:
+            peer.close()
         if self.process.poll() is None:
             try:
                 _ = self.process.wait(timeout=5)
