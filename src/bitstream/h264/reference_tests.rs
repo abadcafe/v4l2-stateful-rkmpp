@@ -688,12 +688,6 @@ fn test_apply_pairing_requires_same_reference_class_and_no_new_boundary()
           second.adaptive = true;
           second.operations.push(Operation::Reset);
         }
-        if first_reference && !second_reference {
-          // Equal frame_num requires two reference fields. The
-          // identity-admission contract rejects this before pairing.
-          assert!(memory.apply(second.picture()).is_err());
-          continue;
-        }
         let b = memory.apply(second.picture()).unwrap();
         assert_eq!(
           a.id == b.id,

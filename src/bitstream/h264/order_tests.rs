@@ -71,7 +71,6 @@ fn test_observe_rejects_nonzero_idr_and_repeated_frame_identity() {
   for marking in [
     header(1, Marking::Idr { discard: false, long: false }),
     header(0, Marking::Sliding),
-    header(0, Marking::Disposable),
   ] {
     let mut order = Order::default();
     order
@@ -84,6 +83,32 @@ fn test_observe_rejects_nonzero_idr_and_repeated_frame_identity() {
       .unwrap();
     assert!(resumed.idr && !resumed.continuation);
   }
+}
+
+#[test]
+fn test_observe_disposable_frame_number_reuse_preserves_reference_marking()
+ {
+  let mut order = Order::default();
+  let mut idr = header(0, Marking::Idr { discard: false, long: false });
+  std::rc::Rc::make_mut(&mut idr.sequence).maximum = 4;
+  order.observe(&idr).unwrap();
+  let mut reference = header(1, Marking::Sliding);
+  reference.sequence = idr.sequence.clone();
+  let first = order.observe(&reference).unwrap();
+  for _ in 0..2 {
+    let mut disposable = header(1, Marking::Disposable);
+    disposable.sequence = idr.sequence.clone();
+    let output = order.observe(&disposable).unwrap();
+    assert!(!output.reference && !output.continuation);
+    assert_ne!(output.reference_id, first.reference_id);
+    assert_eq!(output.references, first.references);
+  }
+  let mut next =
+    header(2, Marking::Adaptive(vec![Operation::ForgetShort(0)]));
+  next.sequence = idr.sequence;
+  let output = order.observe(&next).unwrap();
+  assert!(!output.references.contains(&first.reference_id));
+  assert_eq!(output.references.len(), 2);
 }
 
 #[test]

@@ -12,9 +12,37 @@
 //! test_admit_separate_metadata_is_not_duplicated_in_decoder_packet,
 //! test_seek_repeated_restart_keeps_configuration_byte_identical,
 //! test_seek_self_contained_picture_keeps_its_original_input_view.
+//! test_admit_disposable_frame_number_reuse_preserves_every_picture.
 use rkmpp::Payload;
 
 use crate::bitstream::Parser;
+#[test]
+fn test_admit_disposable_frame_number_reuse_preserves_every_picture() {
+  let bytes =
+    include_bytes!("../tests/artifacts/h264-disposable-frame-num.h264");
+  let mut parser = Parser::new(u32::from_le_bytes(*b"H264")).unwrap();
+  let mut offset = 0;
+  let mut identities = std::collections::BTreeSet::new();
+  let mut orders = Vec::new();
+  for size in [
+    2724, 873, 346, 252, 254, 758, 331, 230, 222, 747, 391, 216, 264,
+    521, 329, 313,
+  ] {
+    let report =
+      parser.admit(&bytes[offset..offset + size], 1).unwrap();
+    assert_eq!(report.units.len(), 1);
+    let plan = &report.units[0].plan;
+    assert!(identities.insert(plan.id()));
+    if !plan.reference() {
+      assert!(!plan.references().contains(&plan.id()));
+    }
+    orders.push(plan.output().order);
+    offset += size;
+  }
+  assert_eq!(offset, bytes.len());
+  orders.sort_unstable();
+  assert_eq!(orders, (0..32).step_by(2).collect::<Vec<_>>());
+}
 fn samples() -> [([u8; 4], &'static [u8], usize, usize); 2] {
   [
     (

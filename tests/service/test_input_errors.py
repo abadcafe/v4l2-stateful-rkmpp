@@ -15,6 +15,25 @@ from tests.support.reference import frame_hashes
 from tests.support.stream import Codec, Packet, load
 
 
+def test_h264_leading_dependent_picture_waits_for_resume_without_input_error(
+    mock_service: Process, artifacts: Path
+) -> None:
+    source = artifacts / "h264-two-slices-mmco.h264"
+    packets = accepted(load(Codec.H264, source))
+    first = packets[0].data
+    picture = first.find(b"\x00\x00\x01\x65")
+    assert picture > 0
+    # Parameter sets are available, but the earlier pictures targeted by
+    # this dependent AU's MMCO were not decoded in this incarnation.
+    inputs = (Packet(data=first[:picture], timestamp=0), packets[5]) + packets
+    result = accepted(play(mock_service, Codec.H264, source, submissions=inputs))
+    assert result.eos and not result.errors
+    assert all(done.flags & 2 == 0 for done in result.input_completions)
+    assert tuple(frame.digest for frame in result.frames) == accepted(
+        frame_hashes(source, 8, 128, 128)
+    )
+
+
 @pytest.mark.parametrize("input_count", [1, 8])
 def test_semantic_rejection_does_not_configure_the_following_submission(
     mock_service: Process, artifacts: Path, input_count: int
@@ -113,24 +132,32 @@ def test_damaged_submission_does_not_poison_reused_input(
 
 @pytest.mark.parametrize("established", [False, True])
 @pytest.mark.parametrize("input_count", [1, 8])
-def test_h264_level_dpb_violation_rejects_only_its_submission(
+@pytest.mark.parametrize("level", [10, 255], ids=["understated", "unknown"])
+def test_h264_advertised_level_preserves_bounded_decode_requirements(
     mock_service: Process,
     artifacts: Path,
     established: bool,
     input_count: int,
+    level: int,
 ) -> None:
     source = artifacts / "h264-yuv420p.h264"
     good = accepted(load(Codec.H264, source))
-    damaged = bytearray(good[0].data)
-    sps = damaged.find(b"\x00\x00\x01\x67")
-    assert sps >= 0 and damaged[sps + 6] == 11
+    adjusted = bytearray(good[0].data)
+    sps = adjusted.find(b"\x00\x00\x01\x67")
+    assert sps >= 0 and adjusted[sps + 6] == 11
     # Keep the original four reference frames and VUI buffering=4,
-    # but signal level 1, whose 396 macroblocks allow only three
-    # 256x128 reference/display frame buffers (H.264 A.3.1, E.2.1).
-    damaged[sps + 6] = 10
+    # but signal level 1, whose 396 macroblocks describe only three
+    # 256x128 buffers. Level is a capability declaration: the actual
+    # four-buffer requirement fits the bridge and must still decode.
+    # An unknown declaration likewise must not override actual bounds.
+    # Known external failure at 255: MPP consumes this IDR without
+    # publishing its image. The direct Decoder regression reproduces
+    # the missing output without bridge parsing or presentation state.
+    # Keep exact pixels and successful completions as the requirement.
+    adjusted[sps + 6] = level
     inputs = (
         ((good[0],) if established else ())
-        + (Packet(data=bytes(damaged), timestamp=0),)
+        + (Packet(data=bytes(adjusted), timestamp=0),)
         + good
     )
     result = accepted(
@@ -145,10 +172,10 @@ def test_h264_level_dpb_violation_rejects_only_its_submission(
     expected = accepted(frame_hashes(source, 8, 256, 128))
     assert result.eos and not result.errors
     assert tuple(frame.digest for frame in result.frames) == (
-        (expected[:1] if established else ()) + expected
+        (expected[:1] if established else ()) + expected[:1] + expected
     )
     assert tuple(bool(done.flags & 2) for done in result.input_completions) == (
-        ((False,) if established else ()) + (True,) + (False,) * len(good)
+        ((False,) if established else ()) + (False,) * (1 + len(good))
     )
 
 

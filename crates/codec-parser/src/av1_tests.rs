@@ -4,6 +4,43 @@
 use super::av1::Validator;
 
 #[test]
+fn test_validate_ignores_obu_reserved_header_bit_without_losing_prediction()
+ {
+  // AV1 6.2.2 requires decoders to ignore obu_reserved_1bit. Known
+  // failure in the installed GStreamer: identifying [0x13, 0] returns
+  // BITSTREAM_ERROR, while [0x12, 0] succeeds, even without this crate.
+  // The bridge must not duplicate that rejection. Keep the acceptance
+  // assertion so updating the native dependency verifies the contract;
+  // do not skip this case or rewrite the original bytes for the
+  // library.
+  let stream = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/av1-yuv420p.ivf"
+  ));
+  let mut parser = Validator::new().unwrap();
+  let mut bytes = &stream[32..];
+  while !bytes.is_empty() {
+    let size =
+      u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+    let mut packet = bytes[12..12 + size].to_vec();
+    packet[0] |= 1;
+    assert_eq!(parser.validate(&packet, 32).unwrap().units.len(), 1);
+    bytes = &bytes[12 + size..];
+  }
+}
+
+#[test]
+fn test_validate_ignores_obu_extension_reserved_bits() {
+  // AV1 6.2.3 also requires extension_header_reserved_3bits to be
+  // ignored. The installed GStreamer rejects [0x16, 7, 0] directly
+  // with BITSTREAM_ERROR before semantic admission. External failure;
+  // preserve the normative acceptance assertion without patching it.
+  let admission =
+    Validator::new().unwrap().validate(&[0x16, 7, 0], 0).unwrap();
+  assert!(admission.units.is_empty());
+}
+
+#[test]
 fn test_validate_metadata_reports_decoder_configuration_without_a_picture()
  {
   let stream = include_bytes!(concat!(
@@ -77,7 +114,6 @@ fn test_validate_checks_obu_lengths_extension_and_metadata_payloads() {
   for bytes in [
     vec![0x12, 0x80],
     vec![0x12, 3, 1],
-    vec![0x16, 7, 0],
     vec![0x12, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x80],
     vec![0x2a, 1, 1],
   ] {

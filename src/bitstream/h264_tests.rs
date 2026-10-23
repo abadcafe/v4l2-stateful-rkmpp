@@ -4,6 +4,43 @@
 //! test_inspect_metadata_recovery_point_applies_once_without_replaying_bytes.
 use super::codec::Syntax;
 use super::h264::H264;
+
+#[test]
+fn test_inspect_seek_skips_dependent_marking_before_touching_reference_state()
+ {
+  use codec_parser::header::{
+    H264 as Header264, Header, Marking, Operation,
+  };
+  let bytes =
+    &include_bytes!("../../tests/artifacts/h264-discard-old.h264")
+      [..2469];
+  let unit = codec_parser::Validator::new(u32::from_le_bytes(*b"H264"))
+    .unwrap()
+    .validate(bytes, 1)
+    .unwrap()
+    .units
+    .remove(0);
+  let Header::H264(idr) = unit.header.as_ref().unwrap() else {
+    panic!("expected H264");
+  };
+  let dependent = Header::H264(Header264 {
+    sequence: idr.sequence.clone(),
+    frame: 1,
+    field: None,
+    lsb: 2,
+    bottom_delta: 0,
+    delta: [0, 0],
+    marking: Marking::Adaptive(vec![Operation::ForgetShort(0)]),
+  });
+  let mut syntax = H264::default();
+  for _ in 0..2 {
+    assert!(syntax.inspect(&[], Some(&dependent)).unwrap().is_none());
+    let decoded =
+      syntax.inspect(bytes, unit.header.as_ref()).unwrap().unwrap();
+    assert!(decoded.key);
+    syntax.seek();
+  }
+}
 #[test]
 fn test_inspect_validated_idr_and_metadata_boundary() {
   let mut syntax = H264::default();

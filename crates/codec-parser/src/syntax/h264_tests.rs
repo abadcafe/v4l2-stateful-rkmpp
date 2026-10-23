@@ -134,10 +134,11 @@ fn test_parse_infers_zero_reference_buffering_for_constrained_intra_profile()
       .unwrap();
   assert_eq!(s.geometry.limits.reorder(), 0);
   assert_eq!(s.geometry.limits.capacity(), 1);
-  assert!(
+  let reference =
     super::h264::parse(&sequence(100, 16, 2, true, false, 1, None))
-      .is_err()
-  );
+      .unwrap();
+  assert_eq!(reference.maximum, 1);
+  assert_eq!(reference.geometry.limits.capacity(), 16);
   let baseline =
     super::h264::parse(&sequence(66, 16, 2, true, false, 4, None))
       .unwrap();
@@ -191,17 +192,32 @@ fn test_parse_rejects_buffering_below_reference_count_including_zero() {
 }
 
 #[test]
-fn test_parse_enforces_level_dpb_budget_for_references_and_vui() {
+fn test_parse_level_hint_does_not_reject_bounded_reference_and_vui_requirements()
+ {
   // Level 1.1: MaxDpbMbs=900, 256x128=128 macroblocks => 7 frames.
   for (references, buffering, valid) in [
     (7, None, true),
-    (8, None, false),
-    (0, Some((0, 8)), false),
+    (8, None, true),
+    (0, Some((0, 8)), true),
     (7, Some((6, 7)), true),
   ] {
     let mut bytes =
       sequence(66, 0, 2, true, false, references, buffering);
     bytes[2] = 11;
     assert_eq!(super::h264::parse(&bytes).is_ok(), valid);
+  }
+}
+
+#[test]
+fn test_parse_unknown_level_keeps_safe_buffering_inference() {
+  for buffering in [None, Some((2, 4))] {
+    let mut bytes = sequence(66, 0, 2, true, false, 4, buffering);
+    bytes[2] = 255;
+    let sequence = super::h264::parse(&bytes).unwrap();
+    assert_eq!(sequence.maximum, 4);
+    assert_eq!(
+      sequence.geometry.limits.capacity(),
+      if buffering.is_some() { 4 } else { 16 }
+    );
   }
 }

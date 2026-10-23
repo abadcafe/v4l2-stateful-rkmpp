@@ -125,11 +125,25 @@ impl<'a> Bits<'a> {
   }
 
   pub fn skip(&mut self, mut count: usize) -> io::Result<()> {
-    while count != 0 {
-      let chunk = count.min(32);
-      self.get(chunk)?;
-      count -= chunk;
+    let truncated =
+      || io::Error::new(io::ErrorKind::InvalidData, "truncated RBSP");
+    let mut next = self.clone();
+    let buffered = count.min(next.available);
+    next.get(buffered)?;
+    count -= buffered;
+    let bytes = count / 8;
+    if next.zeros.is_none() {
+      next.bytes = next.bytes.get(bytes..).ok_or_else(truncated)?;
+    } else {
+      // Advance only escape state for skipped payload. Constructing
+      // and cloning a bit cache every four bytes needlessly decoded
+      // large SEI payloads that the caller does not inspect.
+      for _ in 0..bytes {
+        next.byte()?.ok_or_else(truncated)?;
+      }
     }
+    next.get(count % 8)?;
+    *self = next;
     Ok(())
   }
 

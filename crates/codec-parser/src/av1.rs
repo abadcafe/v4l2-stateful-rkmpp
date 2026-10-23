@@ -70,7 +70,9 @@ impl Validator {
     // borrows cannot escape this call or survive failed admission.
     let mut pending = None;
     while !bytes.is_empty() {
-      if bytes[0] & 0x81 != 0 {
+      // AV1 6.2.2 requires decoders to ignore obu_reserved_1bit.
+      // Only the forbidden bit makes this OBU header inadmissible.
+      if bytes[0] & 0x80 != 0 {
         return Err(invalid());
       }
       let length = u32::try_from(bytes.len()).map_err(|_| invalid())?;

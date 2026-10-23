@@ -41,7 +41,7 @@ fn test_check_idr_requires_zero_without_changing_live_identity() {
 }
 
 #[test]
-fn test_check_repeated_number_requires_opposite_reference_fields() {
+fn test_check_repeated_reference_number_requires_opposite_fields() {
   for first in [None, Some(false), Some(true)] {
     for second in [None, Some(false), Some(true)] {
       for reference in [false, true] {
@@ -54,7 +54,7 @@ fn test_check_repeated_number_requires_opposite_reference_fields() {
           && first.is_some()
           && second.is_some()
           && first != second;
-        assert_eq!(identity.check(next).is_ok(), paired);
+        assert_eq!(identity.check(next).is_ok(), !reference || paired);
         if paired {
           let next = identity.begin(next).unwrap();
           assert!(next.continuation);
@@ -62,6 +62,33 @@ fn test_check_repeated_number_requires_opposite_reference_fields() {
         }
       }
     }
+  }
+}
+
+#[test]
+fn test_begin_disposable_pictures_reusing_reference_number_have_distinct_identities()
+ {
+  for frame in [0, 1, 15] {
+    let mut identity = Identity::default();
+    let reference = picture(frame, None, true, frame == 0);
+    let first = identity.begin(reference).unwrap();
+    identity.finish(reference, &first, None);
+    let mut prior = first.id;
+    for _ in 0..3 {
+      let disposable = picture(frame, None, false, false);
+      let assigned = identity.begin(disposable).unwrap();
+      identity.finish(disposable, &assigned, None);
+      assert_eq!(assigned.id, prior + 1);
+      assert!(!assigned.continuation);
+      assert_eq!(identity.previous(), Some(frame));
+      prior = assigned.id;
+    }
+    assert!(identity.check(picture(frame, None, true, false)).is_err());
+    assert!(
+      identity
+        .begin(picture((frame + 1) % 16, None, true, false))
+        .is_ok()
+    );
   }
 }
 

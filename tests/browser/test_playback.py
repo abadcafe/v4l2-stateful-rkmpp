@@ -43,13 +43,23 @@ class DecodedColor(BaseModel):
     [
         ("browser-h264.mp4", 256, 128, 36),
         ("browser-h264-bframes.mp4", 1920, 1080, 60),
+        ("browser-h264-disposable-frame-num.mp4", 1920, 1080, 16),
         ("browser-vp8.webm", 256, 128, 36),
         ("browser-vp9-8.webm", 256, 128, 36),
         ("browser-av1-8.webm", 256, 128, 36),
         ("browser-vp9-10.webm", 256, 128, 36),
         ("browser-av1-10.webm", 256, 128, 36),
     ],
-    ids=["h264", "h264-bframes", "vp8", "vp9-8", "av1-8", "vp9-10", "av1-10"],
+    ids=[
+        "h264",
+        "h264-bframes",
+        "h264-disposable-frame-num",
+        "vp8",
+        "vp9-8",
+        "av1-8",
+        "vp9-10",
+        "av1-10",
+    ],
 )
 def test_browser_hardware_frames_are_visible(
     browser_factory: BrowserFactory,
@@ -65,13 +75,16 @@ def test_browser_hardware_frames_are_visible(
     assert accepted(browser.player.load(browser.url(file)))
     deadline = time.monotonic() + 20
     state = accepted(browser.player.state())
-    while not state.ended:
+    properties: dict[str, str] = {}
+    # Media domain updates are delivered asynchronously and can arrive
+    # after a short video reaches ended. Poll playback to receive them.
+    while not state.ended or "kVideoDecoderName" not in properties:
         assert state.error is None and time.monotonic() < deadline, state
         time.sleep(0.1)
         state = accepted(browser.player.state())
+        properties.update(accepted(media_properties(browser.tab.events())))
     assert state.error is None and state.visible
     assert (state.width, state.height, state.frames.total) == (width, height, frames)
-    properties = accepted(media_properties(browser.tab.events()))
     assert properties["kVideoDecoderName"] == "V4L2VideoDecoder"
     assert properties["kIsPlatformVideoDecoder"] == "true"
     shot = Screenshot.model_validate(

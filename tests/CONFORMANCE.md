@@ -22,6 +22,38 @@ framing (`zero_byte`, `trailing_zero_8bits`) is separate from a retained
 parameter NAL. A seek must not convert that framing into growing configuration
 payload. Original coded submissions retain their complete bytes for MPP.
 
+The bridge also decodes deployed AVC streams whose disposable B pictures reuse
+the preceding reference's `frame_num` (observed on Bilibili). This numbering
+departs from the constraint in 7.4.3, but does not identify retained reference
+storage: disposable pictures receive distinct serial identities and leave the
+reference DPB unchanged. Repeated reference-frame numbers still reject unless
+they form a valid complementary field pair. The synthetic
+`h264-disposable-frame-num.h264` fixture was encoded from FFmpeg testsrc2 at
+128x96/30, 16 frames, x264 medium with
+`bframes=3:b-adapt=0:b-pyramid=normal:ref=3:keyint=16:scenecut=0`; only seven
+disposable slices' four-bit `frame_num` fields were changed to the preceding
+reference number. FFmpeg decodes the original and changed streams identically.
+`browser-h264-disposable-frame-num.mp4` uses the same testsrc2 pattern, encoder
+parameters and marking change at 1920x1080 in MP4, preserving the encoder's
+B-picture PTS/DTS at 30 fps.
+Module admission, process pixel comparison and composed Chromium playback all
+exercise this case. Neither fixture contains downloaded video content.
+
+Level/profile declarations likewise do not replace checked allocation limits.
+H.264 admission accepts an understated or unknown level when actual dimensions,
+reference count and explicit VUI buffering fit implementation bounds. Level-based
+inference remains useful when consistent; an unknown or contradictory hint uses
+the bounded sixteen-picture inference instead. Explicit reorder/buffering
+requirements must still be consistent and fit the same actual limits. The
+`service/test_input_errors.py` advertised-level cases preserve every reference
+pixel and completion, both initially and in an established stream.
+
+While seeking, H.264 pictures without an IDR or recovery point are ineligible
+before their reference marking or POC derivation runs. Missing references from
+before the seek are expected; skipped pictures cannot seed state for pictures
+that were never decoded. The leading-dependent-picture process case exercises
+an MMCO against such an absent reference before a complete IDR-led sequence.
+
 ## Normative behavior and verification matrix
 
 | ID | Contract / invariant | Required partitions | Verification owner |
@@ -40,7 +72,7 @@ payload. Original coded submissions retain their complete bytes for MPP.
 | P02 | Registration publishes file ownership only after successful copyout | partial export, bad destination, repeated failure, concurrent fd observation during failed copyout; rollback releases uninstalled reservations | kernel/test_copyout_faults.py, service/test_registration.py |
 | P03 | Bounded queues apply backpressure without losing ownership | full batch, 64 live sessions with the next offer deferred until close, many framed inputs, multi-frame AV1 TU/VP9 superframe, retained CAPTURE | service/test_admission.py, service/test_output_semantics.py, service/test_resources.py |
 | C01 | Exp-Golomb parsing covers its declared integer domain | zero, 30/31/32 leading zeros, legal maximum, overflow, truncation, signed limits | crates/codec-parser/src/syntax/bits_tests.rs |
-| C02 | One H.264 SPS parse supplies geometry and reference semantics | profiles, POC modes, field/frame, gaps, scaling lists, buffering limits | crates/codec-parser/src/syntax/h264_tests.rs, src/bitstream/h264/order_tests.rs |
+| C02 | One H.264 SPS parse supplies geometry and reference semantics | profiles, POC modes, field/frame, gaps, scaling lists, actual buffering limits, advisory understated/unknown level and intra-profile constraints | crates/codec-parser/src/syntax/h264_tests.rs, src/bitstream/h264/order_tests.rs, service/test_input_errors.py |
 | C03 | Exactly one authority decides complementary picture identity | reference/non-reference, same/opposite parity, frame number, IDR, MMCO5 on first/second field, inferred frame_num=0, DPB occupancy, intervening picture | src/bitstream/h264/reference_tests.rs, src/backend/layout_tests.rs |
 | C04 | MMCO operates on picture identity, not parity alone | operations 1–6, frame/paired/unpaired field, same/different pair, reused long index | src/bitstream/h264/reference_tests.rs |
 | C05 | Allowed frame-number gaps execute non-existing reference marking | no gap, multiple gaps, wrap, reference/non-reference, IDR/MMCO5 reset, forbidden gap | src/bitstream/h264/reference_tests.rs, src/bitstream/h264/order_tests.rs |
@@ -240,3 +272,22 @@ this requirement. Rockchip MPP 1.1.0 publishes only the first image: its VP9 par
 enqueues an existing reference into `QUEUE_DISPLAY` without a hardware task,
 while the synchronous decoder's invalid/no-output-task path does not publish
 that queue without EOS. These failures must not become skips or expected failures.
+
+AV1 6.2.2 and 6.2.3 require decoders to ignore `obu_reserved_1bit` and
+`extension_header_reserved_3bits`. The bridge no longer rejects the former,
+but the installed GStreamer codecparsers dependency rejects both. Calling
+`gst_av1_parser_identify_one_obu` directly, without this project, accepts temporal
+delimiter bytes `12 00` (status 0, consumed 2) but rejects `13 00` and `16 07 00`
+(BITSTREAM_ERROR, consumed 0). The two reserved-bit acceptance cases in
+`crates/codec-parser/src/av1_tests.rs` explain and retain these external failures.
+Original media bytes are not rewritten to conceal the dependency's rejection.
+
+MPP 1.1.0 also consumes an H.264 IDR with an unknown `level_idc=255` without
+publishing its image. `test_packet_unknown_h264_level_preserves_bounded_picture_output`
+uses the public MPP adapter directly with two otherwise identical IDRs: levels
+11 and 10 publish timestamps `[0, 1]`, whereas level 255 followed by level 11
+publishes only `[1]`. This bypasses bridge parsing and presentation entirely.
+The corresponding four unknown-level process partitions retain their exact
+pixel/completion assertions and fail on the missing picture obligation at drain.
+The understated-level partitions pass with the same hardware. Neither the SPS
+nor the native dependency is patched to make these cases green.

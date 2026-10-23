@@ -137,23 +137,27 @@ pub fn parse(data: &[u8]) -> io::Result<Sequence> {
     50 => 110400,
     51 | 52 => 184320,
     60..=62 => 696320,
-    _ => return Err(io::Error::other("invalid H264 level")),
+    _ => 0,
   };
   let mbs = mb_width
     .checked_mul(map_height)
     .and_then(|n| n.checked_mul(2 - frame))
     .ok_or_else(|| io::Error::other("SPS dimensions overflow"))?;
-  let capacity = (max_mbs / mbs).min(16) as usize;
-  if capacity == 0 || maximum as usize > capacity {
-    return Err(io::Error::other(
-      "H264 references exceed level DPB capacity",
-    ));
-  }
+  // Level and profile constraints advertise encoder conformance, not
+  // allocation bounds. Retain useful level-based inference, but an
+  // unknown/understated level must not reject pictures whose actual
+  // requirements fit the checked sixteen-picture implementation limit.
+  let level_capacity = (max_mbs / mbs).min(16) as usize;
+  let capacity =
+    if level_capacity == 0 || maximum as usize > level_capacity {
+      16
+    } else {
+      level_capacity
+    };
   let signaled = if b.get(1)? != 0 {
-    // H.264 E.2.1 / A.3.1: validate the signaled value before
-    // normalizing zero to one working display surface. The reference
-    // requirement and level budget belong to this same SPS.
-    crate::syntax::restriction::h264(b, maximum as usize..=capacity)?
+    // Actual reference/reorder requirements must remain consistent
+    // and bounded, independently of the advertised level.
+    crate::syntax::restriction::h264(b, maximum as usize..=16)?
   } else {
     None
   };
@@ -163,18 +167,14 @@ pub fn parse(data: &[u8]) -> io::Result<Sequence> {
     // E.2.1 infers both buffering and reorder, not just reorder.
     // Keep the zero reference requirement until after validation;
     // Limits then supplies the one working surface needed for output.
-    let inferred = if constraints & 16 != 0
+    let inferred = if maximum == 0
+      && constraints & 16 != 0
       && matches!(profile, 44 | 86 | 100 | 110 | 122 | 244)
     {
       0
     } else {
       capacity
     };
-    if maximum as usize > inferred {
-      return Err(io::Error::other(
-        "H264 references exceed inferred buffering",
-      ));
-    }
     crate::Limits::new(inferred, inferred, None)?
   };
   let chroma = if separate { 0 } else { chroma };

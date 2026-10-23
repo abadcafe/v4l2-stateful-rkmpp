@@ -271,32 +271,34 @@ fn test_validate_reports_damaged_headers_for_every_framed_codec() {
 }
 
 #[test]
-fn test_validate_semantic_level_error_is_damaged_input_and_preserves_configuration()
+fn test_validate_advertised_level_preserves_picture_and_configuration_updates()
  {
   let good = &include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/artifacts/h264-yuv420p.h264"
   ))[..4454];
-  let mut damaged = good.to_vec();
-  let sps = damaged
-    .windows(4)
-    .position(|bytes| bytes == [0, 0, 1, 0x67])
-    .unwrap();
-  assert_eq!(damaged[sps + 6], 11);
-  damaged[sps + 6] = 10;
-  for established in [false, true] {
-    let mut validator =
-      Validator::new(u32::from_le_bytes(*b"H264")).unwrap();
-    if established {
+  let sps =
+    good.windows(4).position(|bytes| bytes == [0, 0, 1, 0x67]).unwrap();
+  assert_eq!(good[sps + 6], 11);
+  for level in [10, 255] {
+    let mut adjusted = good.to_vec();
+    adjusted[sps + 6] = level;
+    for established in [false, true] {
+      let mut validator =
+        Validator::new(u32::from_le_bytes(*b"H264")).unwrap();
+      if established {
+        validator.validate(good, 1).unwrap();
+      }
+      let configuration = validator.configuration();
+      assert_eq!(
+        validator.validate(&adjusted, 1).unwrap().units.len(),
+        1
+      );
+      assert_ne!(validator.configuration(), configuration);
+      let adjusted_configuration = validator.configuration();
       validator.validate(good, 1).unwrap();
+      assert_ne!(validator.configuration(), adjusted_configuration);
     }
-    let configuration = validator.configuration();
-    assert_eq!(
-      validator.validate(&damaged, 1).err().unwrap().kind(),
-      std::io::ErrorKind::InvalidData
-    );
-    assert_eq!(validator.configuration(), configuration);
-    assert_eq!(validator.validate(good, 1).unwrap().units.len(), 1);
   }
 }
 

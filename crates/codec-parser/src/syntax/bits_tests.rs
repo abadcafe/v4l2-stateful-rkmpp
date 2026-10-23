@@ -170,3 +170,29 @@ fn test_skip_large_escaped_payload_preserves_trailing_bits() {
   assert!(!bits.more_rbsp_data());
   bits.finish_rbsp().unwrap();
 }
+
+#[test]
+fn test_skip_matches_bit_reads_across_cached_and_escaped_bytes() {
+  let data = [0xa5, 0, 0, 3, 1, 0x63, 0x80];
+  for escaped in [false, true] {
+    for prefix in 0..8 {
+      for count in 0..32 {
+        let mut actual = if escaped {
+          Bits::new(&data)
+        } else {
+          Bits::from_rbsp(&data)
+        };
+        let mut expected = actual.clone();
+        actual.skip(prefix).unwrap();
+        for _ in 0..prefix {
+          expected.get(1).unwrap();
+        }
+        actual.skip(count).unwrap();
+        for _ in 0..count {
+          expected.get(1).unwrap();
+        }
+        assert_eq!(actual.get(8).unwrap(), expected.get(8).unwrap());
+      }
+    }
+  }
+}

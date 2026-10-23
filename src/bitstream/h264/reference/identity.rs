@@ -35,17 +35,22 @@ pub(super) struct Identity {
 }
 impl Identity {
   pub(super) fn check(&self, p: Picture) -> io::Result<()> {
+    // Only retained references use frame_num as a storage identity.
+    // Deployed encoders also repeat the last reference number on
+    // disposable B pictures. They receive independent serials and
+    // cannot alias or replace that reference. Keep reference-number
+    // collision checks strict rather than rejecting harmless output.
     if (p.idr && p.number.value() != 0)
       || (!p.idr
+        && p.reference
         && self.previous == Some(p.number.value())
-        && !(p.reference
-          && p.field.is_some_and(|bottom| {
-            self.unpaired.as_ref().is_some_and(|prior| {
-              prior.reference
-                && prior.frame == p.number.value()
-                && prior.bottom != bottom
-            })
-          })))
+        && !p.field.is_some_and(|bottom| {
+          self.unpaired.as_ref().is_some_and(|prior| {
+            prior.reference
+              && prior.frame == p.number.value()
+              && prior.bottom != bottom
+          })
+        }))
     {
       return Err(io::Error::new(
         io::ErrorKind::InvalidData,

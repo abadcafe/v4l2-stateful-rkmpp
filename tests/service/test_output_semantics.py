@@ -44,6 +44,23 @@ def test_hevc_hidden_reference_is_decoded_without_display(
     assert tuple(frame.digest for frame in result.frames) == expected
 
 
+def test_h264_disposable_frame_number_reuse_preserves_all_pixels(
+    mock_service: Process, artifacts: Path
+) -> None:
+    # Synthetic x264 testsrc2 128x96, 16 frames, medium, bframes=3,
+    # b-adapt=0:b-pyramid=normal:ref=3:keyint=16:scenecut=0.
+    # Each disposable slice's four-bit frame_num is replaced with the
+    # preceding reference's number, as observed in Bilibili AVC streams.
+    # Seven B pictures reuse reference numbers; reference headers and
+    # coded pixels are unchanged. FFmpeg decodes both versions identically.
+    path = artifacts / "h264-disposable-frame-num.h264"
+    expected = accepted(frame_hashes(path, 8, 128, 96))
+    assert len(expected) == 16
+    result = accepted(play(mock_service, Codec.H264, path))
+    assert result.eos and not result.errors
+    assert tuple(frame.digest for frame in result.frames) == expected
+
+
 @pytest.mark.parametrize("input_count", [1, 8])
 def test_many_client_framed_pictures_are_independent_of_queue_depth(
     mock_service: Process, tmp_path: Path, input_count: int

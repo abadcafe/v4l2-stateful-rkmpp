@@ -60,6 +60,19 @@ impl Syntax for H264 {
       self.pending = point;
       return Ok(None);
     };
+    // Leading pictures after seek have no decoded reference history.
+    // Decide eligibility before executing their marking commands or
+    // advancing POC/identity state; missing old references are
+    // expected.
+    if self.seeking
+      && !matches!(
+        header.marking,
+        codec_parser::header::Marking::Idr { .. }
+      )
+      && point.is_none()
+    {
+      return Ok(None);
+    }
     let m = self.order.observe(header)?;
     let mut discard = m.discard;
     if m.idr {
@@ -73,9 +86,6 @@ impl Syntax for H264 {
     let display = self.recovery.picture(m.number, m.poc, m.reference);
     if m.reset {
       self.recovery = Recovery::default();
-    }
-    if self.seeking && !m.idr && point.is_none() {
-      return Ok(None);
     }
     self.seeking = false;
     Ok(Some(Picture {
