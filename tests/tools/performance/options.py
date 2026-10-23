@@ -129,7 +129,7 @@ def parse(arguments: tuple[str, ...], root: Path) -> Result[Options]:
             else root / "target/benchmarks" / stamp,
             service_binary=Path(values["--service"]).resolve()
             if "--service" in values
-            else root / "target/release/v4l2-stateful-rkmpp",
+            else root / "target/debug/v4l2-stateful-rkmpp",
         )
     except ValidationError as error:
         return Rejected(errno.EINVAL, f"invalid measurement options: {error}")

@@ -16,6 +16,9 @@ mod header_tests;
 mod picture;
 #[cfg(test)]
 mod picture_tests;
+mod slice;
+#[cfg(test)]
+mod slice_tests;
 use picture::Picture;
 pub(super) struct Validator {
   parser: NonNull<ffi::GstH265Parser>,
@@ -129,7 +132,11 @@ impl Validator {
             )
           };
           let valid = status == 0
-            && !slice.pps.is_null()
+            // SAFETY: successful parsing resolves PPS into this
+            // exclusively owned parser, before any further mutation.
+            && unsafe { slice.pps.as_ref() }.is_some_and(|pps| {
+              slice::validate(&slice, pps).is_ok()
+            })
             && (slice.header_size as usize) < nal.size as usize * 8
             && match &picture {
               None => {

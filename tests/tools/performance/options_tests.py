@@ -35,6 +35,7 @@ def test_parse_defaults_select_three_presets_and_normal_gpu_policy(
     assert options.rounds == 1 and options.gpu_minimum_hz is None
     assert options.interval_ms == 1000 and options.warmup_seconds == 5
     assert options.output.parent == source / "target/benchmarks"
+    assert options.service_binary == source / "target/debug/v4l2-stateful-rkmpp"
 
 
 def test_parse_explicit_inputs_preserve_selection_and_measurement_settings(
@@ -87,6 +88,11 @@ def test_parse_custom_video_uses_its_path_without_preset_assumptions(
     assert (
         options.workloads[0].source == video and options.workloads[0].expected is None
     )
+
+
+def test_parse_explicit_service_uses_the_selected_executable(source: Path) -> None:
+    binary = source / "custom-service"
+    assert accepted(parse(("--service", str(binary)), source)).service_binary == binary
 
 
 @pytest.mark.parametrize(

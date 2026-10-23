@@ -3,6 +3,91 @@
 //! metadata, picture boundaries, reference marking consistency,
 //! malformed input and recovery.
 use super::h264::Validator;
+
+#[test]
+fn test_validate_rejects_reference_flags_inconsistent_with_nal_kind() {
+  let good = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/h264-two-slices.h264"
+  ));
+  for positions in [&[4][..], &[33], &[42], &[740, 3146]] {
+    let mut bad = good.to_vec();
+    for &position in positions {
+      // Parameter sets and IDR slices must be references; SEI must not.
+      bad[position] ^= if position == 42 { 0x20 } else { 0x60 };
+    }
+    let mut parser = Validator::new().unwrap();
+    assert_eq!(
+      parser.validate(&bad, 1).err().unwrap().kind(),
+      std::io::ErrorKind::InvalidData,
+      "NAL positions {positions:?}"
+    );
+    assert!(parser.configuration().is_empty());
+    parser.validate(good, 1).unwrap();
+  }
+}
+
+#[test]
+fn test_validate_rejects_undefined_slice_type_without_committing_configuration()
+ {
+  let good = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/h264-two-slices.h264"
+  ));
+  let mut bad = good.to_vec();
+  // first_mb_in_slice=0, slice_type=7 (all I) -> 12 (undefined).
+  // Both type codes occupy seven bits; the remaining header is
+  // unchanged.
+  assert_eq!(bad[741], 0x88);
+  bad[741] = 0x8d;
+  let mut parser = Validator::new().unwrap();
+  assert_eq!(
+    parser.validate(&bad, 1).err().unwrap().kind(),
+    std::io::ErrorKind::InvalidData
+  );
+  assert!(parser.configuration().is_empty());
+  parser.validate(good, 1).unwrap();
+}
+
+#[test]
+fn test_validate_rejects_slice_address_outside_picture_and_recovers() {
+  let good = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/h264-two-slices.h264"
+  ));
+  // The second slice begins with ue(32). ue(64) has two more bits;
+  // it names the first macroblock beyond this 8x8-macroblock picture.
+  let start = 3147;
+  let payload: Vec<bool> = good[start..]
+    .iter()
+    .flat_map(|byte| {
+      (0..8).rev().map(move |bit| byte & (1 << bit) != 0)
+    })
+    .collect();
+  assert_eq!(
+    payload[..11],
+    [
+      false, false, false, false, false, true, false, false, false,
+      false, true
+    ]
+  );
+  let mut bits = vec![false; 6];
+  bits.extend([true, false, false, false, false, false, true]);
+  bits.extend_from_slice(&payload[11..]);
+  let mut bad = good[..start].to_vec();
+  bad.extend(bits.chunks(8).map(|chunk| {
+    chunk.iter().enumerate().fold(0u8, |byte, (index, &bit)| {
+      byte | (u8::from(bit) << (7 - index))
+    })
+  }));
+  let mut parser = Validator::new().unwrap();
+  parser.validate(good, 1).unwrap();
+  assert_eq!(
+    parser.validate(&bad, 1).err().unwrap().kind(),
+    std::io::ErrorKind::InvalidData
+  );
+  parser.validate(good, 1).unwrap();
+}
 #[test]
 fn test_validate_complete_access_unit_and_metadata() {
   let bytes = include_bytes!(concat!(

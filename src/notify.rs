@@ -68,7 +68,6 @@ impl Listener {
   }
 }
 fn drain(fd: BorrowedFd<'_>) -> io::Result<u64> {
-  let mut total = 0u64;
   loop {
     let mut value = 0u64;
     // SAFETY: value is an aligned writable eight-byte destination.
@@ -76,12 +75,14 @@ fn drain(fd: BorrowedFd<'_>) -> io::Result<u64> {
       libc::read(fd.as_raw_fd(), (&mut value as *mut u64).cast(), 8)
     };
     if result == 8 {
-      total = total.saturating_add(value);
-      continue;
+      // This eventfd has no EFD_SEMAPHORE: one read atomically drains
+      // the entire counter. Leave later notifications for the next
+      // scheduler turn, instead of chasing concurrent producers here.
+      return Ok(value);
     }
     let error = io::Error::last_os_error();
     if error.kind() == io::ErrorKind::WouldBlock {
-      return Ok(total);
+      return Ok(0);
     }
     if error.kind() != io::ErrorKind::Interrupted {
       return Err(error);

@@ -14,6 +14,12 @@ use crate::syntax::h264::Sequence;
 mod marking;
 #[cfg(test)]
 mod marking_tests;
+mod nal;
+#[cfg(test)]
+mod nal_tests;
+mod slice;
+#[cfg(test)]
+mod slice_tests;
 use marking::Markings;
 #[derive(PartialEq, Eq)]
 struct Identity {
@@ -136,11 +142,11 @@ impl Validator {
         return Err(invalid());
       }
       offset = nal.offset as usize + nal.size as usize;
-      if offset > bytes.len() || bytes[nal.offset as usize] & 0x80 != 0
-      {
+      if offset > bytes.len() {
         return Err(invalid());
       }
-      let kind = nal.type_;
+      let kind =
+        nal::Header::try_from(bytes[nal.offset as usize])?.kind();
       match kind {
         10 => unit.sequence_end(nal.sc_offset as usize)?,
         11 => unit.stream_end(nal.sc_offset as usize)?,
@@ -163,6 +169,23 @@ impl Validator {
           {
             return Err(invalid());
           }
+          // SAFETY: successful native parsing resolves PPS/SPS into
+          // this exclusively owned parser. Borrow them only until the
+          // next native mutation; retain only owned geometry below.
+          let pps =
+            unsafe { slice.pps.as_ref() }.ok_or_else(invalid)?;
+          let sps =
+            unsafe { pps.sequence.as_ref() }.ok_or_else(invalid)?;
+          let id = u32::try_from(sps.id).map_err(|_| invalid())?;
+          let sequence = sequences
+            .get(&id)
+            .or_else(|| self.sequences.get(&id))
+            .ok_or_else(invalid)?;
+          slice::validate(
+            &slice,
+            sequence.geometry,
+            sps.mb_adaptive_frame_field_flag != 0,
+          )?;
           let current = Identity {
             pps: slice.pps as usize,
             frame: slice.frame_num,
@@ -186,21 +209,8 @@ impl Validator {
           } else {
             let markings = Markings::new(&nal, &slice)?;
             unit.prefix = nal.sc_offset as usize;
-            // PPS belongs to this parser and was checked above. Copy
-            // only owned scalar syntax, never its address.
-            let pps = unsafe { &*slice.pps };
             let pending = Pending {
-              sequence: {
-                let sps = unsafe { pps.sequence.as_ref() }
-                  .ok_or_else(invalid)?;
-                let id =
-                  u32::try_from(sps.id).map_err(|_| invalid())?;
-                sequences
-                  .get(&id)
-                  .or_else(|| self.sequences.get(&id))
-                  .ok_or_else(invalid)?
-                  .clone()
-              },
+              sequence: sequence.clone(),
               frame: u32::from(slice.frame_num),
               field: (slice.field_pic_flag != 0)
                 .then_some(slice.bottom_field_flag != 0),

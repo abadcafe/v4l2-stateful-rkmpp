@@ -5,6 +5,61 @@
 use super::hevc::Validator;
 
 #[test]
+fn test_validate_rejects_undefined_independent_slice_type() {
+  let good = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/hevc-two-slices.hevc"
+  ));
+  let payload: Vec<bool> = good[2388..5716]
+    .iter()
+    .flat_map(|byte| {
+      (0..8).rev().map(move |bit| byte & (1 << bit) != 0)
+    })
+    .collect();
+  // After first/no-prior/PPS flags, replace slice_type=2 by undefined
+  // 3.
+  assert_eq!(payload[..6], [true, false, true, false, true, true]);
+  let mut bits = payload[..3].to_vec();
+  bits.extend([false, false, true, false, false]);
+  bits.extend_from_slice(&payload[6..]);
+  let mut bad = good[..2388].to_vec();
+  bad.extend(bits.chunks(8).map(|chunk| {
+    chunk.iter().enumerate().fold(0u8, |byte, (index, &bit)| {
+      byte | (u8::from(bit) << (7 - index))
+    })
+  }));
+  bad.extend_from_slice(&good[5716..]);
+  let mut parser = Validator::new().unwrap();
+  assert_eq!(
+    parser.validate(&bad, 1).err().unwrap().kind(),
+    std::io::ErrorKind::InvalidData
+  );
+  assert!(parser.configuration().is_empty());
+  parser.validate(good, 1).unwrap();
+}
+
+#[test]
+fn test_validate_rejects_nonfirst_slice_at_picture_origin_and_recovers()
+{
+  let good = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/hevc-two-slices.hevc"
+  ));
+  // The second segment's address occupies bits 19..23 of its NAL.
+  // Keep its complete header and payload, replacing CTB address 8 by 0.
+  let mut bad = good.to_vec();
+  assert_eq!(bad[5721], 0x30);
+  bad[5721] &= !0x10;
+  let mut parser = Validator::new().unwrap();
+  parser.validate(good, 1).unwrap();
+  assert_eq!(
+    parser.validate(&bad, 1).err().unwrap().kind(),
+    std::io::ErrorKind::InvalidData
+  );
+  parser.validate(good, 1).unwrap();
+}
+
+#[test]
 fn test_validate_temporal_id_zero_constraints_before_configuration_commit()
  {
   let good = &include_bytes!(concat!(
