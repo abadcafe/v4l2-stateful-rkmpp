@@ -212,6 +212,10 @@ def _measure(
             return state
         output.playback = state.value
         output.timeline.append(state.value)
+        properties = media_properties(browser.tab.events())
+        if isinstance(properties, Rejected):
+            return properties
+        output.properties.update(properties.value)
         now = time.monotonic()
         if (
             state.value.error is not None
@@ -256,10 +260,10 @@ def _finish(
     properties = media_properties(browser.tab.events())
     if isinstance(properties, Rejected):
         return properties
-    output.properties = properties.value
+    output.properties.update(properties.value)
     if (
-        properties.value.get("kVideoDecoderName") != "V4L2VideoDecoder"
-        or properties.value.get("kIsPlatformVideoDecoder") != "true"
+        output.properties.get("kVideoDecoderName") != "V4L2VideoDecoder"
+        or output.properties.get("kIsPlatformVideoDecoder") != "true"
     ):
         return Rejected(
             errno.ENOTSUP, "measurement did not use hardware V4L2VideoDecoder"

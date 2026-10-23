@@ -27,6 +27,55 @@ from tests.support.cdp import Cdp
 from tests.support.outcome import Rejected, accepted
 
 
+def test_call_bounds_unconsumed_notifications_and_latches_overflow(
+    peer: PeerFactory,
+) -> None:
+    def handle(connection: ServerConnection) -> None:
+        _ = connection.recv()
+        for index in range(1025):
+            connection.send(
+                json.dumps({"method": "Example.changed", "params": {"index": index}})
+            )
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        result = cdp.call("Example.events")
+        assert isinstance(result, Rejected) and result.code == errno.ENOBUFS
+        events = cdp.events()
+        assert len(events) == 1024
+        assert events[0].params == {"index": 0}
+        assert events[-1].params == {"index": 1023}
+        assert cdp.call("Example.after_overflow") == result
+
+
+def test_call_bounds_total_notification_bytes(peer: PeerFactory) -> None:
+    def handle(connection: ServerConnection) -> None:
+        _ = connection.recv()
+        payload = "x" * (4 * 1024 * 1024)
+        for _ in range(2):
+            connection.send(
+                json.dumps({"method": "Example.changed", "params": {"value": payload}})
+            )
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        result = cdp.call("Example.large_events")
+        assert isinstance(result, Rejected) and result.code == errno.ENOBUFS
+        assert len(cdp.events()) == 1
+
+
+def test_call_bounds_unanswered_timed_out_commands(peer: PeerFactory) -> None:
+    def handle(connection: ServerConnection) -> None:
+        for _ in connection:
+            pass
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        for _ in range(64):
+            result = cdp.call("Example.unanswered", timeout=0.001)
+            assert isinstance(result, Rejected) and result.code == errno.ETIMEDOUT
+        result = cdp.call("Example.over_capacity", timeout=0.001)
+        assert isinstance(result, Rejected) and result.code == errno.ENOBUFS
+        assert cdp.call("Example.after_overflow") == result
+
+
 def test_call_delivers_result_and_preserves_interleaved_notifications(
     peer: PeerFactory,
 ) -> None:

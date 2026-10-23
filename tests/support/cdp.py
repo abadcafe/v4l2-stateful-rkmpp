@@ -19,6 +19,10 @@ from tests.support.outcome import Ok, Rejected, Result
 
 type Payload = dict[str, JsonValue]
 
+_MAX_EVENTS = 1024
+_MAX_EVENT_BYTES = 8 * 1024 * 1024
+_MAX_EXPIRED = 64
+
 
 class _WireError(BaseModel):
     code: int
@@ -54,6 +58,8 @@ class Cdp:
         self._sequence: int = 0
         self._expired: set[int] = set()
         self._events: list[Notification] = []
+        self._event_bytes: int = 0
+        self._failure: Rejected | None = None
 
     @classmethod
     def open(cls, url: str) -> Result[Cdp]:
@@ -80,6 +86,10 @@ class Cdp:
     ) -> Result[Payload]:
         if not math.isfinite(timeout) or timeout <= 0:
             return Rejected(errno.EINVAL, "invalid CDP deadline")
+        if self._failure is not None:
+            return self._failure
+        if len(self._expired) >= _MAX_EXPIRED:
+            return self._overflow("too many unanswered CDP commands")
         self._sequence += 1
         deadline = time.monotonic() + timeout
         try:
@@ -103,9 +113,18 @@ class Cdp:
                         return Rejected(
                             errno.EPROTO, "CDP response has neither id nor method"
                         )
+                    size = len(raw.encode()) if isinstance(raw, str) else len(raw)
+                    if (
+                        len(self._events) >= _MAX_EVENTS
+                        or self._event_bytes + size > _MAX_EVENT_BYTES
+                    ):
+                        return self._overflow(
+                            "unconsumed CDP notifications exceed capacity"
+                        )
                     self._events.append(
                         Notification(method=envelope.method, params=envelope.params)
                     )
+                    self._event_bytes += size
                     continue
                 if envelope.id in self._expired:
                     # Timed-out commands may finish after the next call starts.
@@ -153,7 +172,15 @@ class Cdp:
     def events(self) -> tuple[Notification, ...]:
         events = tuple(self._events)
         self._events.clear()
+        self._event_bytes = 0
         return events
+
+    def _overflow(self, message: str) -> Rejected:
+        # A missing event or forgotten response ID would make later replies
+        # ambiguous. Surface the loss and retire this connection permanently.
+        self._failure = Rejected(errno.ENOBUFS, message)
+        self.close()
+        return self._failure
 
     def close(self) -> None:
         self._lease.close()
