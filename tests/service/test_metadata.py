@@ -60,12 +60,14 @@ def test_decode_preserves_timestamp_source(
         (Codec.AV1, "av1-yuv420p.ivf", 15),
     ],
 )
+@pytest.mark.parametrize("repetitions", [1, 2])
 def test_separate_configuration_uses_picture_timestamp_and_preserves_pixels(
     mock_service: Process,
     artifacts: Path,
     codec: Codec,
     file: str,
     prefix: int,
+    repetitions: int,
 ) -> None:
     path = artifacts / file
     packets = accepted(load(codec, path))
@@ -90,16 +92,17 @@ def test_separate_configuration_uses_picture_timestamp_and_preserves_pixels(
             mock_service,
             codec,
             path,
+            repetitions=repetitions,
             input_count=1,
             submissions=submissions,
             sources=(0x10000,) + (0,) * len(packets),
         )
     )
     assert result.eos and not result.errors
-    assert tuple(frame.digest for frame in result.frames) == accepted(
-        frame_hashes(path, 8, 256, 128)
+    assert tuple(frame.digest for frame in result.frames) == (
+        accepted(frame_hashes(path, 8, 256, 128)) * repetitions
     )
     assert result.frames[0].timestamp == 222000
     assert all(frame.flags & 0x70000 == 0 for frame in result.frames)
-    assert len(result.input_completions) == len(submissions)
+    assert len(result.input_completions) == len(submissions) * repetitions
     assert all(completion.flags == 0 for completion in result.input_completions)

@@ -3,7 +3,8 @@
 //! MAX_PACKET_SIZE; tests: submission_tests, backend/input_tests and
 //! frontend_tests. Payload ranges refer to the caller's retained read
 //! lease.
-//! operations: Origin construction; Prefix append, clear and compose;
+//! operations: Origin construction; Prefix append, as_slice, clear and
+//! compose;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Origin(u64);
 impl Origin {
@@ -19,6 +20,10 @@ use rkmpp::{MAX_PACKET_SIZE, Payload};
 #[derive(Default)]
 pub(crate) struct Prefix(Vec<u8>);
 impl Prefix {
+  pub(crate) fn as_slice(&self) -> &[u8] {
+    &self.0
+  }
+
   pub(crate) fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
     checked_size(self.0.len(), bytes.len())?;
     self.0.extend_from_slice(bytes);

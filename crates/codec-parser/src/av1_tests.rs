@@ -4,6 +4,22 @@
 use super::av1::Validator;
 
 #[test]
+fn test_validate_metadata_reports_decoder_configuration_without_a_picture()
+ {
+  let stream = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/av1-yuv420p.ivf"
+  ));
+  let mut parser = Validator::new().unwrap();
+  let admission = parser.validate(&stream[44..59], 0).unwrap();
+  assert!(admission.units.is_empty());
+  assert!(admission.configures_decoder);
+  let padding = parser.validate(&[0x7a, 0], 0).unwrap();
+  assert!(padding.units.is_empty());
+  assert!(!padding.configures_decoder);
+}
+
+#[test]
 fn test_validate_configuration_belongs_to_the_following_coded_task() {
   let stream = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -16,14 +32,14 @@ fn test_validate_configuration_belongs_to_the_following_coded_task() {
   let mut combined = packet.to_vec();
   combined.extend_from_slice(&packet[15..]);
   let units = parser.validate(&combined, 32).unwrap();
-  assert_eq!(units.len(), 2);
-  assert!(units[0].configures_decoder);
-  assert!(!units[1].configures_decoder);
+  assert_eq!(units.units.len(), 2);
+  assert!(units.units[0].configures_decoder);
+  assert!(!units.units[1].configures_decoder);
   let mut trailing = packet[15..].to_vec();
   trailing.extend_from_slice(&packet[..15]);
   let units = parser.validate(&trailing, 32).unwrap();
-  assert_eq!(units.len(), 1);
-  assert!(!units[0].configures_decoder);
+  assert_eq!(units.units.len(), 1);
+  assert!(!units.units[0].configures_decoder);
 }
 
 #[test]
@@ -174,8 +190,8 @@ fn test_validate_identical_redundant_header_preserves_one_picture() {
   packet.extend_from_slice(&redundant);
   packet.extend_from_slice(&tile_obu());
   let units = Validator::new().unwrap().validate(&packet, 32).unwrap();
-  assert_eq!(units.len(), 1);
-  assert_eq!(units[0].range, 0..packet.len());
+  assert_eq!(units.units.len(), 1);
+  assert_eq!(units.units[0].range, 0..packet.len());
 }
 
 #[test]

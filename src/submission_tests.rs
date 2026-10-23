@@ -10,6 +10,17 @@ use rkmpp::{MAX_PACKET_SIZE, Payload};
 
 use crate::submission::Prefix;
 #[test]
+fn test_as_slice_observes_retained_metadata_until_composition() {
+  let mut prefix = Prefix::default();
+  assert!(prefix.as_slice().is_empty());
+  prefix.append(&[1, 2]).unwrap();
+  prefix.append(&[3]).unwrap();
+  assert_eq!(prefix.as_slice(), &[1, 2, 3]);
+  prefix.compose(&[], &[4], 0..1).unwrap();
+  assert!(prefix.as_slice().is_empty());
+}
+
+#[test]
 fn test_compose_without_prefix_borrows_the_exact_input_range() {
   let mut prefix = Prefix::default();
   assert!(

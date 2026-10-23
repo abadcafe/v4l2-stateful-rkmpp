@@ -32,7 +32,7 @@ fn test_admit_rejected_update_restores_nonempty_preceding_configuration()
     ),
   ] {
     let mut parser = Validator::new(u32::from_le_bytes(codec)).unwrap();
-    let unit = parser.validate(previous, 1).unwrap().remove(0);
+    let unit = parser.validate(previous, 1).unwrap().units.remove(0);
     let configuration = parser.configuration();
     let result: std::io::Result<()> =
       parser.admit(replacement, 1, |candidate, _| {
@@ -45,7 +45,7 @@ fn test_admit_rejected_update_restores_nonempty_preceding_configuration()
     assert!(result.is_err());
     assert_eq!(parser.configuration(), configuration);
     assert_eq!(
-      parser.validate(&previous[unit.prefix..], 1).unwrap().len(),
+      parser.validate(&previous[unit.prefix..], 1).unwrap().units.len(),
       1
     );
   }
@@ -85,7 +85,7 @@ fn test_admit_consumer_rejection_restores_preceding_configuration() {
       let previous = validator.configuration();
       let result: std::io::Result<()> =
         validator.admit(packet, 1, |parser, units| {
-          assert_eq!(units.len(), 1);
+          assert_eq!(units.units.len(), 1);
           assert!(!parser.configuration().is_empty());
           Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -99,7 +99,9 @@ fn test_admit_consumer_rejection_restores_preceding_configuration() {
       assert_eq!(validator.configuration(), previous);
       assert_eq!(validator.configuration().as_ptr(), previous.as_ptr());
       assert_eq!(
-        validator.admit(packet, 1, |_, units| Ok(units.len())).unwrap(),
+        validator
+          .admit(packet, 1, |_, units| Ok(units.units.len()))
+          .unwrap(),
         1
       );
     }
@@ -294,7 +296,7 @@ fn test_validate_semantic_level_error_is_damaged_input_and_preserves_configurati
       std::io::ErrorKind::InvalidData
     );
     assert_eq!(validator.configuration(), configuration);
-    assert_eq!(validator.validate(good, 1).unwrap().len(), 1);
+    assert_eq!(validator.validate(good, 1).unwrap().units.len(), 1);
   }
 }
 
@@ -320,7 +322,7 @@ fn test_validate_budget_rejection_cannot_commit_parameter_sets() {
       Validator::new(u32::from_le_bytes(codec)).unwrap();
     assert!(validator.validate(packet, 0).is_err());
     assert!(validator.configuration().is_empty());
-    assert_eq!(validator.validate(packet, 1).unwrap().len(), 1);
+    assert_eq!(validator.validate(packet, 1).unwrap().units.len(), 1);
   }
 }
 

@@ -15,7 +15,8 @@ fn test_admit_semantic_rejection_cannot_install_parameter_sets() {
   let prefix = codec_parser::Validator::new(codec)
     .unwrap()
     .validate(packet, 1)
-    .unwrap()[0]
+    .unwrap()
+    .units[0]
     .prefix;
   let mut damaged = packet[..prefix].to_vec();
   // Native header validation accepts SEI framing; recovery-point
@@ -60,7 +61,8 @@ fn test_admit_annexb_budget_rejection_preserves_committed_configuration()
     let prefix = codec_parser::Validator::new(fourcc)
       .unwrap()
       .validate(packet, 1)
-      .unwrap()[0]
+      .unwrap()
+      .units[0]
       .prefix;
     let mut frontend = Frontend::new(fourcc).unwrap();
     assert!(frontend.admit(packet, 0, Source::End, 0).is_err());
@@ -91,7 +93,8 @@ fn test_admit_annexb_metadata_does_not_require_a_picture_budget() {
     let prefix = codec_parser::Validator::new(fourcc)
       .unwrap()
       .validate(packet, 1)
-      .unwrap()[0]
+      .unwrap()
+      .units[0]
       .prefix;
     let mut frontend = Frontend::new(fourcc).unwrap();
     assert!(
@@ -149,6 +152,7 @@ fn test_admit_repeated_damage_restores_standalone_av1_configuration() {
       .unwrap()
       .validate(&restored, 1)
       .unwrap()
+      .units
       .len(),
     1
   );
@@ -444,4 +448,31 @@ fn test_admit_metadata_overflow_does_not_poison_next_keyframe() {
     frontend.admit(packet, 2, Source::End, 32).unwrap().tasks.len(),
     1
   );
+}
+
+#[test]
+fn test_seek_av1_separate_configuration_is_not_restored_twice() {
+  let ivf = include_bytes!("../tests/artifacts/av1-yuv420p.ivf");
+  let size =
+    u32::from_le_bytes(ivf[32..36].try_into().unwrap()) as usize;
+  let packet = &ivf[44..44 + size];
+  let mut frontend =
+    Frontend::new(u32::from_le_bytes(*b"AV01")).unwrap();
+  frontend.admit(packet, 0, Source::End, 32).unwrap();
+  frontend.seek().unwrap();
+  assert!(
+    frontend
+      .admit(&packet[..15], 1, Source::End, 32)
+      .unwrap()
+      .tasks
+      .is_empty()
+  );
+  let admission =
+    frontend.admit(&packet[15..], 2, Source::End, 32).unwrap();
+  let Payload::Prefixed { prefix, range } = &admission.tasks[0].payload
+  else {
+    panic!("retained metadata must precede its picture");
+  };
+  assert_eq!(prefix, &packet[..15]);
+  assert_eq!(range, &(0..packet.len() - 15));
 }

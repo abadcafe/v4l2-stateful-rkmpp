@@ -87,6 +87,38 @@ def test_account_ignores_reused_pid_and_new_process_without_baseline() -> None:
     assert accepted(account(now, old, 1, 100, 5, 7))["chromium"] == 0
 
 
+def test_account_includes_owned_processes_independently_of_executable_name() -> None:
+    old = {
+        1: Process(parent=0, start=1, ticks=10, name="chrome", kind="browser"),
+        2: Process(parent=1, start=2, ticks=20, name="renamed-worker", kind="renderer"),
+        3: Process(parent=1, start=3, ticks=30, name="chrome_crashpad", kind="utility"),
+        4: Process(parent=0, start=4, ticks=40, name="chromium", kind="browser"),
+    }
+    now = {
+        pid: process.model_copy(update={"ticks": process.ticks + 100})
+        for pid, process in old.items()
+    }
+    groups = accepted(account(now, old, 1, 100, 1, None))
+    assert groups == {
+        "chromium": 300.0,
+        "browser": 100.0,
+        "renderer": 100.0,
+        "gpu-process": 0.0,
+        "other-chromium": 100.0,
+    }
+
+
+def test_account_handles_deep_process_trees_without_recursion() -> None:
+    old = {
+        pid: Process(parent=pid - 1, start=pid, ticks=0, name="chrome", kind="browser")
+        for pid in range(1, 5001)
+    }
+    now = {pid: process.model_copy(update={"ticks": 1}) for pid, process in old.items()}
+    groups = accepted(account(now, old, 1, 100, 1, None))
+    assert groups["chromium"] == 5000.0
+    assert groups["browser"] == 5000.0
+
+
 def test_account_invalid_sampling_interval_is_rejected() -> None:
     for elapsed, ticks in (
         (0.0, 100),

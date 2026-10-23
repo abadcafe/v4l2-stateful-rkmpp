@@ -105,12 +105,17 @@ def processes(
 
 
 def _descendants(values: Processes, root: int) -> set[int]:
+    children: dict[int, list[int]] = {}
+    for pid, process in values.items():
+        children.setdefault(process.parent, []).append(pid)
     descendants = {root}
-    while True:
-        more = {pid for pid, process in values.items() if process.parent in descendants}
-        if more <= descendants:
-            return descendants
-        descendants |= more
+    pending = [root]
+    while pending:
+        for child in children.get(pending.pop(), ()):
+            if child not in descendants:
+                descendants.add(child)
+                pending.append(child)
+    return descendants
 
 
 def account(
@@ -148,7 +153,7 @@ def account(
         percent = 100 * delta / ticks / elapsed
         if pid == desktop_pid:
             groups["desktop-compositor"] += percent
-        elif pid in descendants and p.name == "chromium":
+        elif pid in descendants:
             groups["chromium"] += percent
             groups[
                 p.kind

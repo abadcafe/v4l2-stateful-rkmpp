@@ -14,7 +14,8 @@ fn test_validate_annexb_retains_owned_picture_headers() {
   let first = {
     let mut parser =
       crate::Validator::new(u32::from_le_bytes(*b"H264")).unwrap();
-    let first = parser.validate(&bytes[..4454], 32).unwrap().remove(0);
+    let first =
+      parser.validate(&bytes[..4454], 32).unwrap().units.remove(0);
     parser.validate(&bytes[4454..6728], 32).unwrap();
     first
   };
@@ -36,7 +37,8 @@ fn test_validate_annexb_retains_owned_picture_headers() {
   let first = {
     let mut parser =
       crate::Validator::new(u32::from_le_bytes(*b"HEVC")).unwrap();
-    let first = parser.validate(&bytes[..5496], 32).unwrap().remove(0);
+    let first =
+      parser.validate(&bytes[..5496], 32).unwrap().units.remove(0);
     parser.validate(&bytes[5496..7063], 32).unwrap();
     first
   };
@@ -82,10 +84,11 @@ fn test_validate_normalized_sequence_is_shared_and_bad_metadata_is_atomic()
   ] {
     let mut parser = Validator::new(u32::from_le_bytes(codec)).unwrap();
     let first =
-      parser.validate(&bytes[..first_end], 1).unwrap().remove(0);
+      parser.validate(&bytes[..first_end], 1).unwrap().units.remove(0);
     let second = parser
       .validate(&bytes[first_end..second_end], 1)
       .unwrap()
+      .units
       .remove(0);
     match (first.header.unwrap(), second.header.unwrap()) {
       (Header::H264(first), Header::H264(second)) => {

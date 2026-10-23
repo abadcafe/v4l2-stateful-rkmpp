@@ -103,6 +103,7 @@ impl Format {
     };
     if stride < coded_width.next_multiple_of(2)
       || stride > 65536
+      || !stride.is_multiple_of(2)
       || size < stride as usize * info.rows as usize * 3 / 2
       || size > 128 * 1024 * 1024
     {

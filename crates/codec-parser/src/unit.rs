@@ -1,8 +1,19 @@
 //! module: codec_parser::unit; responsibility: retain validated input
-//! extent and its ordered termination boundary. operations: Unit,
-//! Boundary, annexb, sequence_end, stream_end, payload; entities:
-//! Unit, Boundary; tests: unit_tests and codec admission tests.
+//! extent and its ordered termination boundary. operations: Admission,
+//! Unit, Boundary, annexb, sequence_end, stream_end, payload; entities:
+//! Admission, Unit, Boundary; tests: unit_tests and codec admission
+//! tests.
 use std::io;
+/// Admission includes metadata effects even when no coded picture is
+/// present.
+pub struct Admission {
+  pub units: Vec<Unit>,
+  /// True establishes that this submission supplies decoder
+  /// configuration. False makes no promise about configuration
+  /// already present in a task.
+  pub configures_decoder: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary {
   Sequence,

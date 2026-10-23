@@ -32,10 +32,9 @@ static const u32 codecs[] = {V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC,
 void rb_format_capture(const struct rb_format *f,
                        struct v4l2_pix_format_mplane *p) {
   memset(p, 0, sizeof(*p));
-  p->width = f->layout.stride / (f->layout.format == RB_FMT_P010 ? 2 : 1);
+  p->width = f->layout.stride;
   p->height = f->layout.rows ?: 64;
-  p->pixelformat =
-      f->layout.format == RB_FMT_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+  p->pixelformat = V4L2_PIX_FMT_NV12;
   p->num_planes = 1;
   p->field = f->layout.field == 3 || f->layout.field == 4
                  ? V4L2_FIELD_ALTERNATE
@@ -111,7 +110,6 @@ void rb_format_set(struct rb_format *f,
 int rb_format_update(struct rb_format *f, const struct rb_message *m) {
   u64 right = (u64)m->crop_left + m->width;
   u64 bottom = (u64)m->crop_top + m->height;
-  unsigned bytes = m->format == RB_FMT_P010 ? 2 : 1;
   if (m->count < RB_MIN_CAPTURE || m->count > RB_MAX_BUFFERS || m->field > 5 ||
       m->colorspace > V4L2_COLORSPACE_DCI_P3 ||
       m->xfer_func > V4L2_XFER_FUNC_SMPTE2084 ||
@@ -121,10 +119,11 @@ int rb_format_update(struct rb_format *f, const struct rb_message *m) {
       m->coded_width < right || m->coded_width > 8192 || m->coded_height < 64 ||
       m->coded_height < bottom || m->coded_height > 8192 ||
       m->rows < m->coded_height || m->rows > 16384 || (m->rows & 1) ||
-      m->stride < ALIGN(m->coded_width, 2) * bytes || m->stride > 65536 ||
+      m->stride < ALIGN(m->coded_width, 2) || m->stride > 65536 ||
+      (m->stride & 1) ||
       m->size < (u64)m->stride * m->rows * 3 / 2 ||
       m->size > 128 * 1024 * 1024 ||
-      (m->format != RB_FMT_NV12 && m->format != RB_FMT_P010))
+      m->format != RB_FMT_NV12)
     return -EINVAL;
   f->layout = *m;
   f->input.width = m->coded_width;
@@ -142,8 +141,7 @@ int rb_format_enumerate(const struct rb_format *f, struct v4l2_fmtdesc *d) {
   } else {
     if (d->index)
       return -EINVAL;
-    d->pixelformat =
-        f->layout.format == RB_FMT_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+    d->pixelformat = V4L2_PIX_FMT_NV12;
   }
   return 0;
 }
@@ -168,8 +166,7 @@ int rb_format_selection(const struct rb_format *f, struct v4l2_selection *s) {
         (struct v4l2_rect){.width = f->input.width, .height = f->input.height};
     break;
   case V4L2_SEL_TGT_COMPOSE_PADDED:
-    s->r = (struct v4l2_rect){.width = m->stride /
-                                       (m->format == RB_FMT_P010 ? 2 : 1),
+    s->r = (struct v4l2_rect){.width = m->stride,
                               .height = m->rows};
     break;
   default:

@@ -63,6 +63,7 @@ fn test_new_rejects_invalid_storage_and_unrepresentable_geometry() {
     FrameInfo { width: 0, ..frame() },
     FrameInfo { width: 256, ..frame() },
     FrameInfo { stride: 255, ..frame() },
+    FrameInfo { stride: 257, size: 257 * 128 * 3 / 2, ..frame() },
     FrameInfo { rows: 127, ..frame() },
     FrameInfo { rows: 129, ..frame() },
     FrameInfo { size: 49151, ..frame() },

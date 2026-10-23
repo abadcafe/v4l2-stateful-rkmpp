@@ -107,10 +107,14 @@ impl Framed {
     bytes: &[u8],
     timestamp: u64,
     source: Source,
-    ranges: Vec<codec_parser::unit::Unit>,
+    admission: codec_parser::unit::Admission,
   ) -> io::Result<Admission> {
+    let ranges = admission.units;
     if ranges.is_empty() {
       self.metadata.append(bytes)?;
+      if admission.configures_decoder {
+        self.configuration = codec_parser::Configuration::default();
+      }
     }
     let mut tasks = Vec::new();
     for unit in ranges {

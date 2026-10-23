@@ -14,6 +14,7 @@ fn header(poc: u32, kind: u8, short: Vec<Short>) -> Header {
       .unwrap()
       .validate(&bytes[..5496], 1)
       .unwrap()
+      .units
       .remove(0);
   let Some(Header::Hevc(first)) = first.header else {
     panic!("missing HEVC header")

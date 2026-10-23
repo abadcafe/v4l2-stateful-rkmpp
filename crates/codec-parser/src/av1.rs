@@ -36,7 +36,7 @@ impl Validator {
     &mut self,
     bytes: &[u8],
     budget: usize,
-  ) -> io::Result<Vec<super::unit::Unit>> {
+  ) -> io::Result<super::unit::Admission> {
     let result = self.packet(bytes, budget);
     if result.is_err() {
       self.reset()?;
@@ -57,7 +57,7 @@ impl Validator {
     &mut self,
     mut bytes: &[u8],
     budget: usize,
-  ) -> io::Result<Vec<super::unit::Unit>> {
+  ) -> io::Result<super::unit::Admission> {
     if bytes.is_empty() {
       return Err(invalid());
     }
@@ -128,6 +128,7 @@ impl Validator {
     if pending.is_some() {
       return Err(invalid());
     }
+    let configures_decoder = sequence.is_some();
     if let Some(sequence) = sequence
       && sequence != self.sequence.as_slice()
     {
@@ -136,7 +137,7 @@ impl Validator {
     if let Some(last) = ranges.last_mut() {
       last.range.end = total;
     }
-    Ok(ranges)
+    Ok(super::unit::Admission { units: ranges, configures_decoder })
   }
 
   fn obu<'a>(

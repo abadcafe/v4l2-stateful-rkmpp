@@ -400,3 +400,33 @@ fn test_seek_self_contained_picture_keeps_its_original_input_view() {
     }
   }
 }
+
+#[test]
+fn test_seek_separate_metadata_restores_each_parameter_once() {
+  for (codec, data, first, _) in samples() {
+    let split = data[..first]
+      .windows(3)
+      .enumerate()
+      .find_map(|(offset, start)| {
+        (start == [0, 0, 1]
+          && if codec == *b"H264" {
+            data[offset + 3] & 31 == 5
+          } else {
+            (data[offset + 3] >> 1) & 63 <= 31
+          })
+        .then_some(offset)
+      })
+      .unwrap();
+    let mut parser = Parser::new(u32::from_le_bytes(codec)).unwrap();
+    parser.admit(&data[..first], 1).unwrap();
+    parser.seek().unwrap();
+    assert!(parser.admit(&data[..split], 1).unwrap().units.is_empty());
+    let report = parser.admit(&data[split..first], 1).unwrap();
+    let Payload::Prefixed { prefix, range } = &report.units[0].payload
+    else {
+      panic!("separate metadata must precede the borrowed picture");
+    };
+    assert_eq!(prefix, &data[..split]);
+    assert_eq!(range, &(0..first - split));
+  }
+}

@@ -14,6 +14,7 @@ fn test_inspect_first_idr_selects_active_temporal_limits() {
     .unwrap()
     .validate(bytes, 32)
     .unwrap()
+    .units
     .remove(0);
   let p = h.inspect(bytes, unit.header.as_ref()).unwrap().unwrap();
   assert!(p.display && p.key);
@@ -28,9 +29,10 @@ fn test_inspect_rejects_missing_current_reference_and_resumes_at_idr() {
   // absent.
   let mut validator =
     codec_parser::Validator::new(u32::from_le_bytes(*b"HEVC")).unwrap();
-  let first = validator.validate(&bytes[..5496], 1).unwrap().remove(0);
+  let first =
+    validator.validate(&bytes[..5496], 1).unwrap().units.remove(0);
   let missing =
-    validator.validate(&bytes[7063..7618], 1).unwrap().remove(0);
+    validator.validate(&bytes[7063..7618], 1).unwrap().units.remove(0);
   let mut syntax = Hevc::default();
   syntax
     .inspect(&bytes[..5496], first.header.as_ref())

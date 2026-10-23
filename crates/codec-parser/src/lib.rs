@@ -36,7 +36,7 @@ impl Validator {
     &mut self,
     bytes: &[u8],
     budget: usize,
-    inspect: impl FnOnce(&Self, Vec<unit::Unit>) -> io::Result<T>,
+    inspect: impl FnOnce(&Self, unit::Admission) -> io::Result<T>,
   ) -> io::Result<T> {
     let configuration = self.configuration();
     let units = self.validate(bytes, budget)?;
@@ -109,10 +109,10 @@ impl Validator {
     &mut self,
     bytes: &[u8],
     budget: usize,
-  ) -> io::Result<Vec<unit::Unit>> {
+  ) -> io::Result<unit::Admission> {
     // Each codec checks picture capacity before committing syntax
     // state.
-    match &mut self.0 {
+    let units = match &mut self.0 {
       Codec::H264(parser) => {
         parser.validate(bytes, budget).map(|unit| vec![unit])
       }
@@ -123,8 +123,9 @@ impl Validator {
         parser.validate(bytes, budget).map(|unit| vec![unit])
       }
       Codec::Vp9(parser) => parser.validate(bytes, budget),
-      Codec::Av1(parser) => parser.validate(bytes, budget),
-    }
+      Codec::Av1(parser) => return parser.validate(bytes, budget),
+    }?;
+    Ok(unit::Admission { units, configures_decoder: false })
   }
 }
 mod h264;

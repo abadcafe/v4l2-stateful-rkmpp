@@ -89,7 +89,6 @@ enum rb_reply {
  * DRAIN, CLOSE and RESUME require zero flags. */
 #define RB_FRAME_ERROR 2
 #define RB_FMT_NV12 1
-#define RB_FMT_P010 2
 /* EOS completes an outstanding DRAIN or DRAINING exactly once. No FRAME or
  * LAYOUT may follow completion until RESUME. STOPPED acknowledges one RESET;
  * already-inflight replies may precede that acknowledgement. Failed endpoints

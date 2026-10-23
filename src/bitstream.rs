@@ -65,7 +65,7 @@ impl Parser {
   ) -> io::Result<Report> {
     let result =
       self.validator.admit(bytes, budget, |validator, units| {
-        self.state.inspect(bytes, units, validator)
+        self.state.inspect(bytes, units.units, validator)
       });
     if result.is_err() {
       self.state.reset();
@@ -126,10 +126,12 @@ impl SyntaxState {
       let configuration = if configuration.is_empty() {
         configuration.as_slice()
       } else {
-        let present: std::collections::BTreeSet<_> = codec::nals(
-          &picture_bytes[..unit.prefix.min(picture_bytes.len())],
-        )
-        .collect();
+        let present: std::collections::BTreeSet<_> =
+          codec::nals(self.metadata.as_slice())
+            .chain(codec::nals(
+              &picture_bytes[..unit.prefix.min(picture_bytes.len())],
+            ))
+            .collect();
         if codec::nals(&configuration)
           .all(|parameter| present.contains(parameter))
         {

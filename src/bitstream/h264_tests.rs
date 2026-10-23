@@ -14,6 +14,7 @@ fn test_inspect_validated_idr_and_metadata_boundary() {
     .unwrap()
     .validate(bytes, 32)
     .unwrap()
+    .units
     .remove(0);
   let picture =
     syntax.inspect(bytes, unit.header.as_ref()).unwrap().unwrap();
@@ -31,7 +32,7 @@ fn test_inspect_metadata_recovery_point_applies_once_without_replaying_bytes()
   let mut validator =
     codec_parser::Validator::new(u32::from_le_bytes(*b"H264")).unwrap();
   let bytes = &bytes[..2469]; // First independently framed AU.
-  let unit = validator.validate(bytes, 32).unwrap().remove(0);
+  let unit = validator.validate(bytes, 32).unwrap().units.remove(0);
   let mut syntax = H264::default();
   syntax.inspect(bytes, unit.header.as_ref()).unwrap();
   syntax.boundary();
