@@ -1,7 +1,9 @@
-//! module: bitstream::recovery; responsibility: H264 recovery-point
-//! output eligibility. operations: Point::parse, begin, picture;
-//! entities: Point, Recovery; tests: recovery_tests.
+//! module: bitstream::h264::recovery; responsibility: H264
+//! recovery-point output eligibility. operations: Point::parse, begin,
+//! picture; entities: Point, Recovery; tests: recovery_tests.
 use std::io;
+
+use super::number::Number;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Point {
@@ -10,7 +12,7 @@ pub(super) struct Point {
 }
 impl Point {
   pub(super) fn parse(data: &[u8]) -> io::Result<Option<Self>> {
-    let mut messages = super::sei::Messages::new(data);
+    let mut messages = super::super::sei::Messages::new(data);
     let mut point = None;
     while let Some(message) = messages.next()? {
       if message.kind == 6 {
@@ -27,23 +29,18 @@ impl Point {
 }
 #[derive(Default)]
 pub(super) struct Recovery {
-  target: Option<u32>,
+  target: Option<Number>,
   minimum_poc: Option<i32>,
 }
 impl Recovery {
-  pub(super) fn begin(
-    &mut self,
-    point: Point,
-    frame: u32,
-    modulus: u32,
-  ) {
-    self.target = Some((frame + point.count % modulus) % modulus);
+  pub(super) fn begin(&mut self, point: Point, frame: Number) {
+    self.target = Some(frame.advance(point.count));
     self.minimum_poc = None;
   }
 
   pub(super) fn picture(
     &mut self,
-    frame: u32,
+    frame: Number,
     poc: i32,
     reference: bool,
   ) -> bool {

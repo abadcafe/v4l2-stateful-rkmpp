@@ -74,8 +74,15 @@ impl Imported {
     let mut external = vk::ImportMemoryFdInfoKHR::default()
       .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
       .fd(duplicate.as_raw_fd());
+    // A dedicated allocation also satisfies devices whose external
+    // memory capabilities or buffer requirements mandate
+    // dedication. Importing the whole allocation never needs
+    // suballocation or memory aliasing here.
+    let mut dedicated = vk::MemoryDedicatedAllocateInfo::default()
+      .buffer(imported.buffer);
     let info = vk::MemoryAllocateInfo::default()
       .push_next(&mut external)
+      .push_next(&mut dedicated)
       .allocation_size(requirements.size)
       .memory_type_index(bits.trailing_zeros());
     imported.memory = unsafe { d.allocate_memory(&info, None) }

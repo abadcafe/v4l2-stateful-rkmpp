@@ -113,12 +113,16 @@ int rb_format_update(struct rb_format *f, const struct rb_message *m) {
   u64 bottom = (u64)m->crop_top + m->height;
   unsigned bytes = m->format == RB_FMT_P010 ? 2 : 1;
   if (m->count < RB_MIN_CAPTURE || m->count > RB_MAX_BUFFERS || m->field > 5 ||
-      !m->width || right > 8192 || !m->height || bottom > 8192 ||
-      m->coded_width < 64 || m->coded_width < right || m->coded_width > 8192 ||
-      m->coded_height < 64 || m->coded_height < bottom ||
-      m->coded_height > 8192 || m->rows < m->coded_height || m->rows > 16384 ||
-      (m->rows & 1) || m->stride < ALIGN(m->coded_width, 2) * bytes ||
-      m->stride > 65536 || m->size < (u64)m->stride * m->rows * 3 / 2 ||
+      m->colorspace > V4L2_COLORSPACE_DCI_P3 ||
+      m->xfer_func > V4L2_XFER_FUNC_SMPTE2084 ||
+      m->ycbcr_enc > V4L2_YCBCR_ENC_SMPTE240M ||
+      m->quantization > V4L2_QUANTIZATION_LIM_RANGE || !m->width ||
+      right > 8192 || !m->height || bottom > 8192 || m->coded_width < 64 ||
+      m->coded_width < right || m->coded_width > 8192 || m->coded_height < 64 ||
+      m->coded_height < bottom || m->coded_height > 8192 ||
+      m->rows < m->coded_height || m->rows > 16384 || (m->rows & 1) ||
+      m->stride < ALIGN(m->coded_width, 2) * bytes || m->stride > 65536 ||
+      m->size < (u64)m->stride * m->rows * 3 / 2 ||
       m->size > 128 * 1024 * 1024 ||
       (m->format != RB_FMT_NV12 && m->format != RB_FMT_P010))
     return -EINVAL;

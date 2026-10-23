@@ -7,6 +7,10 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 use ash::{Entry, vk};
+mod admission;
+#[cfg(test)]
+mod admission_tests;
+use admission::{Candidate, EXTENSIONS};
 struct Instance(ash::Instance);
 impl Drop for Instance {
   fn drop(&mut self) {
@@ -47,19 +51,54 @@ impl Device {
     {
       let properties =
         unsafe { instance.0.get_physical_device_properties(physical) };
-      if properties.device_type == vk::PhysicalDeviceType::CPU {
+      if properties.device_type == vk::PhysicalDeviceType::CPU
+        || properties.api_version < vk::API_VERSION_1_1
+      {
         continue;
       }
       let families = unsafe {
         instance.0.get_physical_device_queue_family_properties(physical)
       };
-      if let Some(family) = families
-        .iter()
-        .position(|p| p.queue_flags.contains(vk::QueueFlags::COMPUTE))
+      let extensions = unsafe {
+        instance.0.enumerate_device_extension_properties(physical)
+      }
+      .map_err(|r| error("enumerate extensions", r))?;
+      let mut memory = vk::ExternalBufferProperties::default();
+      let mut fence = vk::ExternalFenceProperties::default();
+      // SAFETY: physical belongs to this live Vulkan 1.1 instance.
+      // These initialized query records and their output storage
+      // outlive the calls.
+      unsafe {
+        instance.0.get_physical_device_external_buffer_properties(
+          physical,
+          &vk::PhysicalDeviceExternalBufferInfo::default()
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .handle_type(
+              vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+            ),
+          &mut memory,
+        );
+        instance.0.get_physical_device_external_fence_properties(
+          physical,
+          &vk::PhysicalDeviceExternalFenceInfo::default()
+            .handle_type(vk::ExternalFenceHandleTypeFlags::SYNC_FD),
+          &mut fence,
+        );
+      }
+      if let Some(family) = (Candidate {
+        properties: &properties,
+        families: &families,
+        extensions: &extensions,
+        memory: memory
+          .external_memory_properties
+          .external_memory_features,
+        fence: fence.external_fence_features,
+      })
+      .family()
       {
         selected = Some((
           physical,
-          family as u32,
+          family,
           u64::from(properties.limits.max_storage_buffer_range),
         ));
         break;
@@ -69,35 +108,15 @@ impl Device {
       selected.ok_or_else(|| {
         io::Error::new(
           io::ErrorKind::NotFound,
-          "no hardware Vulkan compute device",
+          "no Vulkan 1.1 hardware compute device with DMA-BUF import \
+           and sync-file export",
         )
       })?;
-    let available = unsafe {
-      instance.0.enumerate_device_extension_properties(physical)
-    }
-    .map_err(|r| error("enumerate extensions", r))?;
-    let names = [
-      ash::khr::external_memory_fd::NAME,
-      ash::khr::external_fence_fd::NAME,
-      ash::ext::external_memory_dma_buf::NAME,
-      ash::ext::queue_family_foreign::NAME,
-    ];
-    for name in names {
-      if !available.iter().any(|p| {
-        p.extension_name_as_c_str()
-          .is_ok_and(|available| available == name)
-      }) {
-        return Err(io::Error::new(
-          io::ErrorKind::Unsupported,
-          format!("missing Vulkan extension {name:?}"),
-        ));
-      }
-    }
     let priorities = [0.5];
     let queues = [vk::DeviceQueueCreateInfo::default()
       .queue_family_index(family)
       .queue_priorities(&priorities)];
-    let names = names.map(|n| n.as_ptr());
+    let names = EXTENSIONS.map(|n| n.as_ptr());
     let info = vk::DeviceCreateInfo::default()
       .queue_create_infos(&queues)
       .enabled_extension_names(&names);

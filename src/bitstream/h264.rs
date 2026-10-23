@@ -6,7 +6,13 @@ use std::io;
 use order::Order;
 
 use super::codec::{Picture, Syntax, nals};
-use super::recovery::{Point, Recovery};
+mod number;
+#[cfg(test)]
+mod number_tests;
+mod recovery;
+#[cfg(test)]
+mod recovery_tests;
+use recovery::{Point, Recovery};
 pub(super) struct H264 {
   order: Order,
   recovery: Recovery,
@@ -61,10 +67,10 @@ impl Syntax for H264 {
     } else if let Some(point) = point
       && (self.seeking || point.broken)
     {
-      self.recovery.begin(point, m.frame, m.modulus);
+      self.recovery.begin(point, m.number);
       discard |= point.broken;
     }
-    let display = self.recovery.picture(m.frame, m.poc, m.reference);
+    let display = self.recovery.picture(m.number, m.poc, m.reference);
     if m.reset {
       self.recovery = Recovery::default();
     }
@@ -97,8 +103,6 @@ mod order;
 #[cfg(test)]
 mod order_tests;
 mod reference;
-#[cfg(test)]
-mod reference_field_tests;
 #[cfg(test)]
 mod reference_identity_tests;
 #[cfg(test)]

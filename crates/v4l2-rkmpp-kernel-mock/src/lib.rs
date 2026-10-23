@@ -96,8 +96,25 @@ unsafe extern "C" fn dispatch_ioctl(
   command: libc::c_ulong,
   argument: usize,
 ) -> libc::c_int {
-  // SAFETY: the caller authorizes the command's payload writes.
-  match unsafe { rpc::intercept(fd, command, argument) } {
+  use std::os::fd::IntoRawFd;
+  let result =
+    rpc::intercept(fd, command, argument).and_then(|result| {
+      match result {
+        Some(rpc::Completed::Accepted(owner)) => {
+          Ok(Some(owner.into_raw_fd()))
+        }
+        Some(rpc::Completed::Response(response)) => {
+          // SAFETY: only the native ioctl caller authorizes payload
+          // writes. Transport and wire decoding above retain
+          // all descriptor owners until this exact
+          // publication boundary.
+          unsafe { response.write(argument) }?;
+          Ok(Some(0))
+        }
+        None => Ok(None),
+      }
+    });
+  match result {
     Ok(Some(value)) => value,
     Ok(None) => {
       // SAFETY: Delegating to the Linux syscall preserves the native

@@ -80,6 +80,9 @@ enum rb_reply {
  * DRAINING.count is the last
  * input belonging to the ending bitstream, including a split end marker. */
 /* PACKET/FRAME flags preserve V4L2_BUF_FLAG_TSTAMP_SRC_MASK verbatim. */
+/* Only documented flags are accepted: INPUT_DONE permits RB_FRAME_ERROR;
+ * FRAME additionally permits TSTAMP_SRC_SOE. Control replies, RECYCLE,
+ * DRAIN, CLOSE and RESUME require zero flags. */
 #define RB_FRAME_ERROR 2
 #define RB_FMT_NV12 1
 #define RB_FMT_P010 2
@@ -88,6 +91,9 @@ enum rb_reply {
  * already-inflight replies may precede that acknowledgement. Failed endpoints
  * never regain access: after both queues are stopped and freed, ACCEPT supplies
  * a new endpoint for the video fd's new decoder incarnation. */
+/* LAYOUT echoes the current generation and advances it exactly once on
+ * success. Stale layouts cannot roll back a negotiated format; exhaustion
+ * rejects the transition instead of reusing a generation. */
 /* Broker ACCEPT returns a per-incarnation anonymous fd as ioctl return value.
  */
 #define RB_ACCEPT _IO('R', 0x80)

@@ -1,5 +1,5 @@
 obj-m += v4l2_rkmpp_bridge.o
-v4l2_rkmpp_bridge-y := device.o format.o session.o session/broker.o session/capture.o session/endpoint.o memory.o
+v4l2_rkmpp_bridge-y := device.o format.o session.o session/broker.o session/capture.o session/endpoint.o session/reply.o memory.o
 KDIR ?= /usr/lib/modules/$(shell uname -r)/build
 all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules

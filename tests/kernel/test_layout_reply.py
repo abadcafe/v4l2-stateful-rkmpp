@@ -303,3 +303,33 @@ def test_layout_larger_buffer_count_prevents_reusing_smaller_pool(
         present(events.event(index)).kind != Event.CAPTURE
         for index in range(events.event_count)
     )
+
+
+def test_layout_generation_rejects_replay_before_publishing_format_or_events(
+    raw_session: Peer,
+) -> None:
+    accepted(raw_session.video.subscribe(5))
+    layout = Message(
+        version=VERSION,
+        kind=Reply.LAYOUT,
+        epoch=1,
+        count=18,
+        width=128,
+        height=64,
+        coded_width=128,
+        coded_height=64,
+        stride=128,
+        rows=64,
+        size=12288,
+        format=1,
+    )
+    replay = layout.clone()
+    replay.width = 64
+    results = accepted(raw_session.service.exchange([layout, replay]))
+    assert list(present(results.results(2))) == [0, -errno.ESTALE]
+    assert accepted(raw_session.video.events()) == [(5, 1)]
+    assert accepted(selection(raw_session.video.fd, QueueType.CAPTURE)) == (128, 64)
+    replay.generation = 1
+    assert present(accepted(raw_session.service.exchange([replay])).result(0)) == 0
+    assert accepted(raw_session.video.events()) == [(5, 1)]
+    assert accepted(selection(raw_session.video.fd, QueueType.CAPTURE)) == (64, 64)

@@ -109,6 +109,14 @@ impl TryFrom<Message> for Command {
     if m.reserved != [0] {
       return Err(invalid());
     }
+    if matches!(m.kind, value if value == Event::Recycle as u32
+      || value == Event::Drain as u32
+      || value == Event::Close as u32
+      || value == Event::Resume as u32)
+      && m.flags != 0
+    {
+      return Err(invalid());
+    }
     let action = match m.kind {
       value if value == Event::Packet as u32 => {
         let offset = m.data_offset as usize;

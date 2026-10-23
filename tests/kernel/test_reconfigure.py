@@ -55,6 +55,7 @@ def test_capture_source_change_resets_only_capture_and_keeps_input_valid(
     for index in range(18):
         accepted(capture.queue(index))
     replacement = first.clone()
+    replacement.generation = int(initial_layout)
     replacement.width = replacement.stride = 64 if size_only else 128
     replacement.coded_width = replacement.width
     replacement.size = 12288
@@ -101,6 +102,7 @@ def test_capture_source_change_resets_only_capture_and_keeps_input_valid(
         assert reset.generation == (2 if initial_layout else 1)
         assert not stopped.done()
         reset.kind = Reply.STOPPED
+        reset.flags = 0
         assert present(accepted(peer.service.exchange([reset])).result(0)) == 0
         accepted(stopped.result(timeout=5))
     # After stop the new layout is authoritative, even without REQBUFS.

@@ -19,7 +19,10 @@ pub(super) fn own(
     let rps = if slice.short_term_ref_pic_set_sps_flag != 0 {
       sps
         .short_term_ref_pic_set
-        .get(usize::from(slice.short_term_ref_pic_set_idx))
+        .get(..usize::from(sps.num_short_term_ref_pic_sets))
+        .and_then(|sets| {
+          sets.get(usize::from(slice.short_term_ref_pic_set_idx))
+        })
         .ok_or_else(invalid)?
     } else {
       &slice.short_term_ref_pic_sets
@@ -40,11 +43,18 @@ pub(super) fn own(
       .collect();
     let from_sps = usize::from(slice.num_long_term_sps);
     let count = from_sps + usize::from(slice.num_long_term_pics);
-    if count > slice.lt_idx_sps.len() {
+    if count > slice.lt_idx_sps.len()
+      || from_sps > usize::from(sps.num_long_term_ref_pics_sps)
+    {
       return Err(invalid());
     }
     let mut cycle = 0u64;
     for i in 0..count {
+      if i < from_sps
+        && slice.lt_idx_sps[i] >= sps.num_long_term_ref_pics_sps
+      {
+        return Err(invalid());
+      }
       let lsb = if i < from_sps {
         u32::from(
           *sps

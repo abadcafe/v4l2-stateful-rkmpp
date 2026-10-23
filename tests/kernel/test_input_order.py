@@ -83,6 +83,7 @@ def test_output_sequence_counts_submissions_independently_of_slot_reuse(
         reset = present(batch.event(0))
         assert reset.kind == Event.RESET
         reset.kind = Reply.STOPPED
+        reset.flags = 0
         assert present(accepted(raw_session.service.exchange([reset])).result(0)) == 0
         accepted(stopped.result(timeout=5))
     accepted(output.stream_on())

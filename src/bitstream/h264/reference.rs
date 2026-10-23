@@ -1,11 +1,20 @@
 //! module: bitstream::h264::reference; responsibility: track H264 DPB
 //! reference picture identities through marking operations. operations:
 //! reset, apply; entities: Memory, Picture, Marking, State,
-//! Entry, Field; tests: reference_tests, reference_field_tests,
+//! Entry; tests: reference_tests,
 //! reference_identity_tests.
 use std::io;
 
 use codec_parser::header::Operation;
+
+use super::number::Number;
+mod field;
+#[cfg(test)]
+mod field_tests;
+mod identity;
+#[cfg(test)]
+mod identity_tests;
+use identity::Identity;
 
 pub(super) enum Marking<'a> {
   Disposable,
@@ -33,19 +42,10 @@ struct Entry {
   long: Option<u32>,
   non_existing: bool,
 }
-struct Field {
-  frame: u32,
-  bottom: bool,
-  reference: bool,
-  id: u64,
-  long: Option<u32>,
-}
 #[derive(Default)]
 pub(super) struct Memory {
   entries: Vec<Entry>,
-  serial: u64,
-  unpaired: Option<Field>,
-  previous_reference: Option<u32>,
+  identity: Identity,
   // Exclusive upper bound (max_long_term_frame_idx_plus1). Zero
   // represents "no long-term frame indices", including after reset.
   long_limit: u32,
@@ -104,8 +104,7 @@ fn command_sequence(operations: &[Operation]) -> io::Result<()> {
 impl Memory {
   pub(super) fn reset(&mut self) {
     self.entries.clear();
-    self.unpaired = None;
-    self.previous_reference = None;
+    self.identity.reset();
     self.long_limit = 0;
   }
 
@@ -113,37 +112,26 @@ impl Memory {
     &mut self,
     picture: Picture<'_>,
   ) -> io::Result<State> {
-    if !(16..=65536).contains(&picture.modulus)
-      || !picture.modulus.is_power_of_two()
-      || picture.frame >= picture.modulus
-      || picture.maximum > 16
-    {
+    if !picture.modulus.is_power_of_two() || picture.maximum > 16 {
       return Err(io::Error::other(
         "invalid H264 reference parameters",
       ));
     }
     let reference = !matches!(picture.marking, Marking::Disposable);
     let idr = matches!(picture.marking, Marking::Idr { .. });
-    // H.264 7.4.3: only consecutive complementary reference fields
-    // may repeat PrevRefFrameNum. Taking the pending field after a
-    // successful pair also prevents a third field from repeating it.
-    if (idr && picture.frame != 0)
-      || (!idr
-        && self.previous_reference == Some(picture.frame)
-        && !(reference
-          && picture.field.is_some_and(|bottom| {
-            self.unpaired.as_ref().is_some_and(|prior| {
-              prior.reference
-                && prior.frame == picture.frame
-                && prior.bottom != bottom
-            })
-          })))
-    {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "invalid H264 frame number repetition or IDR origin",
-      ));
-    }
+    let number = Number::new(
+      picture.frame,
+      picture.modulus.trailing_zeros() as usize,
+    )?;
+    let mut primary = identity::Picture {
+      number,
+      field: picture.field,
+      reference,
+      idr,
+      reset: false,
+    };
+    // Identity admission precedes every mutation of DPB storage.
+    self.identity.check(primary)?;
     let operations = match &picture.marking {
       Marking::Adaptive(operations) => *operations,
       _ => &[],
@@ -172,12 +160,13 @@ impl Memory {
     command_sequence(operations)?;
     let reset_boundary =
       operations.iter().any(|op| matches!(op, Operation::Reset));
+    primary.reset = reset_boundary;
     // H.264 7.4.3: MMCO5 changes frame_num for every subsequent
     // decoding use, including complementary-field identity. Derive
     // the stored value once; marking the current picture still uses
     // its original syntax value below.
     let stored_frame = if reset_boundary { 0 } else { picture.frame };
-    if !idr && let Some(previous) = self.previous_reference {
+    if !idr && let Some(previous) = self.identity.previous() {
       let mut missing = (previous + 1) % picture.modulus;
       if picture.frame != previous && picture.frame != missing {
         // The checked modulus is a power of two, so wrapping
@@ -222,65 +211,31 @@ impl Memory {
         let skipped = count.saturating_sub(picture.maximum.max(1));
         if skipped != 0 {
           self.entries.retain(|entry| entry.long.is_some());
-          self.serial =
-            self.serial.checked_add(u64::from(skipped)).ok_or_else(
-              || io::Error::other("picture identity exhausted"),
-            )?;
+          self.identity.skip(skipped)?;
           missing = (missing + skipped) % picture.modulus;
         }
         while missing != picture.frame {
           self.slide(missing, picture.modulus, picture.maximum);
-          self.serial =
-            self.serial.checked_add(1).ok_or_else(|| {
-              io::Error::other("picture identity exhausted")
-            })?;
+          let id = self.identity.missing(Number::new(
+            missing,
+            picture.modulus.trailing_zeros() as usize,
+          )?)?;
           for bottom in [false, true] {
             self.entries.push(Entry {
-              id: self.serial,
+              id,
               frame: missing,
               bottom,
               long: None,
               non_existing: true,
             });
           }
-          self.previous_reference = Some(missing);
           missing = (missing + 1) % picture.modulus;
         }
       }
     }
-    let mut continuation = false;
-    let mut required_long = None;
-    let id = if let Some(bottom) = picture.field {
-      if let Some(prior) = self.unpaired.take()
-        && prior.frame == picture.frame
-        && bottom != prior.bottom
-        && prior.reference == reference
-        && !idr
-        && !reset_boundary
-      {
-        continuation = true;
-        required_long = prior.long;
-        prior.id
-      } else {
-        self.serial = self.serial.checked_add(1).ok_or_else(|| {
-          io::Error::other("picture identity exhausted")
-        })?;
-        self.unpaired = Some(Field {
-          frame: stored_frame,
-          bottom,
-          reference,
-          id: self.serial,
-          long: None,
-        });
-        self.serial
-      }
-    } else {
-      self.unpaired = None;
-      self.serial = self.serial.checked_add(1).ok_or_else(|| {
-        io::Error::other("picture identity exhausted")
-      })?;
-      self.serial
-    };
+    let assigned = self.identity.begin(primary)?;
+    let id = assigned.id;
+    let continuation = assigned.continuation;
     let mut current_long = None;
     if idr {
       self.entries.clear();
@@ -343,33 +298,21 @@ impl Memory {
             // An MMCO3 on one member of a short-term pair requires a
             // same-index assignment for its complement in this syntax,
             // even if a later command removes the promoted field.
-            if picture.field.is_some()
-              && (self.entries.iter().any(|entry| {
-                entry.id == reference.id
-                  && entry.bottom != reference.bottom
-                  && entry.long.is_none()
-              }) || (continuation && reference.id == id))
-              && !operations.iter().any(|operation| match *operation {
-                Operation::LongFromShort {
-                  difference,
-                  index: other,
-                } => {
-                  // Field PicNums of a pair differ only in parity.
-                  other == index
-                    && current - i64::from(difference) - 1
-                      == (target ^ 1)
-                }
-                Operation::CurrentLong(other) => {
-                  continuation && reference.id == id && other == index
-                }
-                _ => false,
-              })
-            {
-              return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "H264 promotion lacks its complementary-field \
-                 assignment",
-              ));
+            if picture.field.is_some() {
+              field::promote(
+                field::Promotion {
+                  number,
+                  target,
+                  index,
+                  short_complement: self.entries.iter().any(|entry| {
+                    entry.id == reference.id
+                      && entry.bottom != reference.bottom
+                      && entry.long.is_none()
+                  }),
+                  current_pair: continuation && reference.id == id,
+                },
+                operations,
+              )?;
             }
             let target_id = reference.id;
             if current_long == Some(index) && target_id != id {
@@ -422,18 +365,18 @@ impl Memory {
     // Keep the first field's actual assignment even if the second
     // removes it. H.264 7.4.3.3 still requires MMCO6 with the same
     // index.
-    if (required_long.is_some() && required_long != current_long)
-      || (picture.field.is_some()
-        && self
-          .entries
-          .iter()
-          .any(|entry| entry.id == id && entry.long != current_long))
-    {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "H264 complementary fields have inconsistent reference classes",
-      ));
-    }
+    field::complete(
+      field::Current {
+        id,
+        field: picture.field.is_some(),
+        required_long: assigned.required_long,
+        assigned_long: current_long,
+      },
+      self.entries.iter().map(|entry| field::Reference {
+        id: entry.id,
+        long: entry.long,
+      }),
+    )?;
     if picture.maximum == 0 {
       self.entries.clear();
     }
@@ -467,14 +410,7 @@ impl Memory {
         }
       }
     }
-    if let Some(field) = &mut self.unpaired
-      && field.id == id
-    {
-      field.long = current_long;
-    }
-    if reference {
-      self.previous_reference = Some(stored_frame);
-    }
+    self.identity.finish(primary, &assigned, current_long);
     Ok(State { id, continuation, references })
   }
 

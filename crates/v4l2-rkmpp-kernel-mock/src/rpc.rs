@@ -1,7 +1,7 @@
 //! module: rpc; responsibility: transfer mock ioctl ownership over
 //! a private Unix session. operations: intercept, decode, Response
-//! bytes/write; entities: Response; tests: rpc_tests and Python
-//! process/descriptor acceptance.
+//! bytes/write; entities: Response, Completed; tests: rpc_tests and
+//! Python process/descriptor acceptance.
 use std::collections::HashSet;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -14,6 +14,15 @@ mod memory_tests;
 pub struct Response {
   bytes: Vec<u8>,
   owners: Vec<OwnedFd>,
+}
+
+/// A completed transport transaction still owns every resource. Only
+/// the native syscall entrypoint can publish its result into caller
+/// memory.
+#[derive(Debug)]
+pub enum Completed {
+  Accepted(OwnedFd),
+  Response(Response),
 }
 impl Response {
   pub fn bytes(&self) -> &[u8] {
@@ -327,16 +336,14 @@ fn receive(fd: i32, expected: usize) -> io::Result<Response> {
 /// Route a bridge ioctl only when its fd identifies this test's
 /// endpoint.
 ///
-/// Invalid or inaccessible user addresses are rejected by the kernel.
-///
-/// # Safety
-/// Any accessible writable payload must permit exclusive byte writes
-/// for this call, as required by the command's native ioctl contract.
-pub unsafe fn intercept(
+/// Invalid or inaccessible input addresses are rejected by the kernel.
+/// This operation never writes to caller memory or relinquishes
+/// ownership.
+pub fn intercept(
   fd: i32,
   command: u64,
   argument: usize,
-) -> io::Result<Option<i32>> {
+) -> io::Result<Option<Completed>> {
   if command & 0xff00 != 0x5200 {
     return Ok(None);
   }
@@ -355,7 +362,7 @@ pub unsafe fn intercept(
     let owner = connect(socket.as_bytes())?;
     send(owner.as_raw_fd(), command, &[])?;
     let _ = receive(owner.as_raw_fd(), 0)?;
-    return Ok(Some(owner.into_raw_fd()));
+    return Ok(Some(Completed::Accepted(owner)));
   }
   if !peer_matches(fd, socket.as_bytes()) {
     return Ok(None);
@@ -367,7 +374,5 @@ pub unsafe fn intercept(
   let body = memory::read(argument, size)?;
   send(fd, command, &body)?;
   let response = receive(fd, size)?;
-  // SAFETY: the native ioctl caller authorizes writes to this payload.
-  unsafe { response.write(argument) }?;
-  Ok(Some(0))
+  Ok(Some(Completed::Response(response)))
 }

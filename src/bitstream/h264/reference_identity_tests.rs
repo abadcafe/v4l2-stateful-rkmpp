@@ -1,7 +1,7 @@
 //! module: bitstream::h264::reference_identity_tests; responsibility:
-//! define frame-number admission through the reference-memory API.
-//! operations: Memory apply/reset; entities: none; tests: IDR origin,
-//! repeated numbers, consecutive pairs and gap/reference collisions.
+//! define gap collisions through the reference-memory API.
+//! operations: Memory apply/reset; entities: none; tests: live short
+//! references, generated references and retained long references.
 use super::reference::{Marking, Memory, Picture};
 
 fn picture(
@@ -16,100 +16,6 @@ fn picture(
     maximum: 4,
     gaps_allowed: true,
     marking,
-  }
-}
-
-#[test]
-fn test_apply_idr_requires_zero_frame_number_before_resetting_references()
- {
-  for field in [None, Some(false), Some(true)] {
-    for number in [1, 15] {
-      let mut memory = Memory::default();
-      let first = memory
-        .apply(picture(0, None, Marking::Idr { long: false }))
-        .unwrap();
-      assert!(
-        memory
-          .apply(picture(number, field, Marking::Idr { long: false }))
-          .is_err()
-      );
-      let next =
-        memory.apply(picture(1, None, Marking::Sliding)).unwrap();
-      assert_eq!(next.references, [first.id, next.id]);
-    }
-  }
-}
-
-#[test]
-fn test_apply_equal_frame_number_requires_opposite_reference_fields() {
-  for first in [None, Some(false), Some(true)] {
-    for second in [None, Some(false), Some(true)] {
-      for reference in [false, true] {
-        let mut memory = Memory::default();
-        let old = memory
-          .apply(picture(0, first, Marking::Idr { long: false }))
-          .unwrap();
-        let marking = if reference {
-          Marking::Sliding
-        } else {
-          Marking::Disposable
-        };
-        let result = memory.apply(picture(0, second, marking));
-        let paired = reference
-          && first.is_some()
-          && second.is_some()
-          && first != second;
-        assert_eq!(result.is_ok(), paired);
-        if let Ok(result) = result {
-          assert!(result.continuation);
-          assert_eq!(result.id, old.id);
-          assert_eq!(result.references, [old.id]);
-        }
-      }
-    }
-  }
-}
-
-#[test]
-fn test_apply_repeated_number_cannot_start_a_third_reference_field() {
-  for bottom in [false, true] {
-    let mut memory = Memory::default();
-    let first = memory
-      .apply(picture(0, Some(bottom), Marking::Idr { long: false }))
-      .unwrap();
-    let second = memory
-      .apply(picture(0, Some(!bottom), Marking::Sliding))
-      .unwrap();
-    assert_eq!(second.id, first.id);
-    assert!(
-      memory.apply(picture(0, Some(bottom), Marking::Sliding)).is_err()
-    );
-    let next =
-      memory.apply(picture(1, None, Marking::Sliding)).unwrap();
-    assert_eq!(next.references, [first.id, next.id]);
-  }
-}
-
-#[test]
-fn test_apply_equal_reference_fields_must_be_consecutive_primary_pictures()
- {
-  for bottom in [false, true] {
-    let mut memory = Memory::default();
-    let first = memory
-      .apply(picture(0, Some(bottom), Marking::Idr { long: false }))
-      .unwrap();
-    let middle =
-      memory.apply(picture(1, None, Marking::Disposable)).unwrap();
-    assert_eq!(middle.references, [first.id]);
-    assert!(
-      memory
-        .apply(picture(0, Some(!bottom), Marking::Sliding))
-        .is_err()
-    );
-    let next =
-      memory.apply(picture(1, None, Marking::Sliding)).unwrap();
-    assert!(!next.continuation);
-    assert_eq!(next.references, [first.id, next.id]);
   }
 }
 

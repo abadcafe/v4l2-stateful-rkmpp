@@ -31,6 +31,7 @@ fn test_own_retains_following_references_and_accumulates_long_cycles() {
   // UsedByCurrPic remains zero: following references must survive too.
   slice.num_long_term_sps = 1;
   slice.num_long_term_pics = 2;
+  sps.num_long_term_ref_pics_sps = 1;
   sps.lt_ref_pic_poc_lsb_sps[0] = 7;
   slice.poc_lsb_lt[1..3].copy_from_slice(&[9, 11]);
   slice.delta_poc_msb_present_flag[..3].fill(1);
@@ -58,6 +59,7 @@ fn test_own_selects_sps_reference_set_and_preserves_unspecified_long_msb()
   let (nal, mut slice, mut sps) = records();
   slice.short_term_ref_pic_set_sps_flag = 1;
   slice.short_term_ref_pic_set_idx = 2;
+  sps.num_short_term_ref_pic_sets = 3;
   sps.short_term_ref_pic_set[2].numpositivepics = 1;
   sps.short_term_ref_pic_set[2].deltapocs1[0] = 5;
   slice.num_long_term_pics = 1;
@@ -92,6 +94,7 @@ fn test_own_preserves_current_usage_from_local_and_sps_reference_lists()
   slice.short_term_ref_pic_sets.usedbycurrpics1[0] = 1;
   slice.num_long_term_sps = 1;
   slice.num_long_term_pics = 1;
+  sps.num_long_term_ref_pics_sps = 1;
   sps.lt_ref_pic_poc_lsb_sps[0] = 7;
   sps.used_by_curr_pic_lt_sps_flag[0] = 1;
   slice.poc_lsb_lt[1] = 9;
@@ -105,12 +108,35 @@ fn test_own_preserves_current_usage_from_local_and_sps_reference_lists()
     [(7, true), (9, false)]
   );
   slice.short_term_ref_pic_set_sps_flag = 1;
+  sps.num_short_term_ref_pic_sets = 1;
   sps.short_term_ref_pic_set[0].numpositivepics = 1;
   sps.short_term_ref_pic_set[0].deltapocs1[0] = 5;
   sps.short_term_ref_pic_set[0].usedbycurrpics1[0] = 1;
   assert!(own(&nal, &slice, sequence(), &sps).unwrap().short[0].used);
   sps.used_by_curr_pic_lt_sps_flag[0] = 0;
   assert!(header.long[0].used);
+}
+
+#[test]
+fn test_own_rejects_sps_indices_outside_declared_reference_sets() {
+  let (nal, mut slice, mut sps) = records();
+  sps.num_short_term_ref_pic_sets = 1;
+  slice.short_term_ref_pic_set_sps_flag = 1;
+  slice.short_term_ref_pic_set_idx = 1;
+  assert!(own(&nal, &slice, sequence(), &sps).is_err());
+  slice.short_term_ref_pic_set_idx = 0;
+  assert!(own(&nal, &slice, sequence(), &sps).is_ok());
+  slice.short_term_ref_pic_set_sps_flag = 0;
+  slice.num_long_term_sps = 1;
+  // Initialized C array capacity does not declare a reference set.
+  assert!(own(&nal, &slice, sequence(), &sps).is_err());
+  sps.num_long_term_ref_pics_sps = 1;
+  slice.lt_idx_sps[0] = 1;
+  assert!(own(&nal, &slice, sequence(), &sps).is_err());
+  slice.lt_idx_sps[0] = 0;
+  assert!(own(&nal, &slice, sequence(), &sps).is_ok());
+  slice.num_long_term_sps = 2;
+  assert!(own(&nal, &slice, sequence(), &sps).is_err());
 }
 
 fn sequence() -> std::rc::Rc<crate::syntax::hevc::Sequence> {

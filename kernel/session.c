@@ -10,6 +10,7 @@
 #include "session/broker.h"
 #include "session/capture.h"
 #include "session/endpoint.h"
+#include "session/reply.h"
 #include <linux/dma-buf.h>
 #include <linux/file.h>
 #include <linux/kref.h>
@@ -818,8 +819,7 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
   struct v4l2_event ev = {0};
   unsigned i;
   int admitted;
-  if (m->version != RB_VERSION ||
-      memchr_inv(m->reserved, 0, sizeof(m->reserved)))
+  if (rb_reply_validate(m))
     return -EINVAL;
   if (m->epoch != s->epoch)
     return -ESTALE;
@@ -828,6 +828,10 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
     return admitted;
   switch (m->type) {
   case RB_LAYOUT:
+    if (m->generation != s->generation)
+      return -ESTALE;
+    if (s->generation == U32_MAX)
+      return -EOVERFLOW;
     if (rb_format_update(s->format, m))
       return -EINVAL;
     format_changed(s, vb2_is_busy(&s->capture));
@@ -862,10 +866,7 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
         !s->cap_started || !m->count || m->count != s->capture_token[m->index])
       return -ESTALE;
     b = s->capture.bufs[m->index];
-    if (m->field > 5 ||
-        (m->flags & V4L2_BUF_FLAG_TSTAMP_SRC_MASK) >
-            V4L2_BUF_FLAG_TSTAMP_SRC_SOE ||
-        m->bytesused > rb_capture_size(s->capture_contract) ||
+    if (m->field > 5 || m->bytesused > rb_capture_size(s->capture_contract) ||
         m->bytesused > vb2_plane_size(b, 0))
       return -EINVAL;
     s->available[m->index] = false;

@@ -45,6 +45,7 @@ def test_stop_serializes_other_mutating_operations(
         waited = not second.done()
         acknowledgement = reset.clone()
         acknowledgement.kind = Reply.STOPPED
+        acknowledgement.flags = 0
         assert (
             present(accepted(peer.service.exchange([acknowledgement])).result(0)) == 0
         )
@@ -83,6 +84,7 @@ def test_capture_stop_accepts_already_inflight_completions_before_acknowledgemen
         frame.kind = Reply.FRAME
         frame.bytesused = 6144
         reset.kind = Reply.STOPPED
+        reset.flags = 0
         results = present(
             accepted(peer.service.exchange([done, frame, reset])).results(3)
         )
@@ -119,6 +121,7 @@ def test_capture_stop_rejects_acknowledgement_from_previous_stop(
             assert reset.kind == Event.RESET
             assert reset.count != 0
             reset.kind = Reply.STOPPED
+            reset.flags = 0
             if previous is not None:
                 assert (reset.epoch, reset.generation) == (
                     previous.epoch,

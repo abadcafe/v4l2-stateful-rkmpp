@@ -40,6 +40,7 @@ def test_stream_off_waits_for_new_epoch_reset_acknowledgement(
         stale.kind = Reply.INPUT_DONE
         acknowledgement = reset.clone()
         acknowledgement.kind = Reply.STOPPED
+        acknowledgement.flags = 0
         replies = accepted(session.service.exchange([stale, acknowledgement]))
         assert list(present(replies.results(2))) == [-errno.ESTALE, 0]
         accepted(stopped.result(timeout=5))

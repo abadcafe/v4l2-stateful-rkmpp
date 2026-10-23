@@ -158,3 +158,15 @@ fn test_try_from_rejects_invalid_capture_recycle_and_reset_contracts() {
     Action::Reset { scope: Stop::Capture { abort_drain: true }, .. }
   ));
 }
+
+#[test]
+fn test_try_from_rejects_flags_for_commands_without_flag_semantics() {
+  for kind in
+    [Event::Recycle, Event::Drain, Event::Close, Event::Resume]
+  {
+    for bit in 0..32 {
+      let invalid = Message { flags: 1 << bit, ..message(kind) };
+      assert!(Command::try_from(invalid).is_err(), "{invalid:?}");
+    }
+  }
+}

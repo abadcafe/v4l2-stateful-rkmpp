@@ -21,9 +21,6 @@ mod hevc_rps_tests;
 mod hevc_temporal_tests;
 #[cfg(test)]
 mod hevc_tests;
-mod recovery;
-#[cfg(test)]
-mod recovery_tests;
 use codec::Syntax;
 pub mod report;
 pub use report::AccessUnit;

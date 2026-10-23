@@ -62,7 +62,7 @@ fn test_observe_idr_exposes_prior_output_suppression() {
       .unwrap();
     assert!(marking.idr);
     assert_eq!(marking.discard, discard);
-    assert_eq!(marking.frame, 0);
+    assert_eq!(marking.number.value(), 0);
   }
 }
 
@@ -138,7 +138,7 @@ fn test_observe_mmco5_field_pair_uses_normalized_reference_identity() {
     reset.field = Some(bottom);
     let first = order.observe(&reset).unwrap();
     assert!(first.reset && !first.continuation);
-    assert_eq!(first.frame, 1);
+    assert_eq!(first.number.value(), 1);
     let mut other = header(0, Marking::Sliding);
     other.sequence = sequence;
     other.field = Some(!bottom);
@@ -146,5 +146,26 @@ fn test_observe_mmco5_field_pair_uses_normalized_reference_identity() {
     assert!(second.continuation && !second.reset);
     assert_eq!(first.reference_id, second.reference_id);
     assert_eq!(second.references, vec![first.reference_id]);
+  }
+}
+
+#[test]
+fn test_observe_invalid_frame_width_returns_error_before_state_changes()
+{
+  for bits in [0, 3, 17, 32, usize::MAX] {
+    let mut invalid =
+      header(0, Marking::Idr { discard: false, long: false });
+    std::rc::Rc::make_mut(&mut invalid.sequence).frame_bits = bits;
+    let mut order = Order::default();
+    assert!(order.observe(&invalid).is_err());
+    assert!(
+      order
+        .observe(&header(
+          0,
+          Marking::Idr { discard: false, long: false }
+        ))
+        .unwrap()
+        .idr
+    );
   }
 }

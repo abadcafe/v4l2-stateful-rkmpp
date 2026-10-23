@@ -1,32 +1,36 @@
-//! module: bitstream::recovery_tests; responsibility: recovery output
-//! contract.
+//! module: bitstream::h264::recovery_tests; responsibility: recovery
+//! output contract.
 //! operations: test entrypoints; entities: none; tests:
 //! test_recovery_waits_for_reference_frame_number_and_output_order,
 //! test_recovery_zero_and_reset,
 //! test_sei_parses_recovery_and_rejects_truncated_payload,
 //! test_parse_reserved_sei_does_not_hide_recovery_point,
 //! test_parse_validates_following_messages_and_trailing_bits.
+use super::number::Number;
 use super::recovery::{Point, Recovery};
+fn number(value: u32) -> Number {
+  Number::new(value, 4).unwrap()
+}
 #[test]
 fn test_recovery_waits_for_reference_frame_number_and_output_order() {
   let mut gate = Recovery::default();
-  gate.begin(Point { count: 2, broken: false }, 14, 16);
-  assert!(!gate.picture(14, 4, true));
-  assert!(!gate.picture(15, 6, true));
-  assert!(!gate.picture(0, 10, false));
-  assert!(gate.picture(0, 10, true));
-  assert!(!gate.picture(15, 8, false));
-  assert!(gate.picture(1, 12, true));
+  gate.begin(Point { count: 2, broken: false }, number(14));
+  assert!(!gate.picture(number(14), 4, true));
+  assert!(!gate.picture(number(15), 6, true));
+  assert!(!gate.picture(number(0), 10, false));
+  assert!(gate.picture(number(0), 10, true));
+  assert!(!gate.picture(number(15), 8, false));
+  assert!(gate.picture(number(1), 12, true));
 }
 #[test]
 fn test_recovery_zero_and_reset() {
   let mut gate = Recovery::default();
-  assert!(gate.picture(0, 0, true));
-  gate.begin(Point { count: 0, broken: true }, 3, 16);
-  assert!(gate.picture(3, 6, true));
-  assert!(!gate.picture(2, 4, false));
+  assert!(gate.picture(number(0), 0, true));
+  gate.begin(Point { count: 0, broken: true }, number(3));
+  assert!(gate.picture(number(3), 6, true));
+  assert!(!gate.picture(number(2), 4, false));
   gate = Recovery::default();
-  assert!(gate.picture(0, 0, true));
+  assert!(gate.picture(number(0), 0, true));
 }
 #[test]
 fn test_sei_parses_recovery_and_rejects_truncated_payload() {

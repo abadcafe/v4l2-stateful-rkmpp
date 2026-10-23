@@ -116,6 +116,7 @@ def test_decoder_drain_defers_new_input_until_completed_and_resumed(
             reset = present(batch.event(0))
             assert reset.flags == (1 << 16) | (1 << 17) and reset.epoch == drain.epoch
             reset.kind = Reply.STOPPED
+            reset.flags = 0
             assert present(accepted(peer.service.exchange([reset])).result(0)) == 0
             accepted(stopped.result(timeout=5))
         accepted(capture.stream_on())
@@ -208,6 +209,7 @@ def test_capture_stop_preserves_pending_input_and_epoch(
         assert reset.flags == (1 << 16)
         assert reset.epoch == packets[0].epoch
         reset.kind = Reply.STOPPED
+        reset.flags = 0
         assert present(accepted(peer.service.exchange([reset])).result(0)) == 0
         accepted(stopped.result(timeout=5))
     for index in range(18):
@@ -291,6 +293,7 @@ def test_capture_streamoff_aborts_incomplete_drain(
         reset = present(batch.event(0))
         assert reset.flags & (1 << 17)
         reset.kind = Reply.STOPPED
+        reset.flags = 0
         assert present(accepted(peer.service.exchange([reset])).result(0)) == 0
         accepted(stopping.result(timeout=5))
     for index in range(18):

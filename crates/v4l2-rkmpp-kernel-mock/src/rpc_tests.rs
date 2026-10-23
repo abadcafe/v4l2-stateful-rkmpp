@@ -28,15 +28,24 @@ fn test_intercept_preserves_one_packet_for_zero_and_maximum_ioctl_extents()
       let mut body: Vec<u8> =
         (0..size).map(|index| index as u8 ^ 0xa5).collect();
       let command = (3 << 30) | ((size as u64) << 16) | 0x5284;
-      // SAFETY: body owns the exact command extent for exclusive
-      // copyout; zero-sized requests do not dereference their pointer.
-      assert_eq!(
-        unsafe {
-          super::rpc::intercept(0, command, body.as_mut_ptr() as usize)
-        }
-        .unwrap(),
-        Some(0)
+      let response =
+        super::rpc::intercept(0, command, body.as_mut_ptr() as usize)
+          .unwrap()
+          .unwrap();
+      // Routing and receiving never mutate the caller's memory.
+      // Publication is an explicit, separate operation under the
+      // native caller's contract.
+      assert!(
+        body
+          .iter()
+          .enumerate()
+          .all(|(index, &byte)| byte == index as u8 ^ 0xa5)
       );
+      let super::rpc::Completed::Response(response) = response else {
+        panic!("expected response")
+      };
+      // SAFETY: body exclusively owns the command's writable extent.
+      unsafe { response.write(body.as_mut_ptr() as usize) }.unwrap();
       assert!(
         body
           .iter()
@@ -122,14 +131,11 @@ fn test_intercept_empty_descriptor_message_closes_received_owners() {
     let count = || std::fs::read_dir("/proc/self/fd").unwrap().count();
     let before = count();
     let mut payload = 0u32;
-    // SAFETY: payload is exclusively owned, writable ioctl storage.
-    let result = unsafe {
-      super::rpc::intercept(
-        0,
-        (3 << 30) | (4 << 16) | 0x5284,
-        (&mut payload as *mut u32) as usize,
-      )
-    };
+    let result = super::rpc::intercept(
+      0,
+      (3 << 30) | (4 << 16) | 0x5284,
+      (&mut payload as *mut u32) as usize,
+    );
     assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EPIPE));
     assert_eq!(count(), before, "empty message leaked SCM_RIGHTS");
     return;

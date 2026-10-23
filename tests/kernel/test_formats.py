@@ -137,6 +137,7 @@ def test_queue_invalid_slot_export_and_empty_dequeue_return_specific_errors(
             time.sleep(0.001)
         acknowledgement = present(batch.event(0))
         acknowledgement.kind = Reply.STOPPED
+        acknowledgement.flags = 0
         assert (
             present(accepted(raw_session.service.exchange([acknowledgement])).result(0))
             == 0
