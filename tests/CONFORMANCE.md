@@ -291,3 +291,94 @@ The corresponding four unknown-level process partitions retain their exact
 pixel/completion assertions and fail on the missing picture obligation at drain.
 The understated-level partitions pass with the same hardware. Neither the SPS
 nor the native dependency is patched to make these cases green.
+
+## Whole-project audit, 2026-10-24
+
+The audit covered the kernel queue/endpoint/memory contracts, service scheduling
+and cancellation, codec admission and picture ordering, MPP object ownership,
+DMA-BUF alias exclusion, Vulkan imports/submission/retirement, generated UAPI,
+native SDK discovery, Python support code and performance instrumentation.
+The confirmed inventory is **nine defects: three fixed in this repository and
+six external failures retained**. This counts defects rather than parametrized
+test failures. External dependencies were not modified.
+
+| ID | Failure and root cause | Architectural cause? | Disposition and regression |
+| --- | --- | --- | --- |
+| R1 | H.264 sequence termination set `seeking` but retained the previous DPB, POC and frame-number history. A recovery point could retain old references or fail the forbidden-gap check against the previous sequence. | Yes: seek and sequence termination maintained different, incomplete reset transactions. | Fixed: `H264::boundary` uses the complete seek transition while preserving picture serials. `test_boundary_recovery_starts_independent_reference_and_number_history` failed before the fix and now checks both retained-reference contamination and an independent frame-number origin. |
+| R2 | HEVC picture equality compared unused native C fields: an SPS index alongside explicit RPS data, local long-term fields alongside SPS indices, absent MSB cycles, and prediction fields absent from IDR. The owned IDR header also copied an absent POC instead of inferring zero. | Yes: the representation allowed mutually exclusive syntax alternatives to coexist and confused C storage with syntax presence. | Fixed: `picture::references` owns typed short/long-term alternatives and optional MSB cycles; `picture` owns optional prediction state; IDR POC is normalized to zero. `picture_tests`, `picture/references_tests` and `test_own_idr_infers_zero_poc_without_prediction_syntax` cover ignored inactive storage, strict active-field consistency and count bounds. |
+| R3 | Performance reports excluded warmup for utilization and presentation gaps but calculated the dropped-frame percentage from lifetime playback counters. The first 4K30 H.264 measurement reported 0.82%, without enough timestamped evidence to determine whether the drops occurred during warmup. | Yes: playback observations had no sampling time or explicit counter window, and collection mixed lifetime counters with steady-state summary policy. | Fixed: `performance::playback` owns timestamped observations and checked window summaries. Only differences between complete post-warmup observations contribute. Counter resets/inconsistent deltas reject; insufficient observations return ENODATA. Report schema v4 publishes the window and frame deltas; the ambiguous lifetime percentage field is removed. Twenty-two new cases in `performance/playback_tests.py` define this contract. |
+| E1 | GStreamer's OBU identifier rejects AV1 `obu_reserved_1bit` instead of ignoring it. | External parser admission rule; no bridge architecture cause established. | Strict acceptance assertion and direct native reproduction documented in `crates/codec-parser/src/av1_tests.rs`. |
+| E2 | GStreamer's OBU identifier rejects AV1 extension-header reserved bits. | External parser admission rule; no bridge architecture cause established. | Same file retains a separate strict extension-header acceptance assertion. |
+| E3 | MPP consumes an otherwise decodable H.264 IDR with unknown level 255 without publishing its image. | External decode path; no bridge architecture cause established. | Direct `rkmpp::decoder_tests` reproduction plus four process partitions in `service/test_input_errors.py`. |
+| E4 | MPP does not publish VP9 `show_existing_frame` images on the synchronous path without a hardware task. | External scheduling mismatch between the display queue and task completion. | Direct decoder regression plus three process partitions in `service/test_repeated_picture.py`; timestamps and pixels remain strict. |
+| E5 | Nine MMCO5 conformance images differ from the independent software reference, including with direct MPP decoding. | Unresolved within the external MPP/vendor path: library, driver and hardware have not been distinguished. | Exact pixels retained in `service/test_picture_order.py`, with the existing reproduction/evidence comment. |
+| E6 | The installed v4l2-compliance build stops codec classification at AV1 and then rejects the stateful decoder's required capture-minimum control. | External capability-classification logic; not a bridge architecture defect. | `kernel/test_compliance.py` documents the independent ioctl reproduction and retains the failing assertion. |
+
+R2 follows the conditional syntax and inference rules in
+[H.265 clauses 7.3.6.1 and 7.4.7.1](https://www.itu.int/rec/dologin_pub.asp?id=T-REC-H.265-201906-S%21%21PDF-E&lang=e&type=items).
+R3 uses the cumulative-counter semantics of the
+[Media Playback Quality specification](https://w3c.github.io/media-playback-quality/).
+
+The new HEVC child module hides native optional-field representation and bounds;
+it does not expose a second parser or a compatibility path. Dependencies are
+`hevc -> picture -> picture::references -> ffi`, with no reverse edge. Both
+picture modules forbid unsafe code. Later slice comparisons borrow the parsed
+record and allocate no reference vectors. The audit did not confirm another
+unnecessary or overly broad unsafe operation; native calls, descriptor adoption,
+memory mappings and Vulkan submission still require their existing ownership
+and lifetime proofs.
+
+An authored-source inventory found no module exceeding the module-design public
+operation/entity thresholds. A static local-use/qualified-path dependency scan of
+121 Rust source modules found no cycles; its graph is recorded in
+`target/review/20261024-audit/dependencies.json`. This source scan complements
+compilation and public-interface tests; it does not analyze generated or foreign
+implementation internals.
+
+Validation evidence lives under `target/review/20261024-audit/`. Formatting,
+workspace/all-target Clippy with `-D warnings`, `cargo build`, Ruff and
+basedpyright pass; basedpyright reports zero errors and warnings. The complete
+Rust suite runs 575 tests: **571 pass, four fail**, with no ignored tests. The
+four failures are E1-E4 and match the original baseline; all seven added
+regressions pass. A clean kernel rebuild with `W=1 KCFLAGS=-Werror` succeeds.
+The external kernel build system still reports GCC 16 versus the kernel's GCC
+14, a warning from its Perl `kernel-doc`, and unavailable `vmlinux` for BTF.
+These messages were not suppressed or patched outside this repository.
+The final complete Python suite reports **1179 passed, nine failed in 529.17 seconds**,
+with no skips or expected failures. All 22 added playback-window cases pass.
+Its failure set exactly matches the baseline:
+one E6 compliance case, four E3 unknown-level cases, one E5 MMCO5 pixel case and
+three E4 repeated-presentation cases. E1/E2 remain covered by the Rust suite.
+
+### Performance observations
+
+Measurements use the debug service, actual V4L2 hardware decoding and the current
+desktop. Three v4 runs observed 4K30 playback for 12 seconds, excluding two seconds
+of warmup. CPU percentages below use one core as 100%; GPU load is shared.
+
+| Codec | Service CPU | Shared GPU | Post-warmup frames | Post-warmup drops |
+| --- | --- | --- | --- | --- |
+| H.264 | 8.16% | 22.91% | 299 | 0 / 0.00% |
+| VP9 10-bit | 11.31% | 27.00% | 299 | 26 / 8.70% |
+| AV1 10-bit | 12.36% | 45.27% | 297 | 0 / 0.00% |
+
+H.264's lifetime counters contained three dropped frames while its post-warmup
+window contained none, demonstrating why the two scopes must remain distinct.
+Two further VP9 runs with the default GPU policy measured 1.36% and 0.00% drops.
+Two 15-second VP9 controls with five seconds of warmup and an explicitly requested
+1 GHz GPU minimum measured 0.00% in both runs. GNOME Shell CPU was 31.05% and
+23.04% in those controls; service CPU was 10.57% and 10.55%. Every measurement
+released its owned service and restored the original 200 MHz GPU minimum and
+MPP sampling interval 0.
+
+These observations identify variable presentation deadlines, not a proven
+bridge CPU throughput ceiling. Shared composition load, warmup and frequency
+policy were not held identical across all runs, so they do not establish a sole
+governor, compositor, Chromium or bridge scheduling cause. No production frequency
+policy was changed to conceal the variation. The VP9 service log records 371
+quantized outputs without copy fallbacks or decode errors in the 8.70% run;
+CAPTURE wait counts are bounded backpressure observations, not lost pictures.
+Per-frame latency attribution across the bridge and compositor remains a limit
+of this measurement. Complete evidence, including the anomalous run, is retained
+in `performance-v4/`, `vp9-repeat/`, `vp9-frequency-control/` and
+`performance-comparison.json` beneath the audit evidence directory.

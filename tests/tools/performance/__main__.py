@@ -8,6 +8,7 @@ import errno
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,7 @@ from tests.support.service_runtime import ENDPOINT, locate
 from tests.tools.performance.capture import record
 from tests.tools.performance.controls import Controls
 from tests.tools.performance.options import Options, parse
+from tests.tools.performance.playback import FrameQuality
 from tests.tools.performance.report import Utilization
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -42,10 +44,11 @@ class Entry(BaseModel):
     round: int
     report: Path
     utilization: Utilization | None = None
-    dropped_percent: float | None = None
+    frame_quality: FrameQuality | None = None
 
 
 class Index(BaseModel):
+    schema_version: Literal[4] = 4
     started_at: str
     options: Options
     entries: list[Entry] = Field(default_factory=list)
@@ -149,11 +152,11 @@ def _workloads(
             if isinstance(measured, Rejected):
                 return measured
             entry.utilization = measured.value.utilization
-            entry.dropped_percent = measured.value.dropped_percent
+            entry.frame_quality = measured.value.frame_quality
             usage = measured.value.utilization
-            if usage is not None and entry.dropped_percent is not None:
+            if usage is not None and entry.frame_quality is not None:
                 print(
-                    f"  CPU Chromium={usage.cpu['chromium'].mean_percent:.2f}% service={usage.cpu['bridge'].mean_percent:.2f}% GPU={usage.gpu.mean:.2f}% dropped={entry.dropped_percent:.2f}%",
+                    f"  CPU Chromium={usage.cpu['chromium'].mean_percent:.2f}% service={usage.cpu['bridge'].mean_percent:.2f}% GPU={usage.gpu.mean:.2f}% steady-dropped={entry.frame_quality.dropped_percent:.2f}%",
                     flush=True,
                 )
             presentation = measured.value.presentation

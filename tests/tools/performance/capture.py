@@ -29,13 +29,15 @@ from tests.support.service_runtime import Running
 from tests.support.video_expansion import expand
 from tests.tools.performance.controls import Settings
 from tests.tools.performance.options import Options, Workload
+from tests.tools.performance.playback import FrameQuality, Observation
+from tests.tools.performance.playback import summarize as summarize_playback
 from tests.tools.performance.presentation import Monitor, Presentation
 from tests.tools.performance.report import Sample, Utilization, summarize
 from tests.tools.performance.telemetry import Sampler
 
 
 class Recording(BaseModel):
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     started_at: str
     workload: Workload
     round: int
@@ -58,12 +60,12 @@ class Recording(BaseModel):
     )
     failure: Rejected | None = None
     playback: Playback | None = None
-    timeline: list[Playback] = Field(default_factory=list)
+    timeline: list[Observation] = Field(default_factory=list)
     samples: list[Sample] = Field(default_factory=list)
     presentation: Presentation | None = None
     properties: dict[str, str] = Field(default_factory=dict)
     utilization: Utilization | None = None
-    dropped_percent: float | None = None
+    frame_quality: FrameQuality | None = None
 
 
 class _Screenshot(BaseModel):
@@ -211,12 +213,12 @@ def _measure(
         if isinstance(state, Rejected):
             return state
         output.playback = state.value
-        output.timeline.append(state.value)
         properties = media_properties(browser.tab.events())
         if isinstance(properties, Rejected):
             return properties
         output.properties.update(properties.value)
         now = time.monotonic()
+        output.timeline.append(Observation(elapsed=now - started, playback=state.value))
         if (
             state.value.error is not None
             or not state.value.visible
@@ -294,7 +296,10 @@ def _finish(
     if isinstance(utilization, Rejected):
         return utilization
     output.utilization = utilization.value
-    output.dropped_percent = 100 * state.frames.dropped / state.frames.total
+    quality = summarize_playback(output.timeline, options.warmup_seconds)
+    if isinstance(quality, Rejected):
+        return quality
+    output.frame_quality = quality.value
     return Ok(None)
 
 

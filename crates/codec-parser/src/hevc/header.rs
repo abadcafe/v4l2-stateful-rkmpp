@@ -97,7 +97,9 @@ pub(super) fn own(
       .ok_or_else(invalid)?,
     no_prior: slice.no_output_of_prior_pics_flag != 0,
     display: slice.pic_output_flag != 0,
-    lsb: u32::from(slice.pic_order_cnt_lsb),
+    // IDR omits slice_pic_order_cnt_lsb and infers zero (7.4.7.1).
+    // Unused C storage must not leak into the owned semantic header.
+    lsb: if idr { 0 } else { u32::from(slice.pic_order_cnt_lsb) },
     short,
     long,
   })

@@ -146,3 +146,5 @@ uv run python -m tests.tools.performance
 The performance tool measures CPU/GPU/MPP utilization and dropped frames for H.264, VP9, and AV1 at 4K30. Reports are saved to `target/benchmarks/`. The video group needs write permission on `/proc/mpp_service/load_interval`.
 
 Compositor CPU usage is not collected by default; specify `--compositor-pid PID` to include it. GPU, MPP, and compositor load figures in the report reflect shared resource usage.
+
+Performance reports use schema v4. Dropped-frame rates use counter differences over a complete post-warmup observation window and include its start/end times. Lifetime playback counters are retained separately. Insufficient post-warmup frame observations report missing data instead of a zero dropped-frame rate.

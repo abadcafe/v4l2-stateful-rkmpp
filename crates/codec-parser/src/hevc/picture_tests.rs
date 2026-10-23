@@ -11,11 +11,11 @@ fn header() -> (ffi::GstH265NalUnit, ffi::GstH265SliceHdr) {
   // here. The owning syntax validator separately validates PPS
   // existence.
   let nal = ffi::GstH265NalUnit {
-    type_: 20,
+    type_: 21,
     temporal_id_plus1: 1,
     ..Default::default()
   };
-  let slice = ffi::GstH265SliceHdr {
+  let mut slice = ffi::GstH265SliceHdr {
     pic_output_flag: 1,
     num_long_term_sps: 1,
     num_long_term_pics: 1,
@@ -26,6 +26,7 @@ fn header() -> (ffi::GstH265NalUnit, ffi::GstH265SliceHdr) {
     },
     ..Default::default()
   };
+  slice.delta_poc_msb_present_flag[..2].fill(1);
   (nal, slice)
 }
 
@@ -33,12 +34,11 @@ fn header() -> (ffi::GstH265NalUnit, ffi::GstH265SliceHdr) {
 fn test_agrees_rejects_every_picture_wide_independent_field() {
   let (nal, slice) = header();
   let first = Picture::new(&nal, &slice).unwrap();
-  let changes: [fn(&mut ffi::GstH265SliceHdr); 17] = [
+  let changes: [fn(&mut ffi::GstH265SliceHdr); 16] = [
     |s| s.no_output_of_prior_pics_flag ^= 1,
     |s| s.pic_output_flag ^= 1,
     |s| s.pic_order_cnt_lsb += 1,
     |s| s.short_term_ref_pic_set_sps_flag ^= 1,
-    |s| s.short_term_ref_pic_set_idx += 1,
     |s| s.num_long_term_sps += 1,
     |s| s.num_long_term_pics += 1,
     |s| s.lt_idx_sps[0] += 1,
@@ -57,6 +57,44 @@ fn test_agrees_rejects_every_picture_wide_independent_field() {
     change(&mut other);
     assert!(!first.agrees(&nal, &other).unwrap(), "field {index}");
   }
+}
+
+#[test]
+fn test_agrees_ignores_inactive_reference_representations() {
+  let (nal, mut slice) = header();
+  slice.delta_poc_msb_present_flag[0] = 0;
+  let first = Picture::new(&nal, &slice).unwrap();
+  let mut other = slice;
+  other.short_term_ref_pic_set_idx = 9;
+  other.poc_lsb_lt[0] = 500;
+  other.used_by_curr_pic_lt_flag[0] = 1;
+  other.lt_idx_sps[1] = 7;
+  other.delta_poc_msb_cycle_lt[0] = 999;
+  assert!(first.agrees(&nal, &other).unwrap());
+
+  slice.short_term_ref_pic_set_sps_flag = 1;
+  let first = Picture::new(&nal, &slice).unwrap();
+  other = slice;
+  other.short_term_ref_pic_sets.numnegativepics = 255;
+  other.short_term_ref_pic_sets.numpositivepics = 255;
+  assert!(first.agrees(&nal, &other).unwrap());
+  other.short_term_ref_pic_set_idx += 1;
+  assert!(!first.agrees(&nal, &other).unwrap());
+}
+
+#[test]
+fn test_agrees_idr_ignores_absent_prediction_fields() {
+  let (mut nal, slice) = header();
+  nal.type_ = 20;
+  let first = Picture::new(&nal, &slice).unwrap();
+  let mut other = slice;
+  other.pic_order_cnt_lsb = 1023;
+  other.short_term_ref_pic_set_sps_flag = 1;
+  other.short_term_ref_pic_set_idx = 63;
+  other.num_long_term_sps = 255;
+  other.num_long_term_pics = 255;
+  other.temporal_mvp_enabled_flag = 1;
+  assert!(first.agrees(&nal, &other).unwrap());
 }
 
 #[test]

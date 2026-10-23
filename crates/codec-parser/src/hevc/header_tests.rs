@@ -23,6 +23,18 @@ fn records()
   (nal, slice, sps)
 }
 #[test]
+fn test_own_idr_infers_zero_poc_without_prediction_syntax() {
+  let (mut nal, mut slice, sps) = records();
+  nal.type_ = 20;
+  slice.pic_order_cnt_lsb = 100;
+  slice.num_long_term_sps = 255;
+  slice.num_long_term_pics = 255;
+  let header = own(&nal, &slice, sequence(), &sps).unwrap();
+  assert_eq!(header.lsb, 0);
+  assert!(header.short.is_empty() && header.long.is_empty());
+}
+
+#[test]
 fn test_own_retains_following_references_and_accumulates_long_cycles() {
   let (nal, mut slice, mut sps) = records();
   slice.short_term_ref_pic_sets.numnegativepics = 2;

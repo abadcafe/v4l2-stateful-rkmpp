@@ -136,3 +136,5 @@ uv run python -m tests.tools.performance
 性能工具测量 H.264、VP9、AV1 4K30 的 CPU/GPU/MPP 占用与丢帧，报告保存到 `target/benchmarks/`；需对 `/proc/mpp_service/load_interval` 配置 video 组写权限。
 
 性能工具默认不采集合成器 CPU，可用 `--compositor-pid PID` 显式指定；报告中的 GPU、MPP 和合成器负载是共享负载。
+
+性能报告格式为 v4。丢帧率使用完整预热后观察窗口的帧计数差值，并记录窗口起止时间；原始整段播放累计计数另行保留。没有足够的预热后观察帧时报告缺少数据，不生成零丢帧率。

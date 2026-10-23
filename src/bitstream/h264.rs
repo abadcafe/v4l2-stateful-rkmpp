@@ -38,8 +38,10 @@ impl Syntax for H264 {
   }
 
   fn boundary(&mut self) {
-    self.seeking = true;
-    self.pending = None;
+    // A terminated coded sequence has no reference or frame-number
+    // history for the next recovery point. Keep only the monotonically
+    // increasing picture identities, as for an explicit seek.
+    self.seek();
   }
 
   fn inspect(
