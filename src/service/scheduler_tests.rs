@@ -373,6 +373,33 @@ async fn test_run_bounded_progress_yields_to_control_after_four_steps()
   assert_eq!(seen.borrow().steps, 4);
   assert_eq!(seen.borrow().advances, 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_runnable_hardware_does_not_exchange_without_kernel_readiness()
+ {
+  let (mut control, mut engine, seen) = fixture(vec![
+    Ok(batch(&[message(Event::Resume as u32, 0)])),
+    close(),
+  ]);
+  // No kernel event becomes readable while the decoder needs three
+  // bounded turns. The final reply itself authorizes the next ioctl.
+  control.block_wait = true;
+  engine.steps = (0..8).map(|_| Ok(true)).chain([Ok(false)]).collect();
+  engine.reply_on_advance =
+    Some((3, message(Reply::InputDone as u32, 1)));
+  let signals = Signals::install().unwrap();
+  let stats = tokio::time::timeout(
+    std::time::Duration::from_secs(2),
+    run(&mut control, engine, &signals.shutdown()),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  assert_eq!((stats.exchanges, stats.replies), (2, 1));
+  let observed = seen.borrow();
+  assert_eq!(observed.advances, 3);
+  assert_eq!(observed.replies[1][0].kind, Reply::InputDone as u32);
+}
 #[tokio::test(flavor = "current_thread")]
 async fn test_run_stale_and_disconnected_registration_skip_event() {
   for error in [libc::ESTALE, libc::EPIPE] {

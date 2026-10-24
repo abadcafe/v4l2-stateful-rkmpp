@@ -149,4 +149,6 @@ The performance tool measures CPU/GPU/MPP utilization and dropped frames for H.2
 
 Compositor CPU usage is not collected by default; specify `--compositor-pid PID` to include it. GPU, MPP, and compositor load figures in the report reflect shared resource usage.
 
-Performance reports use schema v4. Dropped-frame rates use counter differences over a complete post-warmup observation window and include its start/end times. Lifetime playback counters are retained separately. Insufficient post-warmup frame observations report missing data instead of a zero dropped-frame rate.
+Performance reports use schema v6. CPU samples retain each counter's `interval_start`, `elapsed`, and `percent`; each source uses its own acquisition interval and excludes intervals crossing warmup. Visible process births, exits, PID reuse, or role changes make Chromium CPU `percent` null for that interval. Sampling resumes from the next snapshot. Summaries exclude missing rates and publish `missing_seconds` and `missing_samples` alongside observed coverage. A process born and exited entirely between snapshots is unobservable through procfs snapshots; tree measurements cover snapshot-visible processes. Service CPU counters remain independent of tree coverage.
+
+Dropped-frame rates use counter differences over a complete post-warmup observation window and include its start/end times. Lifetime playback counters are retained separately. Insufficient post-warmup frame observations report missing data instead of a zero dropped-frame rate.

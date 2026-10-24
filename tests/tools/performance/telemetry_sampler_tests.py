@@ -84,7 +84,8 @@ def test_read_combines_owned_tree_and_service_self_cpu(
     service_cpu[0] = 1.25
     sample = accepted(sampler.read())
     assert sample.elapsed == 1 and sample.cpu["bridge"].percent == 25
-    assert sample.cpu["chromium"].percent > 0 and sample.gpu_percent == 25
+    rate = sample.cpu["chromium"].percent
+    assert rate is not None and rate > 0 and sample.gpu_percent == 25
     assert sample.mpp_completed_window_load == {"core0": 12}
 
 
@@ -150,7 +151,8 @@ def test_read_without_compositor_keeps_decode_counters(
     service_cpu[0] = 1.25
     sample = accepted(sampler.read())
     assert "desktop-compositor" not in sample.cpu
-    assert sample.cpu["bridge"].percent == 25 and sample.cpu["chromium"].percent > 0
+    rate = sample.cpu["chromium"].percent
+    assert sample.cpu["bridge"].percent == 25 and rate is not None and rate > 0
     assert sample.gpu_percent == 25 and sample.mpp_completed_window_load == {
         "core0": 12
     }
@@ -209,3 +211,34 @@ def test_read_rejects_lost_workload_identity(
     clock[0] = 12
     sample = accepted(sampler.read())
     assert (sample.cpu["bridge"].interval_start, sample.elapsed) == (0, 2)
+
+
+def test_read_tree_churn_retains_gap_then_recovers_from_next_snapshot(
+    counters: tuple[Running, list[float], list[float]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    running, clock, service_cpu = counters
+    sampler = accepted(Sampler.open(1, running, 2))
+    provider = cpu.processes
+
+    def added_worker(browser_pid: int, desktop_pid: int | None) -> Result[Processes]:
+        values = accepted(provider(browser_pid, desktop_pid))
+        values[4] = Process(
+            parent=1,
+            start=2,
+            ticks=int((clock[0] - 10) * 100),
+            name="renderer",
+            kind="renderer",
+        )
+        return Ok(values)
+
+    monkeypatch.setattr(cpu, "processes", added_worker)
+    clock[0], service_cpu[0] = 11, 1.25
+    changed = accepted(sampler.read())
+    assert changed.cpu["chromium"].percent is None
+    assert changed.cpu["bridge"].percent == 25
+    assert changed.cpu["desktop-compositor"].percent == 0
+    clock[0], service_cpu[0] = 12, 1.50
+    stable = accepted(sampler.read())
+    rate = stable.cpu["chromium"].percent
+    assert stable.cpu["chromium"].interval_start == 1
+    assert rate is not None and rate > 0

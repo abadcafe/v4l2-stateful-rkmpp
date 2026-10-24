@@ -19,7 +19,9 @@ from tests.support.outcome import Ok, Rejected, Result
 class CpuSample(BaseModel, frozen=True):
     interval_start: float
     elapsed: float
-    percent: float
+    # None is an interval whose process identity set changed; no complete
+    # CPU delta exists. It is retained as missing data, never as idle time.
+    percent: float | None
 
 
 class Sample(BaseModel):
@@ -45,6 +47,8 @@ class CpuUsage(BaseModel, frozen=True):
     mean_percent: float
     observed_seconds: float
     samples: int
+    missing_seconds: float
+    missing_samples: int
     interval_distribution: Distribution
 
 
@@ -123,15 +127,18 @@ def summarize(samples: Sequence[Sample], warmup_seconds: float) -> Result[Utiliz
     cpu: dict[str, CpuUsage] = {}
     mpp: dict[str, Distribution] = {}
     for key in sorted(cpu_keys):
-        counters = [
+        intervals = [
             sample.cpu[key]
             for sample in steady
             if sample.cpu[key].interval_start >= warmup_seconds
         ]
+        counters = [counter for counter in intervals if counter.percent is not None]
         if not counters:
             return Rejected(errno.ENODATA, "no complete post-warmup CPU interval")
         observed = sum(counter.elapsed - counter.interval_start for counter in counters)
-        result = describe([counter.percent for counter in counters])
+        result = describe(
+            [counter.percent for counter in counters if counter.percent is not None]
+        )
         if isinstance(result, Rejected):
             return result
         cpu[key] = CpuUsage(
@@ -139,9 +146,16 @@ def summarize(samples: Sequence[Sample], warmup_seconds: float) -> Result[Utiliz
                 counter.percent
                 * ((counter.elapsed - counter.interval_start) / observed)
                 for counter in counters
+                if counter.percent is not None
             ),
             observed_seconds=observed,
             samples=len(counters),
+            missing_seconds=sum(
+                counter.elapsed - counter.interval_start
+                for counter in intervals
+                if counter.percent is None
+            ),
+            missing_samples=len(intervals) - len(counters),
             interval_distribution=result.value,
         )
     for key in sorted(mpp_keys):

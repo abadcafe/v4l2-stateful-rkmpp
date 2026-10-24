@@ -6,6 +6,43 @@ use super::codec::Syntax;
 use super::h264::H264;
 
 #[test]
+fn test_inspect_recovery_count_is_bounded_by_active_frame_number_width()
+{
+  use codec_parser::header::{H264 as Header264, Header, Marking};
+  let bytes =
+    &include_bytes!("../../tests/artifacts/h264-discard-old.h264")
+      [..2469];
+  let unit = codec_parser::Validator::new(u32::from_le_bytes(*b"H264"))
+    .unwrap()
+    .validate(bytes, 1)
+    .unwrap()
+    .units
+    .remove(0);
+  let Header::H264(idr) = unit.header.unwrap() else {
+    panic!("expected H264");
+  };
+  let mut sequence = (*idr.sequence).clone();
+  sequence.frame_bits = 4;
+  let header = Header::H264(Header264 {
+    sequence: std::rc::Rc::new(sequence),
+    frame: 1,
+    field: None,
+    lsb: 2,
+    bottom_delta: 0,
+    delta: [0, 0],
+    marking: Marking::Sliding,
+  });
+  // recovery_frame_cnt=16 is outside 0..MaxFrameNum. It must not
+  // wrap to zero and make this very picture a recovered output.
+  let result = H264::default()
+    .inspect(&[0, 0, 1, 6, 6, 2, 0x08, 0x84, 0x80], Some(&header));
+  assert_eq!(
+    result.err().unwrap().kind(),
+    std::io::ErrorKind::InvalidData
+  );
+}
+
+#[test]
 fn test_boundary_recovery_starts_independent_reference_and_number_history()
  {
   use codec_parser::header::{H264 as Header264, Header, Marking};

@@ -125,10 +125,25 @@ def account(
     ticks: int,
     browser_pid: int,
     desktop_pid: int | None,
-) -> Result[dict[str, float]]:
+) -> Result[dict[str, float | None]]:
     if not math.isfinite(elapsed) or elapsed <= 0 or ticks <= 0:
         return Rejected(errno.EINVAL, "invalid CPU interval")
     descendants = _descendants(now, browser_pid)
+    previous_descendants = _descendants(previous, browser_pid)
+    complete_tree = (
+        browser_pid in now
+        and browser_pid in previous
+        and {
+            pid: (p.start, p.parent, p.kind)
+            for pid, p in now.items()
+            if pid in descendants
+        }
+        == {
+            pid: (p.start, p.parent, p.kind)
+            for pid, p in previous.items()
+            if pid in previous_descendants
+        }
+    )
     groups = dict.fromkeys(
         [
             "chromium",
@@ -160,4 +175,19 @@ def account(
                 if p.kind in ("browser", "renderer", "gpu-process")
                 else "other-chromium"
             ] += percent
-    return Ok(groups)
+    rates: dict[str, float | None] = dict(groups)
+    if not complete_tree:
+        # Snapshots cannot recover the unsampled CPU of a new/exited
+        # process. Never label a sum over surviving processes as the
+        # complete tree's CPU interval. The next accepted snapshot is
+        # still a valid baseline for a later stable interval.
+        for key in rates:
+            if key != "desktop-compositor":
+                rates[key] = None
+    if desktop_pid is not None and (
+        desktop_pid not in now
+        or desktop_pid not in previous
+        or now[desktop_pid].start != previous[desktop_pid].start
+    ):
+        rates["desktop-compositor"] = None
+    return Ok(rates)

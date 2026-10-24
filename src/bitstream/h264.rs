@@ -82,7 +82,7 @@ impl Syntax for H264 {
     } else if let Some(point) = point
       && (self.seeking || point.broken)
     {
-      self.recovery.begin(point, m.number);
+      self.recovery.begin(point, m.number)?;
       discard |= point.broken;
     }
     let display = self.recovery.picture(m.number, m.poc, m.reference);

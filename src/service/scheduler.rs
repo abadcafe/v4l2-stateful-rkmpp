@@ -173,21 +173,23 @@ pub(super) async fn run(
       if pending.len() > 64 {
         return Err("reply backpressure overflow".into());
       }
-      if !pending.is_empty() || fetch || progressed {
-        if progressed {
-          fetch = true;
-        }
+      if !pending.is_empty() || fetch {
         tokio::task::yield_now().await;
         continue;
       }
       let ready = tokio::select! {
+        // A runnable decoder does not imply kernel events. Poll control
+        // readiness before each additional bounded turn, yielding to the
+        // reactor so a continuously runnable decoder cannot starve STOP.
+        biased;
         ready = control.wait(&notification, shutdown) => ready,
         ready = backend.wait() => ready.map(|()| false),
+        () = tokio::task::yield_now(), if advance => continue,
       };
       match ready {
         Ok(control_ready) => {
           fetch = control_ready;
-          advance = !control_ready;
+          advance |= !control_ready;
         }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
         Err(error) => return Err(format!("wait: {error}")),

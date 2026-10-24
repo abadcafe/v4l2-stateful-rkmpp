@@ -13,6 +13,27 @@ from tests.support.outcome import Rejected, accepted
 from tests.tools.performance.report import CpuSample, Sample, describe, summarize
 
 
+def test_summarize_cpu_missing_intervals_preserve_coverage_without_zero_fill() -> None:
+    samples = tuple(
+        Sample(
+            elapsed=end,
+            cpu={
+                "chromium": CpuSample(interval_start=start, elapsed=end, percent=rate)
+            },
+            gpu_percent=0,
+            gpu_frequency=1,
+            mpp_completed_window_load={"core": 0},
+        )
+        for start, end, rate in ((0, 1, 100.0), (1, 10, None), (10, 11, 0.0))
+    )
+    usage = accepted(summarize(samples, 0)).cpu["chromium"]
+    assert usage.mean_percent == 50 and usage.observed_seconds == 2
+    assert usage.samples == 2
+    assert usage.missing_seconds == 9 and usage.missing_samples == 1
+    result = summarize(samples[1:2], 0)
+    assert isinstance(result, Rejected) and result.code == errno.ENODATA
+
+
 @pytest.mark.parametrize(
     "frequency", [10**400, -(10**400)], ids=["positive-overflow", "negative-overflow"]
 )

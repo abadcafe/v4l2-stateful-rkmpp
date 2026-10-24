@@ -37,7 +37,7 @@ from tests.tools.performance.telemetry import Sampler
 
 
 class Recording(BaseModel):
-    schema_version: Literal[5] = 5
+    schema_version: Literal[6] = 6
     started_at: str
     workload: Workload
     round: int
@@ -54,7 +54,7 @@ class Recording(BaseModel):
     graphics: Info | None = None
     flags: tuple[str, ...] = DECODE_FLAGS
     shared_desktop_pid: int | None = None
-    counter_scope: str = "Chromium: owned process tree; service: entire process; desktop/GPU: shared system workload; MPP: last completed driver windows with unknown freshness, not realtime or per-session occupancy"
+    counter_scope: str = "Chromium: snapshot-visible owned process tree; changed process sets produce missing CPU intervals, and processes born and exited entirely between snapshots are unobservable; service: entire process; desktop/GPU: shared system workload; MPP: last completed driver windows with unknown freshness, not realtime or per-session occupancy"
     outcome: Literal["running", "ended", "duration-limit", "failed", "cancelled"] = (
         "running"
     )

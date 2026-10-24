@@ -73,7 +73,7 @@ def test_account_uses_owned_browser_descendants_and_one_core_percent() -> None:
     }
 
 
-def test_account_ignores_reused_pid_and_new_process_without_baseline() -> None:
+def test_account_reused_workload_pid_has_no_complete_interval() -> None:
     old = {
         5: Process(
             parent=0, start=1, ticks=100, name="v4l2-stateful-rkmpp", kind="browser"
@@ -84,7 +84,30 @@ def test_account_ignores_reused_pid_and_new_process_without_baseline() -> None:
             parent=0, start=2, ticks=1, name="v4l2-stateful-rkmpp", kind="browser"
         )
     }
-    assert accepted(account(now, old, 1, 100, 5, 7))["chromium"] == 0
+    assert accepted(account(now, old, 1, 100, 5, 7))["chromium"] is None
+
+
+@pytest.mark.parametrize("change", ["born", "exited", "reused"])
+def test_account_changed_tree_does_not_publish_partial_cpu_as_complete(
+    change: str,
+) -> None:
+    root = Process(parent=0, start=1, ticks=10, name="chrome", kind="browser")
+    worker = Process(parent=1, start=2, ticks=20, name="worker", kind="renderer")
+    desktop = Process(parent=0, start=3, ticks=30, name="desktop", kind="browser")
+    old = {1: root, 2: worker, 9: desktop}
+    now = {
+        pid: process.model_copy(update={"ticks": process.ticks + 100})
+        for pid, process in old.items()
+    }
+    if change == "born":
+        del old[2]
+    elif change == "exited":
+        del now[2]
+    else:
+        now[2] = worker.model_copy(update={"start": 4, "ticks": 200})
+    rates = accepted(account(now, old, 1, 100, 1, 9))
+    assert rates["chromium"] is None and rates["renderer"] is None
+    assert rates["desktop-compositor"] == 100
 
 
 def test_account_includes_owned_processes_independently_of_executable_name() -> None:

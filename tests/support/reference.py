@@ -69,6 +69,10 @@ def frame_hashes(
         str(path),
         "-pix_fmt",
         "yuv420p10le" if depth == 10 else "yuv420p",
+        # A reference contains one output per decoded picture. FFmpeg's
+        # automatic rawvideo sync duplicates/drops pictures at VFR timestamps.
+        "-fps_mode",
+        "passthrough",
         "-f",
         "rawvideo",
         "-",

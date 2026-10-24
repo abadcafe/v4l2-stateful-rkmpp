@@ -12,10 +12,39 @@ operations: pytest cases; entities: none; tests:
 
 import errno
 import struct
+import subprocess
 from pathlib import Path
 
 from tests.support.outcome import Rejected, accepted
 from tests.support.reference import frame_hashes, quantize
+
+
+def test_frame_hashes_preserves_variable_rate_picture_count(tmp_path: Path) -> None:
+    source = tmp_path / "variable-rate.mkv"
+    encoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x64:rate=10:duration=1",
+            "-vf",
+            r"select=eq(n\,0)+eq(n\,1)+eq(n\,5)",
+            "-c:v",
+            "ffv1",
+            "-fps_mode",
+            "vfr",
+            str(source),
+        ],
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert encoded.returncode == 0, encoded.stderr
+    hashes = accepted(frame_hashes(source, 8, 64, 64))
+    assert len(hashes) == 3 and len(set(hashes)) == 3
 
 
 def test_quantize_fractional_values_follow_spatial_thresholds() -> None:

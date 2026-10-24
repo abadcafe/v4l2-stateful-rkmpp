@@ -14,7 +14,7 @@ fn number(value: u32) -> Number {
 #[test]
 fn test_recovery_waits_for_reference_frame_number_and_output_order() {
   let mut gate = Recovery::default();
-  gate.begin(Point { count: 2, broken: false }, number(14));
+  gate.begin(Point { count: 2, broken: false }, number(14)).unwrap();
   assert!(!gate.picture(number(14), 4, true));
   assert!(!gate.picture(number(15), 6, true));
   assert!(!gate.picture(number(0), 10, false));
@@ -26,7 +26,7 @@ fn test_recovery_waits_for_reference_frame_number_and_output_order() {
 fn test_recovery_zero_and_reset() {
   let mut gate = Recovery::default();
   assert!(gate.picture(number(0), 0, true));
-  gate.begin(Point { count: 0, broken: true }, number(3));
+  gate.begin(Point { count: 0, broken: true }, number(3)).unwrap();
   assert!(gate.picture(number(3), 6, true));
   assert!(!gate.picture(number(2), 4, false));
   gate = Recovery::default();

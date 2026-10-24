@@ -33,9 +33,23 @@ pub(super) struct Recovery {
   minimum_poc: Option<i32>,
 }
 impl Recovery {
-  pub(super) fn begin(&mut self, point: Point, frame: Number) {
+  pub(super) fn begin(
+    &mut self,
+    point: Point,
+    frame: Number,
+  ) -> io::Result<()> {
+    // H.264 D.2.8 bounds the count before modulo MaxFrameNum is
+    // applied. Normalizing an invalid count would publish damaged
+    // recovery pictures as soon as the wrapped target is reached.
+    if point.count >= frame.modulus() {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "H264 recovery count exceeds active frame number domain",
+      ));
+    }
     self.target = Some(frame.advance(point.count));
     self.minimum_poc = None;
+    Ok(())
   }
 
   pub(super) fn picture(
