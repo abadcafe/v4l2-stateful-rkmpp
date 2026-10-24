@@ -25,7 +25,7 @@ from tests.support.stream import Codec
     "codec,file,width,height,count",
     [
         (Codec.H264, "h264-paff.h264", 720, 576, 12),
-        # Known failure on the tested RK3588 vendor/rockchip-mpp stack:
+        # Reproduced on RK3588 vendor 6.1.115 with rockchip_mpp SDK 1.3.10:
         # all 40 frames reach EOS, but presentation indices (zero-based)
         # 22, 23, 29, 30, 31, 33, 34, 38, 39 differ from the software reference.
         # MMCO 5 resets H.264 reference-picture marking and picture-order state.

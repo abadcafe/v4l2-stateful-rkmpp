@@ -150,7 +150,8 @@ def test_h264_advertised_level_preserves_bounded_decode_requirements(
     # 256x128 buffers. Level is a capability declaration: the actual
     # four-buffer requirement fits the bridge and must still decode.
     # An unknown declaration likewise must not override actual bounds.
-    # Known external failure at 255: MPP consumes this IDR without
+    # External failure reproduced with the rockchip_mpp 1.3.10 SDK:
+    # at level 255 MPP consumes this IDR without
     # publishing its image. The direct Decoder regression reproduces
     # the missing output without bridge parsing or presentation state.
     # Keep exact pixels and successful completions as the requirement.

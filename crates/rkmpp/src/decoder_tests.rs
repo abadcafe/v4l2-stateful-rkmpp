@@ -29,7 +29,8 @@ use crate::{Input, Packet, Payload};
 
 #[test]
 fn test_packet_unknown_h264_level_preserves_bounded_picture_output() {
-  // External MPP 1.1.0 failure: a complete IDR with level_idc=255 is
+  // External failure, reproduced with the rockchip_mpp 1.3.10 SDK:
+  // a complete IDR with level_idc=255 is
   // consumed without an image, while the otherwise identical levels
   // 11 and 10 yield both images. This uses Decoder directly, without
   // bridge admission, picture bookkeeping or presentation scheduling.
@@ -130,7 +131,8 @@ fn test_packet_repeated_reference_publishes_each_presentation() {
   decoder.close().unwrap();
   // A show_existing_frame input has no new hardware decode task, but
   // each occurrence must still publish the reference with its own PTS.
-  // MPP 1.1.0 currently queues these internally without publishing them
+  // Reproduced with the rockchip_mpp 1.3.10 SDK: these are queued
+  // internally without being published
   // on the synchronous no-task path. Keep this strict regression red.
   assert_eq!(timestamps, [0, 1, 2, 3]);
 }

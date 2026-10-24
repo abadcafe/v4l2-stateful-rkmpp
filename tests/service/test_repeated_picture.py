@@ -23,7 +23,8 @@ def test_vp9_existing_picture_has_current_presentation_timestamp(
     tmp_path: Path,
     drain_at: int,
 ) -> None:
-    # Known Rockchip MPP 1.1.0 failure: this valid four-presentation stream
+    # External failure reproduced with the rockchip_mpp 1.3.10 SDK:
+    # this valid four-presentation stream
     # produces only the keyframe, both through the installed asynchronous
     # service and through the synchronous candidate. Direct Decoder tests
     # bypass the bridge and reproduce timestamps [0] rather than [0, 1, 2, 3].
@@ -32,7 +33,8 @@ def test_vp9_existing_picture_has_current_presentation_timestamp(
     # non-EOS no-task path. That explains the synchronous reproduction only.
     # MPP remains unmodified by user decision. Keep the exact assertions;
     # this external blocker must not hide regressions in the remaining work.
-    # Evidence: tests/CONFORMANCE.md, target/unified-execution/evidence/.
+    # Executable reproduction: crates/rkmpp/src/decoder_tests.rs,
+    # test_packet_repeated_reference_publishes_each_presentation.
     source = artifacts / "vp9-yuv420p.ivf"
     key = accepted(load(Codec.VP9, source))[0].data
     # VP9 profile 0, show_existing_frame=1, frame_to_show_map_idx=0.

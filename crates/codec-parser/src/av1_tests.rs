@@ -6,8 +6,8 @@ use super::av1::Validator;
 #[test]
 fn test_validate_ignores_obu_reserved_header_bit_without_losing_prediction()
  {
-  // AV1 6.2.2 requires decoders to ignore obu_reserved_1bit. Known
-  // failure in the installed GStreamer: identifying [0x13, 0] returns
+  // AV1 6.2.2 requires decoders to ignore obu_reserved_1bit.
+  // Reproduced with GStreamer codecparsers 1.28.8: [0x13, 0] returns
   // BITSTREAM_ERROR, while [0x12, 0] succeeds, even without this crate.
   // The bridge must not duplicate that rejection. Keep the acceptance
   // assertion so updating the native dependency verifies the contract;
@@ -32,9 +32,10 @@ fn test_validate_ignores_obu_reserved_header_bit_without_losing_prediction()
 #[test]
 fn test_validate_ignores_obu_extension_reserved_bits() {
   // AV1 6.2.3 also requires extension_header_reserved_3bits to be
-  // ignored. The installed GStreamer rejects [0x16, 7, 0] directly
-  // with BITSTREAM_ERROR before semantic admission. External failure;
-  // preserve the normative acceptance assertion without patching it.
+  // ignored. GStreamer codecparsers 1.28.8 rejects [0x16, 7, 0]
+  // directly with BITSTREAM_ERROR before semantic admission. External
+  // failure; preserve the normative acceptance assertion without
+  // patching it.
   let admission =
     Validator::new().unwrap().validate(&[0x16, 7, 0], 0).unwrap();
   assert!(admission.units.is_empty());

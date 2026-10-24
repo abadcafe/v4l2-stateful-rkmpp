@@ -1,6 +1,7 @@
 //! module: rkmpp::decoder; responsibility: manage a nonblocking decoder
 //! and its callbacks. operations: new, packet/frame, output
-//! configuration, reset/close; entities: Decoder, Submission.
+//! configuration, reset/close; entities: Decoder, Submission, Config,
+//! Control, Handle. Control binds each command to its parameter type.
 //! tests: decoder_tests, mpp_tests and public V4L2 codec/pixel/recovery
 //! tests.
 use std::ffi::c_void;
@@ -20,6 +21,21 @@ use super::ffi::{
   mpp_dec_cfg_set_ptr, mpp_destroy, mpp_init,
 };
 struct Config(Handle);
+// Command-specific storage is part of the request type. A caller cannot
+// pair a timeout command with a u32, or an SDK handle with scalar
+// storage.
+enum Control<'a> {
+  FramedInput,
+  NoDeinterlace,
+  NoThreads,
+  ImmediateOutput,
+  NonblockingInput,
+  NonblockingOutput,
+  ReadConfig(&'a mut Config),
+  WriteConfig(&'a Config),
+  Output(&'a Group),
+  InfoReady,
+}
 impl Drop for Config {
   fn drop(&mut self) {
     unsafe {
@@ -72,16 +88,12 @@ impl Decoder {
     codec: u32,
     notify: F,
   ) -> io::Result<Self> {
-    let (coding, split) = match codec.to_le_bytes() {
-      [b'H', b'2', b'6', b'4'] => {
-        (super::ffi::MPP_VIDEO_CODING_AVC, 0u32)
-      }
-      [b'H', b'E', b'V', b'C'] => {
-        (super::ffi::MPP_VIDEO_CODING_HEVC, 0)
-      }
-      [b'V', b'P', b'8', b'0'] => (super::ffi::MPP_VIDEO_CODING_VP8, 0),
-      [b'V', b'P', b'9', b'0'] => (super::ffi::MPP_VIDEO_CODING_VP9, 0),
-      [b'A', b'V', b'0', b'1'] => (super::ffi::MPP_VIDEO_CODING_AV1, 0),
+    let coding = match codec.to_le_bytes() {
+      [b'H', b'2', b'6', b'4'] => super::ffi::MPP_VIDEO_CODING_AVC,
+      [b'H', b'E', b'V', b'C'] => super::ffi::MPP_VIDEO_CODING_HEVC,
+      [b'V', b'P', b'8', b'0'] => super::ffi::MPP_VIDEO_CODING_VP8,
+      [b'V', b'P', b'9', b'0'] => super::ffi::MPP_VIDEO_CODING_VP9,
+      [b'A', b'V', b'0', b'1'] => super::ffi::MPP_VIDEO_CODING_AV1,
       _ => {
         return Err(io::Error::new(
           io::ErrorKind::InvalidInput,
@@ -111,7 +123,7 @@ impl Decoder {
         return Err(error);
       }
     };
-    let mut decoder = Self {
+    let decoder = Self {
       context: Some(context),
       api,
       group: None,
@@ -124,40 +136,19 @@ impl Decoder {
       retired: Vec::new(),
       callback: Box::new(notify),
     };
-    decoder.control(
-      super::ffi::MPP_DEC_SET_PARSER_SPLIT_MODE,
-      (&split as *const u32).cast_mut().cast(),
-    )?;
-    let zero = 0u32;
-    decoder.control(
-      super::ffi::MPP_DEC_SET_ENABLE_DEINTERLACE,
-      (&zero as *const u32).cast_mut().cast(),
-    )?;
-    let one = 1u32;
-    decoder.control(
-      super::ffi::MPP_SET_DISABLE_THREAD,
-      (&one as *const u32).cast_mut().cast(),
-    )?;
-    decoder.control(
-      super::ffi::MPP_DEC_SET_IMMEDIATE_OUT,
-      (&one as *const u32).cast_mut().cast(),
-    )?;
+    decoder.control(Control::FramedInput)?;
+    decoder.control(Control::NoDeinterlace)?;
+    decoder.control(Control::NoThreads)?;
+    decoder.control(Control::ImmediateOutput)?;
     check("init", unsafe {
       mpp_init(context.as_ptr(), super::ffi::MPP_CTX_DEC, coding)
     })?;
-    let timeout = 0i64;
-    decoder.control(
-      super::ffi::MPP_SET_OUTPUT_TIMEOUT,
-      (&timeout as *const i64).cast_mut().cast(),
-    )?;
-    decoder.control(
-      super::ffi::MPP_SET_INPUT_TIMEOUT,
-      (&timeout as *const i64).cast_mut().cast(),
-    )?;
+    decoder.control(Control::NonblockingOutput)?;
+    decoder.control(Control::NonblockingInput)?;
     let mut config = std::ptr::null_mut();
     check("config init", unsafe { mpp_dec_cfg_init(&mut config) })?;
-    let config = Config(config);
-    decoder.control(super::ffi::MPP_DEC_GET_CFG, config.0)?;
+    let mut config = Config(config);
+    decoder.control(Control::ReadConfig(&mut config))?;
     let callback = notify_ready::<F> as *const () as Handle;
     let context = (&*decoder.callback
       as *const (dyn Fn() -> io::Result<()> + Send + Sync))
@@ -170,18 +161,57 @@ impl Decoder {
         mpp_dec_cfg_set_ptr(config.0, key.as_ptr(), value)
       })?;
     }
-    decoder.control(super::ffi::MPP_DEC_SET_CFG, config.0)?;
+    decoder.control(Control::WriteConfig(&config))?;
     Ok(decoder)
   }
 
-  fn control(
-    &mut self,
-    command: u32,
-    parameter: Handle,
-  ) -> io::Result<()> {
-    // SAFETY: all callers are this owner; the context remains live and
-    // parameters have the specific MPP control command's
-    // representation.
+  fn control(&self, request: Control<'_>) -> io::Result<()> {
+    let mut zero = 0u32;
+    let mut one = 1u32;
+    let mut timeout = 0i64;
+    let (command, parameter) = match request {
+      Control::FramedInput => (
+        super::ffi::MPP_DEC_SET_PARSER_SPLIT_MODE,
+        (&mut zero as *mut u32).cast(),
+      ),
+      Control::NoDeinterlace => (
+        super::ffi::MPP_DEC_SET_ENABLE_DEINTERLACE,
+        (&mut zero as *mut u32).cast(),
+      ),
+      Control::NoThreads => (
+        super::ffi::MPP_SET_DISABLE_THREAD,
+        (&mut one as *mut u32).cast(),
+      ),
+      Control::ImmediateOutput => (
+        super::ffi::MPP_DEC_SET_IMMEDIATE_OUT,
+        (&mut one as *mut u32).cast(),
+      ),
+      Control::NonblockingInput => (
+        super::ffi::MPP_SET_INPUT_TIMEOUT,
+        (&mut timeout as *mut i64).cast(),
+      ),
+      Control::NonblockingOutput => (
+        super::ffi::MPP_SET_OUTPUT_TIMEOUT,
+        (&mut timeout as *mut i64).cast(),
+      ),
+      Control::ReadConfig(config) => {
+        (super::ffi::MPP_DEC_GET_CFG, config.0)
+      }
+      Control::WriteConfig(config) => {
+        (super::ffi::MPP_DEC_SET_CFG, config.0)
+      }
+      Control::Output(group) => {
+        (super::ffi::MPP_DEC_SET_EXT_BUF_GROUP, group.handle())
+      }
+      Control::InfoReady => (
+        super::ffi::MPP_DEC_SET_INFO_CHANGE_READY,
+        std::ptr::null_mut(),
+      ),
+    };
+    // SAFETY: the decoder owns the live context; Control constructs
+    // each command's exact parameter representation and retains its
+    // storage throughout this synchronous call. No untyped
+    // parameters escape.
     check("control", unsafe {
       (self.api.control)(
         self.context.unwrap().as_ptr(),
@@ -298,8 +328,7 @@ impl Decoder {
 
   pub fn configure_output(&mut self, ten_bit: bool) -> io::Result<()> {
     let group = Group::new(ten_bit)?;
-    self
-      .control(super::ffi::MPP_DEC_SET_EXT_BUF_GROUP, group.handle())?;
+    self.control(Control::Output(&group))?;
     if let Some(previous) = self.group.replace(group) {
       self.retired.push(previous);
       self.retired.last_mut().unwrap().retire()?;
@@ -351,13 +380,9 @@ impl Decoder {
     let group = self
       .group
       .as_ref()
-      .ok_or_else(|| io::Error::other("decoder has no output group"))?
-      .handle();
-    self.control(super::ffi::MPP_DEC_SET_EXT_BUF_GROUP, group)?;
-    self.control(
-      super::ffi::MPP_DEC_SET_INFO_CHANGE_READY,
-      std::ptr::null_mut(),
-    )?;
+      .ok_or_else(|| io::Error::other("decoder has no output group"))?;
+    self.control(Control::Output(group))?;
+    self.control(Control::InfoReady)?;
     self.info_wait = false;
     Ok(())
   }

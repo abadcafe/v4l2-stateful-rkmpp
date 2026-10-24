@@ -10,7 +10,9 @@
 //! test_complete_info_change_does_not_consume_picture_provenance,
 //! test_finish_retains_pending_presentation_until_it_is_published,
 //! test_drained_requires_every_display_and_field_to_be_completed,
-//! test_plan_is_available_only_while_task_obligation_is_live.
+//! test_plan_is_available_only_while_task_obligation_is_live,
+//! test_finish_hidden_field_pair_reclaims_both_tasks_and_budget,
+//! test_finish_hidden_continuation_retains_visible_pairs_final_plan.
 use codec_parser::Limits;
 
 use super::layout::Layouts;
@@ -209,4 +211,75 @@ fn test_plan_is_available_only_while_task_obligation_is_live() {
   assert_eq!(layouts.plan(serial).unwrap().id(), identity);
   layouts.take(serial).unwrap();
   assert!(layouts.plan(serial).is_err());
+}
+
+#[test]
+fn test_finish_hidden_field_pair_reclaims_both_tasks_and_budget() {
+  let mut layouts = Layouts::default();
+  for identity in 1..=5000 {
+    let mut d = descriptor();
+    d.plan = Plan::new(
+      Id::new(identity),
+      Part::FirstField,
+      vec![],
+      Limits::default(),
+      true,
+      Output::default(),
+    );
+    let first = layouts.push(d.clone()).unwrap();
+    layouts.finish(first);
+    assert!(layouts.drained().is_err());
+    d.plan = Plan::new(
+      Id::new(identity),
+      Part::Continuation,
+      vec![],
+      Limits::default(),
+      true,
+      Output::default(),
+    );
+    let second = layouts.push(d).unwrap();
+    layouts.finish(second);
+    assert!(layouts.drained().is_ok());
+    assert!(layouts.plan(first).is_err());
+    assert!(layouts.plan(second).is_err());
+    assert_eq!(layouts.budget(), 32);
+  }
+}
+
+#[test]
+fn test_finish_hidden_continuation_retains_visible_pairs_final_plan() {
+  for returned_second in [false, true] {
+    let mut layouts = Layouts::default();
+    let mut d = descriptor();
+    d.plan = Plan::new(
+      Id::new(1),
+      Part::FirstField,
+      vec![Id::new(1)],
+      Limits::default(),
+      true,
+      Output { display: true, order: 9, ..Output::default() },
+    );
+    let first = layouts.push(d.clone()).unwrap();
+    layouts.finish(first);
+    d.plan = Plan::new(
+      Id::new(1),
+      Part::Continuation,
+      vec![Id::new(1), Id::new(2)],
+      Limits::default(),
+      true,
+      Output { order: 8, ..Output::default() },
+    );
+    let second = layouts.push(d).unwrap();
+    layouts.finish(second);
+    assert!(layouts.drained().is_err());
+    let picture = layouts
+      .take(if returned_second { second } else { first })
+      .unwrap();
+    assert_eq!(picture.plan.references(), &[Id::new(1), Id::new(2)]);
+    assert_eq!(picture.plan.output().order, 8);
+    assert!(picture.plan.output().display);
+    assert!(layouts.drained().is_ok());
+    assert!(layouts.plan(first).is_err());
+    assert!(layouts.plan(second).is_err());
+  }
 }

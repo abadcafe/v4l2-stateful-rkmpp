@@ -1,7 +1,9 @@
 //! module: backend::layout; responsibility: retain parsed geometry
 //! and picture obligations across source changes. operations: push,
 //! peek, discard_prior, complete, take, finish, drained; entities:
-//! Layouts, Requirements, Picture; tests: layout_tests.
+//! Layouts, Requirements, Picture, Entry; tests: layout_tests,
+//! including hidden complementary-field retirement and final pair
+//! metadata.
 use std::collections::BTreeMap;
 use std::io;
 
@@ -35,16 +37,25 @@ pub(super) struct Picture {
   pub source: crate::timestamp::Source,
   pub plan: crate::picture::Plan,
 }
+// A complementary pair owns one presentation obligation. Its
+// continuation metadata must live as long as the first field, even when
+// that individual task has no display output.
+struct Entry {
+  picture: Picture,
+  continuation: Option<(u64, Picture)>,
+}
 #[derive(Default)]
 pub(super) struct Layouts {
-  pending: BTreeMap<u64, Picture>,
-  pairs: BTreeMap<u64, u64>,
+  pending: BTreeMap<u64, Entry>,
+  continuations: BTreeMap<u64, u64>,
   unpaired: Option<(crate::picture::Id, u64)>,
   serial: u64,
 }
 impl Layouts {
   pub(super) fn budget(&self) -> usize {
-    4096usize.saturating_sub(self.pending.len()).min(32)
+    4096usize
+      .saturating_sub(self.pending.len() + self.continuations.len())
+      .min(32)
   }
 
   pub(super) fn push(&mut self, unit: Descriptor) -> io::Result<u64> {
@@ -80,7 +91,7 @@ impl Layouts {
     } else {
       None
     };
-    if self.pending.len() >= 4096 {
+    if self.pending.len() + self.continuations.len() >= 4096 {
       return Err(io::Error::other(
         "too many access units without decoded frames",
       ));
@@ -91,23 +102,21 @@ impl Layouts {
       .ok_or_else(|| io::Error::other("frame serial exhausted"))?;
     let part = unit.plan.part();
     let identity_of_unit = unit.plan.id();
-    self.pending.insert(
-      self.serial,
-      Picture {
-        requirements,
-        timestamp: unit.timestamp,
-        source: unit.source,
-        plan: unit.plan,
-      },
-    );
+    let picture = Picture {
+      requirements,
+      timestamp: unit.timestamp,
+      source: unit.source,
+      plan: unit.plan,
+    };
     match part {
       crate::picture::Part::Continuation => {
         if let Some((identity, id)) = self.unpaired.take()
           && identity == identity_of_unit
-          && self.pending.contains_key(&id)
+          && let Some(entry) = self.pending.get_mut(&id)
         {
-          self.pairs.insert(id, self.serial);
-          self.pairs.insert(self.serial, id);
+          entry.continuation = Some((self.serial, picture));
+          self.continuations.insert(self.serial, id);
+          return Ok(self.serial);
         }
       }
       crate::picture::Part::FirstField => {
@@ -115,7 +124,18 @@ impl Layouts {
       }
       crate::picture::Part::Frame => self.unpaired = None,
     }
+    self
+      .pending
+      .insert(self.serial, Entry { picture, continuation: None });
     Ok(self.serial)
+  }
+
+  fn picture(&self, id: u64) -> Option<&Picture> {
+    if let Some(first) = self.continuations.get(&id) {
+      self.pending.get(first)?.continuation.as_ref().map(|(_, p)| p)
+    } else {
+      self.pending.get(&id).map(|entry| &entry.picture)
+    }
   }
 
   pub(super) fn plan(
@@ -123,8 +143,7 @@ impl Layouts {
     id: u64,
   ) -> io::Result<&crate::picture::Plan> {
     self
-      .pending
-      .get(&id)
+      .picture(id)
       .map(|picture| &picture.plan)
       .ok_or_else(|| io::Error::other("unknown coded task"))
   }
@@ -136,8 +155,7 @@ impl Layouts {
     height: u32,
   ) -> io::Result<Requirements> {
     self
-      .pending
-      .get(&id)
+      .picture(id)
       .filter(|p| {
         p.requirements
           .is_none_or(|e| e.width == width && e.height == height)
@@ -160,8 +178,7 @@ impl Layouts {
 
   pub(super) fn discard_prior(&self, id: u64) -> io::Result<bool> {
     self
-      .pending
-      .get(&id)
+      .picture(id)
       .map(|p| {
         p.plan.output().before == crate::picture::Boundary::Discard
       })
@@ -191,9 +208,22 @@ impl Layouts {
   /// when the public MPP output queue is empty, and keep a first
   /// field until its complementary field arrives.
   pub(super) fn finish(&mut self, id: u64) {
-    if self.pending.get(&id).is_some_and(|p| {
-      !p.plan.output().display
-        && p.plan.part() != crate::picture::Part::FirstField
+    if let Some(&first) = self.continuations.get(&id) {
+      let hidden = self.pending.get(&first).is_some_and(|entry| {
+        !entry.picture.plan.output().display
+          && entry
+            .continuation
+            .as_ref()
+            .is_some_and(|(_, p)| !p.plan.output().display)
+      });
+      if hidden {
+        self.continuations.remove(&id);
+        self.pending.remove(&first);
+      }
+    } else if self.pending.get(&id).is_some_and(|entry| {
+      entry.continuation.is_none()
+        && !entry.picture.plan.output().display
+        && entry.picture.plan.part() != crate::picture::Part::FirstField
     }) {
       self.pending.remove(&id);
     }
@@ -213,21 +243,16 @@ impl Layouts {
   }
 
   pub(super) fn take(&mut self, id: u64) -> io::Result<Picture> {
-    let id = if let Some(other) = self.pairs.remove(&id) {
-      self.pairs.remove(&other);
-      if let Some(second) = self.pending.remove(&id.max(other))
-        && let Some(first) = self.pending.get_mut(&id.min(other))
-      {
-        first.plan.complete_pair(&second.plan)?;
-      }
-      id.min(other)
-    } else {
-      id
-    };
-    self.pending.remove(&id).ok_or_else(|| {
+    let first = self.continuations.get(&id).copied().unwrap_or(id);
+    let mut entry = self.pending.remove(&first).ok_or_else(|| {
       io::Error::other(format!(
         "MPP frame {id} has no live task metadata"
       ))
-    })
+    })?;
+    if let Some((second, continuation)) = entry.continuation {
+      self.continuations.remove(&second);
+      entry.picture.plan.complete_pair(&continuation.plan)?;
+    }
+    Ok(entry.picture)
   }
 }
