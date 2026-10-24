@@ -6,9 +6,8 @@ use std::collections::HashSet;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::{io, mem};
-mod memory;
-#[cfg(test)]
-mod memory_tests;
+
+use crate::memory;
 
 #[derive(Debug)]
 pub struct Response {

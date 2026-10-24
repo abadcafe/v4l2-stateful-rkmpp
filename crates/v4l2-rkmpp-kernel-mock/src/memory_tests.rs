@@ -1,4 +1,4 @@
-//! module: rpc::memory_tests; responsibility: define kernel-checked
+//! module: memory_tests; responsibility: define kernel-checked
 //! user-address copies through the memory module's public interface.
 //! operations: test entrypoints; entities: Mapping; tests:
 //! test_read_and_write_copy_exact_live_extent,

@@ -3,12 +3,16 @@
 //! none; tests: lib_tests, Python service process acceptance.
 #[cfg(test)]
 mod lib_tests;
+mod memory;
+#[cfg(test)]
+mod memory_tests;
 
 /// Open a native file, redirecting only the selected test control path.
 ///
 /// # Safety
-/// pathname must address a C string and flags must have their required
-/// optional mode argument, as specified by Linux open64.
+/// flags must have their required optional mode argument, as specified
+/// by Linux open64. Linux validates pathname, including invalid
+/// addresses.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn open64(
@@ -24,12 +28,12 @@ pub unsafe extern "C" fn open64(
   core::arch::naked_asm!("jmp {}", sym dispatch_open);
 }
 
-unsafe extern "C" fn dispatch_open(
+extern "C" fn dispatch_open(
   pathname: *const libc::c_char,
   flags: libc::c_int,
   mode: usize,
 ) -> libc::c_int {
-  use std::ffi::{CStr, CString};
+  use std::ffi::CString;
   use std::os::unix::ffi::OsStrExt;
   let mode = if flags & libc::O_CREAT != 0
     || flags & libc::O_TMPFILE == libc::O_TMPFILE
@@ -39,20 +43,37 @@ unsafe extern "C" fn dispatch_open(
   } else {
     0
   };
-  let redirected = if !pathname.is_null()
-    // SAFETY: pathname is the caller's live C string for this call.
-    && unsafe { CStr::from_ptr(pathname) }.to_bytes()
-      == b"/dev/v4l2-rkmpp-control"
-    && std::env::var_os("RKMPP_TEST_KERNEL_SOCKET").is_some()
-  {
-    std::env::var_os("RKMPP_TEST_KERNEL_CONTROL")
-      .and_then(|value| CString::new(value.as_bytes()).ok())
+  let redirected = if std::env::var_os("RKMPP_TEST_KERNEL_SOCKET")
+    .is_some()
+    && memory::read(
+      pathname as usize,
+      c"/dev/v4l2-rkmpp-control".to_bytes_with_nul().len(),
+    )
+    .is_ok_and(|bytes| {
+      bytes == c"/dev/v4l2-rkmpp-control".to_bytes_with_nul()
+    }) {
+    let Some(destination) =
+      std::env::var_os("RKMPP_TEST_KERNEL_CONTROL")
+        .and_then(|value| CString::new(value.as_bytes()).ok())
+    else {
+      // Selecting the mock is an isolation boundary. Missing setup
+      // must never fall through to the real kernel control device.
+      // SAFETY: errno is this calling thread's libc error slot.
+      unsafe {
+        *libc::__errno_location() = libc::EINVAL;
+      }
+      return -1;
+    };
+    Some(destination)
   } else {
     None
   };
   let target =
     redirected.as_ref().map_or(pathname, |value| value.as_ptr());
-  // SAFETY: target remains live until the native openat call returns.
+  // SAFETY: any redirected string remains live through the syscall.
+  // Other addresses are checked by Linux, never dereferenced here. A
+  // short path at a page boundary need not permit the full probe read;
+  // failed probes still delegate to the native openat contract.
   unsafe {
     libc::syscall(libc::SYS_openat, libc::AT_FDCWD, target, flags, mode)
       as i32

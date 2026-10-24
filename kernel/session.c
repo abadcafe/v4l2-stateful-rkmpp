@@ -900,7 +900,7 @@ static int reply(struct rb_session *s, const struct rb_message *m) {
         !s->cap_started || !m->count || m->count != s->capture_token[m->index])
       return -ESTALE;
     b = s->capture.bufs[m->index];
-    if (m->field > 5 || m->bytesused > rb_capture_size(s->capture_contract) ||
+    if (rb_format_validate_frame(s->format, m) ||
         m->bytesused > vb2_plane_size(b, 0))
       return -EINVAL;
     s->available[m->index] = false;
@@ -1042,7 +1042,6 @@ static int attach_service(struct rb_session *s) {
   fd = rb_endpoint_open(s, s->incarnation, &endpoint_ops);
   if (fd < 0) {
     s->attached = false;
-    fail(s);
   }
   mutex_unlock(&s->lock);
   if (fd < 0)

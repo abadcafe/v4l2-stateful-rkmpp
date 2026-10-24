@@ -128,7 +128,7 @@ def test_accept_closed_pending_video_is_removed_and_next_video_remains_usable(
                 peer.close()
 
 
-def test_accept_fd_exhaustion_poisoning_releases_failed_session_reference(
+def test_accept_fd_exhaustion_preserves_pending_session_and_fifo(
     kernel_owner: Path,
 ) -> None:
     with (
@@ -159,19 +159,21 @@ def test_accept_fd_exhaustion_poisoning_releases_failed_session_reference(
             for fd in fds:
                 fd.close()
             resource.setrlimit(resource.RLIMIT_NOFILE, old_limit)
-        assert video.poll(0) & select.POLLERR
-        for result in (output.dequeue(), video.start(), output.queue(0, 16)):
-            assert isinstance(result, Rejected) and result.code == errno.EIO
-        empty = ioctl(broker.fd, ACCEPT)
-        assert isinstance(empty, Rejected) and empty.code == errno.EAGAIN
-        # A failed admission must not strand another client or poison the broker.
+        assert not video.poll(0) & select.POLLERR
+        # A later offer cannot overtake the transaction that hit pressure.
         with accepted(Video.open(Path("/dev/video0"))) as other:
-            peer = Session(OwnedFd(accepted(ioctl(broker.fd, ACCEPT))))
-            try:
+            with Session(OwnedFd(accepted(ioctl(broker.fd, ACCEPT)))) as peer:
+                packet = present(accepted(peer.exchange()).event(0))
+                assert packet.kind == Event.PACKET and packet.index == 0
+                reply = packet.clone()
+                reply.kind = Reply.INPUT_DONE
+                assert present(accepted(peer.exchange([reply])).result(0)) == 0
+                assert accepted(output.dequeue()).index == 0
+            with Session(OwnedFd(accepted(ioctl(broker.fd, ACCEPT)))) as peer:
                 assert accepted(peer.exchange()).event_count == 0
                 assert accepted(Queue(other.fd, QueueType.OUTPUT).request(1)) == 1
-            finally:
-                peer.close()
+            empty = ioctl(broker.fd, ACCEPT)
+            assert isinstance(empty, Rejected) and empty.code == errno.EAGAIN
 
 
 def test_failed_reply_has_no_effect_on_another_open_session(kernel_owner: Path) -> None:

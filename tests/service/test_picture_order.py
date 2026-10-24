@@ -38,8 +38,7 @@ from tests.support.stream import Codec
         # temporary decode surfaces are allocated.
         # This localizes the failure to the MPP/vendor decode path, but does
         # not establish whether the library, kernel driver or hardware causes it.
-        # User decision: leave MPP unchanged and continue the other architecture
-        # work. Evidence: tests/CONFORMANCE.md and target/review5/mmco-comparison.json.
+        # This dependency failure remains outside the project's repair scope.
         # Keep the exact pixel assertion: do not skip, xfail, or bless bad hashes.
         (Codec.H264, "h264-mmco5.h264", 176, 144, 40),
         (Codec.HEVC, "hevc-no-prior-a.hevc", 832, 480, 40),

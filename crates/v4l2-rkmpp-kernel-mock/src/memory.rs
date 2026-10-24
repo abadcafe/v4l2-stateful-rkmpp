@@ -1,4 +1,4 @@
-//! module: rpc::memory; responsibility: copy ioctl user memory through
+//! module: memory; responsibility: copy syscall user memory through
 //! kernel-validated addresses. operations: read, write; entities: none;
 //! tests: memory_tests. Invalid pointers never become Rust references.
 use std::io;

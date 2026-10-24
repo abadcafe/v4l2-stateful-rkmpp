@@ -123,6 +123,23 @@ def test_frame_reply_completes_once_preserves_timestamp_and_recycles(
     assert accepted(session.queue.dequeue()).sequence == 1
 
 
+@pytest.mark.parametrize("bytesused", [0, 1, 6143])
+def test_frame_reply_incomplete_success_preserves_queued_capture_slot(
+    capture_session: CaptureSession, bytesused: int
+) -> None:
+    session = capture_session
+    reply = frame(session.queued[0])
+    reply.bytesused = bytesused
+    assert present(accepted(session.raw.service.exchange([reply])).result(0)) == (
+        -errno.EINVAL
+    )
+    pending = session.queue.dequeue()
+    assert isinstance(pending, Rejected) and pending.code == errno.EAGAIN
+    reply.bytesused = 6144
+    assert present(accepted(session.raw.service.exchange([reply])).result(0)) == 0
+    assert accepted(session.queue.dequeue()).bytesused == (6144,)
+
+
 @pytest.mark.parametrize(
     "field", ["pool", "generation", "index", "token", "zero-token", "payload"]
 )

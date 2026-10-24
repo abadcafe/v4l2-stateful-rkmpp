@@ -69,9 +69,14 @@ static long broker_ioctl(struct file *f, unsigned cmd, unsigned long arg) {
       return -ERESTARTSYS;
   }
   offer = list_first_entry(&pending_sessions, struct rb_offer, pending);
-  list_del_init(&offer->pending);
-  atomic_dec(&pending_count);
   fd = offer->attach(offer->owner);
+  /* Admission commits only after an endpoint was allocated. Transient
+   * allocation/fd pressure must retain the head offer and its FIFO order.
+   * EPIPE means that the session itself is no longer admissible. */
+  if (fd >= 0 || fd == -EPIPE) {
+    list_del_init(&offer->pending);
+    atomic_dec(&pending_count);
+  }
   mutex_unlock(&broker_lock);
   return fd;
 }
