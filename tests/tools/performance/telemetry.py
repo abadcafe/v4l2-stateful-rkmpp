@@ -80,11 +80,17 @@ class Sampler:
 
     @classmethod
     def open(
-        cls, browser_pid: int, bridge: Running, desktop_pid: int | None = None
+        cls,
+        browser_pid: int,
+        bridge: Running,
+        desktop_pid: int | None = None,
+        *,
+        origin: float,
     ) -> Result[Sampler]:
         if browser_pid <= 0 or (desktop_pid is not None and desktop_pid <= 0):
             return Rejected(errno.EINVAL, "invalid workload process identity")
-        start = time.monotonic()
+        if not math.isfinite(origin) or not 0 <= origin <= time.monotonic():
+            return Rejected(errno.EINVAL, "invalid measurement origin")
         counters = cpu.processes(browser_pid, desktop_pid)
         process_time = time.monotonic()
         if isinstance(counters, Rejected):
@@ -104,7 +110,7 @@ class Sampler:
                 desktop_pid,
                 counters.value,
                 status.value.cpu_seconds,
-                start,
+                origin,
                 process_time,
                 bridge_time,
             )

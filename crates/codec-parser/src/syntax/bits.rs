@@ -147,7 +147,9 @@ impl<'a> Bits<'a> {
     Ok(())
   }
 
-  pub fn ue(&mut self) -> io::Result<u32> {
+  // The signed domain needs codeNum=2^32 for i32::MIN. Decode the
+  // codeword independently of either public integer representation.
+  fn code(&mut self) -> io::Result<u64> {
     let mut zeros = 0;
     while self.get(1)? == 0 {
       zeros += 1;
@@ -158,7 +160,11 @@ impl<'a> Bits<'a> {
         ));
       }
     }
-    u32::try_from((1u64 << zeros) - 1 + u64::from(self.get(zeros)?))
+    Ok((1u64 << zeros) - 1 + u64::from(self.get(zeros)?))
+  }
+
+  pub fn ue(&mut self) -> io::Result<u32> {
+    u32::try_from(self.code()?)
       .map_err(|_| io::Error::other("unsigned Exp-Golomb overflow"))
   }
 
@@ -170,12 +176,9 @@ impl<'a> Bits<'a> {
   }
 
   pub fn se(&mut self) -> io::Result<i32> {
-    let value = self.ue()?;
-    let signed = if value & 1 != 0 {
-      i64::from(value).div_euclid(2) + 1
-    } else {
-      -i64::from(value) / 2
-    };
+    let value = self.code()? as i64;
+    let signed =
+      if value & 1 != 0 { value / 2 + 1 } else { -value / 2 };
     i32::try_from(signed)
       .map_err(|_| io::Error::other("signed Exp-Golomb overflow"))
   }

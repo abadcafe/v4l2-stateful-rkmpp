@@ -7,6 +7,7 @@ Unavailable callbacks remain missing data, never a zero latency measurement.
 
 import errno
 import math
+from time import monotonic
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -32,17 +33,26 @@ class _Observed(BaseModel):
 
 
 class Presentation(_Observed):
+    # The renderer installs its performance.now origin during this host-side
+    # CDP round trip. Keep the uncertainty instead of asserting clock equality.
+    origin_earliest_seconds: float
+    origin_latest_seconds: float
     availability: Literal["available", "no-callbacks", "no-steady-intervals"]
     steady_gap: Distribution | None
     scope: str = "requestVideoFrameCallback observations; physical display scanout is not measured"
 
 
 class Monitor:
-    def __init__(self, tab: Cdp) -> None:
+    def __init__(self, tab: Cdp, earliest: float, latest: float) -> None:
         self._tab: Cdp = tab
+        self._earliest: float = earliest
+        self._latest: float = latest
 
     @classmethod
-    def start(cls, tab: Cdp) -> Result[Monitor]:
+    def start(cls, tab: Cdp, *, origin: float) -> Result[Monitor]:
+        started = monotonic()
+        if not math.isfinite(origin) or not 0 <= origin <= started:
+            return Rejected(errno.EINVAL, "invalid measurement origin")
         installed = tab.evaluate(
             """(()=>{const v=document.querySelector('video');
             const p=window.__rkmppPresentation={callbacks:0,frames:0,first_ms:0,last_ms:0,
@@ -58,7 +68,7 @@ class Monitor:
             return installed
         if not installed.value:
             return Rejected(errno.EIO, "presentation observer was not installed")
-        return Ok(cls(tab))
+        return Ok(cls(tab, started - origin, monotonic() - origin))
 
     def read(self, warmup_seconds: float) -> Result[Presentation]:
         if warmup_seconds < 0 or not math.isfinite(warmup_seconds):
@@ -72,7 +82,10 @@ class Monitor:
             for gap in observed.gaps
             # An interval ending after warmup may still contain startup time.
             # Retain it in raw observations, but summarize only whole intervals.
-            if gap.elapsed - gap.milliseconds / 1000 >= warmup_seconds
+            # Even the earliest possible installation must put the complete
+            # interval after warmup. Slow CDP installation can only exclude
+            # uncertain intervals; it cannot include startup as steady data.
+            if self._earliest + gap.elapsed - gap.milliseconds / 1000 >= warmup_seconds
         ]
         summary: Distribution | None = None
         availability: Literal["available", "no-callbacks", "no-steady-intervals"] = (
@@ -86,6 +99,8 @@ class Monitor:
             availability = "available"
         return Ok(
             Presentation(
+                origin_earliest_seconds=self._earliest,
+                origin_latest_seconds=self._latest,
                 callbacks=observed.callbacks,
                 frames=observed.frames,
                 first_ms=observed.first_ms,

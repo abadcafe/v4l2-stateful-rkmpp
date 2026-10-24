@@ -45,7 +45,7 @@ class _RemoteObject(BaseModel):
 
 
 class _Evaluation(BaseModel):
-    result: _RemoteObject = Field(default_factory=_RemoteObject)
+    result: _RemoteObject
     exceptionDetails: Payload | None = None
 
 

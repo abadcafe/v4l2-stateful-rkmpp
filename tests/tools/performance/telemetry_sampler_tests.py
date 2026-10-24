@@ -79,7 +79,7 @@ def test_read_combines_owned_tree_and_service_self_cpu(
     counters: tuple[Running, list[float], list[float]],
 ) -> None:
     running, clock, service_cpu = counters
-    sampler = accepted(Sampler.open(1, running, 2))
+    sampler = accepted(Sampler.open(1, running, 2, origin=10))
     clock[0] = 11
     service_cpu[0] = 1.25
     sample = accepted(sampler.read())
@@ -87,6 +87,27 @@ def test_read_combines_owned_tree_and_service_self_cpu(
     rate = sample.cpu["chromium"].percent
     assert rate is not None and rate > 0 and sample.gpu_percent == 25
     assert sample.mpp_completed_window_load == {"core0": 12}
+
+
+def test_read_uses_the_measurements_origin_before_counter_initialization(
+    counters: tuple[Running, list[float], list[float]],
+) -> None:
+    running, clock, _ = counters
+    sampler = accepted(Sampler.open(1, running, origin=5))
+    clock[0] = 11
+    sample = accepted(sampler.read())
+    assert sample.elapsed == 6
+    assert sample.cpu["chromium"].interval_start == 5
+    assert sample.cpu["bridge"].interval_start == 5
+
+
+@pytest.mark.parametrize("origin", [float("nan"), float("inf"), -1.0, 11.0])
+def test_open_rejects_an_invalid_measurement_origin(
+    counters: tuple[Running, list[float], list[float]], origin: float
+) -> None:
+    running, _, _ = counters
+    result = Sampler.open(1, running, origin=origin)
+    assert isinstance(result, Rejected) and result.code == errno.EINVAL
 
 
 def test_read_accounts_for_each_counter_acquisition_interval(
@@ -109,7 +130,7 @@ def test_read_accounts_for_each_counter_acquisition_interval(
 
     monkeypatch.setattr(cpu, "processes", delayed_processes)
     monkeypatch.setattr(service_runtime, "measure", delayed_measure)
-    sampler = accepted(Sampler.open(1, running))
+    sampler = accepted(Sampler.open(1, running, origin=10))
     for seconds in (1.0, 3.0):
         delay[0] = seconds
         clock[0] += 1
@@ -122,7 +143,7 @@ def test_read_decreased_cpu_and_unavailable_status_are_errors(
     counters: tuple[Running, list[float], list[float]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     running, clock, service_cpu = counters
-    sampler = accepted(Sampler.open(1, running, 2))
+    sampler = accepted(Sampler.open(1, running, 2, origin=10))
     clock[0] = 11
     service_cpu[0] = 0
     assert isinstance(sampler.read(), Rejected)
@@ -139,14 +160,14 @@ def test_open_invalid_workload_pid_is_an_error(
     counters: tuple[Running, list[float], list[float]],
 ) -> None:
     running, _, _ = counters
-    assert isinstance(Sampler.open(0, running, 2), Rejected)
+    assert isinstance(Sampler.open(0, running, 2, origin=10), Rejected)
 
 
 def test_read_without_compositor_keeps_decode_counters(
     counters: tuple[Running, list[float], list[float]],
 ) -> None:
     running, clock, service_cpu = counters
-    sampler = accepted(Sampler.open(1, running))
+    sampler = accepted(Sampler.open(1, running, origin=10))
     clock[0] = 11
     service_cpu[0] = 1.25
     sample = accepted(sampler.read())
@@ -162,7 +183,7 @@ def test_read_reports_the_interval_of_each_cpu_delta(
     counters: tuple[Running, list[float], list[float]],
 ) -> None:
     running, clock, service_cpu = counters
-    sampler = accepted(Sampler.open(1, running))
+    sampler = accepted(Sampler.open(1, running, origin=10))
     clock[0] = 11
     service_cpu[0] = 2
     first = accepted(sampler.read())
@@ -189,7 +210,7 @@ def test_read_rejects_lost_workload_identity(
     replaced: bool,
 ) -> None:
     running, clock, _ = counters
-    sampler = accepted(Sampler.open(1, running, 2))
+    sampler = accepted(Sampler.open(1, running, 2, origin=10))
     provider = cpu.processes
 
     def changed(browser_pid: int, desktop_pid: int | None) -> Result[Processes]:
@@ -217,7 +238,7 @@ def test_read_tree_churn_retains_gap_then_recovers_from_next_snapshot(
     counters: tuple[Running, list[float], list[float]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     running, clock, service_cpu = counters
-    sampler = accepted(Sampler.open(1, running, 2))
+    sampler = accepted(Sampler.open(1, running, 2, origin=10))
     provider = cpu.processes
 
     def added_worker(browser_pid: int, desktop_pid: int | None) -> Result[Processes]:

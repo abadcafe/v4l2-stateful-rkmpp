@@ -37,7 +37,7 @@ from tests.tools.performance.telemetry import Sampler
 
 
 class Recording(BaseModel):
-    schema_version: Literal[6] = 6
+    schema_version: Literal[7] = 7
     started_at: str
     workload: Workload
     round: int
@@ -198,13 +198,13 @@ def _measure(
     loaded = browser.player.load(browser.url(playback_source.name))
     if isinstance(loaded, Rejected):
         return loaded
-    sampler = Sampler.open(browser.pid, running, options.compositor_pid)
+    started = time.monotonic()
+    sampler = Sampler.open(browser.pid, running, options.compositor_pid, origin=started)
     if isinstance(sampler, Rejected):
         return sampler
-    observer = Monitor.start(browser.tab)
+    observer = Monitor.start(browser.tab, origin=started)
     if isinstance(observer, Rejected):
         return observer
-    started = time.monotonic()
     progress_time = started
     media_time = -1.0
     interval = options.interval_ms / 1000

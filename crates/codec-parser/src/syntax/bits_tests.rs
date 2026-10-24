@@ -98,6 +98,10 @@ fn test_ue_covers_full_unsigned_domain_and_rejects_overflow() {
 #[test]
 fn test_se_covers_signed_range_and_rejects_positive_overflow() {
   assert_eq!(
+    Bits::from_rbsp(&unsigned(1 << 32)).se().unwrap(),
+    i32::MIN
+  );
+  assert_eq!(
     Bits::from_rbsp(&unsigned(u32::MAX as u64 - 2)).se().unwrap(),
     i32::MAX
   );
@@ -106,6 +110,8 @@ fn test_se_covers_signed_range_and_rejects_positive_overflow() {
     -i32::MAX
   );
   assert!(Bits::from_rbsp(&unsigned(u32::MAX as u64)).se().is_err());
+  assert!(Bits::from_rbsp(&unsigned((1 << 32) + 1)).se().is_err());
+  assert!(Bits::from_rbsp(&unsigned((1 << 32) + 2)).se().is_err());
 }
 
 #[test]

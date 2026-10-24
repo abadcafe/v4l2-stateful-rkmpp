@@ -334,6 +334,37 @@ class Answer(BaseModel):
     number: int
 
 
+@pytest.mark.parametrize("reply", [{}, {"exceptionDetails": {"text": "failed"}}])
+def test_evaluate_missing_remote_object_cannot_become_a_successful_null(
+    peer: PeerFactory, reply: dict[str, JsonValue]
+) -> None:
+    def handle(connection: ServerConnection) -> None:
+        request = TypeAdapter(dict[str, JsonValue]).validate_json(connection.recv())
+        connection.send(json.dumps({"id": request["id"], "result": reply}))
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        result = cdp.evaluate("null", type(None))
+        assert isinstance(result, Rejected) and result.code == errno.EPROTO
+
+
+def test_evaluate_null_and_undefined_preserve_valid_remote_objects(
+    peer: PeerFactory,
+) -> None:
+    def handle(connection: ServerConnection) -> None:
+        for remote in (
+            {"type": "object", "subtype": "null", "value": None},
+            {"type": "undefined"},
+        ):
+            request = TypeAdapter(dict[str, JsonValue]).validate_json(connection.recv())
+            connection.send(
+                json.dumps({"id": request["id"], "result": {"result": remote}})
+            )
+
+    with accepted(Cdp.open(peer(handle))) as cdp:
+        assert accepted(cdp.evaluate("null", type(None))) is None
+        assert accepted(cdp.evaluate("undefined", type(None))) is None
+
+
 @pytest.mark.parametrize(
     "reply",
     [
