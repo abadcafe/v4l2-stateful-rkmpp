@@ -30,15 +30,30 @@ pub struct Unit {
   pub boundary: Option<Boundary>,
 }
 impl Unit {
-  pub(super) fn annexb(size: usize) -> Self {
-    Self {
+  pub(super) fn annexb(
+    bytes: &[u8],
+    header_bytes: usize,
+  ) -> io::Result<Self> {
+    // A byte-stream identifier can report NO_NAL_END when the final
+    // start code has no header yet. Our input is already client-framed:
+    // that prefix cannot become part of the preceding parameter set.
+    // Check only the suffix; native identification scans the interior.
+    let tail = &bytes[bytes.len().saturating_sub(2 + header_bytes)..];
+    if tail.windows(3).any(|window| window == [0, 0, 1]) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "incomplete Annex B NAL header",
+      ));
+    }
+    let size = bytes.len();
+    Ok(Self {
       configures_decoder: false,
       prefix: size,
       header: None,
       range: 0..size,
       display: true,
       boundary: None,
-    }
+    })
   }
 
   pub(super) fn sequence_end(

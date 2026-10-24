@@ -84,7 +84,7 @@ impl Validator {
     let mut sequences = BTreeMap::new();
     let mut offset = 0;
     let mut picture: Option<Picture> = None;
-    let mut unit = super::unit::Unit::annexb(bytes.len());
+    let mut unit = super::unit::Unit::annexb(bytes, 2)?;
     while offset < bytes.len() {
       if bytes[offset..].iter().all(|&b| b == 0) {
         break;

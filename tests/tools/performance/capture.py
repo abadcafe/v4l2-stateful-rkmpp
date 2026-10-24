@@ -37,7 +37,7 @@ from tests.tools.performance.telemetry import Sampler
 
 
 class Recording(BaseModel):
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     started_at: str
     workload: Workload
     round: int

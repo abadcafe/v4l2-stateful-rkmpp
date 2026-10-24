@@ -7,10 +7,16 @@
 #include <linux/iosys-map.h>
 #include <linux/slab.h>
 #include <linux/videodev2.h>
+enum rb_access {
+  RB_UNMAPPED_CPU,
+  RB_UNMAPPED_DEVICE,
+  RB_MAPPED_CPU,
+  RB_MAPPED_DEVICE,
+};
 struct rb_memory {
   struct dma_buf *buf;
   enum dma_data_direction direction;
-  bool mapped, cpu_owned;
+  enum rb_access access;
 };
 static void *rb_alloc(struct vb2_buffer *vb, struct device *dev,
                       unsigned long size) {
@@ -35,7 +41,7 @@ static void *rb_alloc(struct vb2_buffer *vb, struct device *dev,
 }
 static void rb_put(void *ptr) {
   struct rb_memory *m = ptr;
-  if (m->cpu_owned)
+  if (m->access == RB_MAPPED_CPU)
     WARN_ON_ONCE(dma_buf_end_cpu_access(m->buf, m->direction));
   dma_buf_put(m->buf);
   kfree(m);
@@ -55,12 +61,14 @@ static int rb_mmap(void *ptr, struct vm_area_struct *vma) {
   int r = dma_buf_mmap(m->buf, vma, 0);
   if (r)
     return r;
-  if (!m->mapped) {
+  if (m->access == RB_UNMAPPED_CPU) {
     r = dma_buf_begin_cpu_access(m->buf, m->direction);
     if (r)
       return r;
-    m->mapped = m->cpu_owned = true;
-  }
+    m->access = RB_MAPPED_CPU;
+  } else if (m->access == RB_UNMAPPED_DEVICE)
+    /* Mapping does not return a queued buffer to its CPU owner. */
+    m->access = RB_MAPPED_DEVICE;
   return 0;
 }
 /* MMAP clients transfer CPU ownership at QBUF/DQBUF. Export-only clients
@@ -68,17 +76,19 @@ static int rb_mmap(void *ptr, struct vm_area_struct *vma) {
  */
 static void rb_prepare(void *ptr) {
   struct rb_memory *m = ptr;
-  if (m->cpu_owned) {
+  if (m->access == RB_MAPPED_CPU) {
     WARN_ON_ONCE(dma_buf_end_cpu_access(m->buf, m->direction));
-    m->cpu_owned = false;
-  }
+    m->access = RB_MAPPED_DEVICE;
+  } else if (m->access == RB_UNMAPPED_CPU)
+    m->access = RB_UNMAPPED_DEVICE;
 }
 static void rb_finish(void *ptr) {
   struct rb_memory *m = ptr;
-  if (m->mapped && !m->cpu_owned) {
+  if (m->access == RB_MAPPED_DEVICE) {
     WARN_ON_ONCE(dma_buf_begin_cpu_access(m->buf, m->direction));
-    m->cpu_owned = true;
-  }
+    m->access = RB_MAPPED_CPU;
+  } else if (m->access == RB_UNMAPPED_DEVICE)
+    m->access = RB_UNMAPPED_CPU;
 }
 static unsigned rb_users(void *ptr) {
   struct rb_memory *m = ptr;

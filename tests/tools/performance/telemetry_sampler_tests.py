@@ -83,9 +83,38 @@ def test_read_combines_owned_tree_and_service_self_cpu(
     clock[0] = 11
     service_cpu[0] = 1.25
     sample = accepted(sampler.read())
-    assert sample.elapsed == 1 and sample.cpu["bridge"] == 25
-    assert sample.cpu["chromium"] > 0 and sample.gpu_percent == 25
+    assert sample.elapsed == 1 and sample.cpu["bridge"].percent == 25
+    assert sample.cpu["chromium"].percent > 0 and sample.gpu_percent == 25
     assert sample.mpp_completed_window_load == {"core0": 12}
+
+
+def test_read_accounts_for_each_counter_acquisition_interval(
+    counters: tuple[Running, list[float], list[float]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    running, clock, service_cpu = counters
+    processes, measure = cpu.processes, service_runtime.measure
+    delay = [2.0]
+
+    def delayed_processes(
+        browser_pid: int, desktop_pid: int | None
+    ) -> Result[Processes]:
+        clock[0] += delay[0]
+        return processes(browser_pid, desktop_pid)
+
+    def delayed_measure(owner: Running) -> Result[Measurement]:
+        clock[0] += 2 * delay[0]
+        service_cpu[0] = clock[0] - 10
+        return measure(owner)
+
+    monkeypatch.setattr(cpu, "processes", delayed_processes)
+    monkeypatch.setattr(service_runtime, "measure", delayed_measure)
+    sampler = accepted(Sampler.open(1, running))
+    for seconds in (1.0, 3.0):
+        delay[0] = seconds
+        clock[0] += 1
+        sample = accepted(sampler.read())
+        assert sample.cpu["chromium"].percent == pytest.approx(100)
+        assert sample.cpu["bridge"].percent == pytest.approx(100)
 
 
 def test_read_decreased_cpu_and_unavailable_status_are_errors(
@@ -121,7 +150,7 @@ def test_read_without_compositor_keeps_decode_counters(
     service_cpu[0] = 1.25
     sample = accepted(sampler.read())
     assert "desktop-compositor" not in sample.cpu
-    assert sample.cpu["bridge"] == 25 and sample.cpu["chromium"] > 0
+    assert sample.cpu["bridge"].percent == 25 and sample.cpu["chromium"].percent > 0
     assert sample.gpu_percent == 25 and sample.mpp_completed_window_load == {
         "core0": 12
     }
@@ -137,8 +166,16 @@ def test_read_reports_the_interval_of_each_cpu_delta(
     first = accepted(sampler.read())
     clock[0] = 20
     second = accepted(sampler.read())
-    assert (first.interval_start, first.elapsed, first.cpu["bridge"]) == (0, 1, 100)
-    assert (second.interval_start, second.elapsed, second.cpu["bridge"]) == (1, 10, 0)
+    assert (
+        first.cpu["bridge"].interval_start,
+        first.elapsed,
+        first.cpu["bridge"].percent,
+    ) == (0, 1, 100)
+    assert (
+        second.cpu["bridge"].interval_start,
+        second.elapsed,
+        second.cpu["bridge"].percent,
+    ) == (1, 10, 0)
 
 
 @pytest.mark.parametrize("pid", [1, 2], ids=["browser", "compositor"])
@@ -171,4 +208,4 @@ def test_read_rejects_lost_workload_identity(
     monkeypatch.setattr(cpu, "processes", provider)
     clock[0] = 12
     sample = accepted(sampler.read())
-    assert (sample.interval_start, sample.elapsed) == (0, 2)
+    assert (sample.cpu["bridge"].interval_start, sample.elapsed) == (0, 2)

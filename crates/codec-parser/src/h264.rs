@@ -120,7 +120,7 @@ impl Validator {
     let mut offset = 0;
     let mut identity = None;
     let mut picture: Option<(Pending, Markings)> = None;
-    let mut unit = super::unit::Unit::annexb(bytes.len());
+    let mut unit = super::unit::Unit::annexb(bytes, 1)?;
     while offset < bytes.len() {
       if bytes[offset..].iter().all(|&b| b == 0) {
         break;

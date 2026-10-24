@@ -10,7 +10,7 @@ import math
 import pytest
 
 from tests.support.outcome import Rejected, accepted
-from tests.tools.performance.report import Sample, describe, summarize
+from tests.tools.performance.report import CpuSample, Sample, describe, summarize
 
 
 @pytest.mark.parametrize(
@@ -20,9 +20,8 @@ def test_summarize_frequency_overflow_returns_error_and_preserves_input(
     frequency: int,
 ) -> None:
     sample = Sample(
-        interval_start=0,
         elapsed=1,
-        cpu={"bridge": 1},
+        cpu={"bridge": CpuSample(interval_start=0, elapsed=1, percent=1)},
         gpu_percent=1,
         gpu_frequency=frequency,
         mpp_completed_window_load={"core": 1},
@@ -61,9 +60,15 @@ def test_describe_invalid_samples_return_error(values: tuple[float, ...]) -> Non
 def test_summarize_excludes_warmup_and_keeps_each_process_and_mpp_core() -> None:
     samples = tuple(
         Sample(
-            interval_start=start,
             elapsed=elapsed,
-            cpu={"chromium": value, "bridge": value / 10},
+            cpu={
+                "chromium": CpuSample(
+                    interval_start=start, elapsed=elapsed, percent=value
+                ),
+                "bridge": CpuSample(
+                    interval_start=start, elapsed=elapsed, percent=value / 10
+                ),
+            },
             gpu_percent=value,
             gpu_frequency=1000000000,
             mpp_completed_window_load={"core0": value / 2},
@@ -78,15 +83,17 @@ def test_summarize_excludes_warmup_and_keeps_each_process_and_mpp_core() -> None
 
 def test_summarize_empty_steady_window_and_inconsistent_counter_sets_fail() -> None:
     first = Sample(
-        interval_start=0,
         elapsed=1,
-        cpu={"chromium": 1},
+        cpu={"chromium": CpuSample(interval_start=0, elapsed=1, percent=1)},
         gpu_percent=1,
         gpu_frequency=1,
         mpp_completed_window_load={"core": 1},
     )
     second = first.model_copy(
-        update={"interval_start": 1, "elapsed": 2, "cpu": {"bridge": 1}}
+        update={
+            "elapsed": 2,
+            "cpu": {"bridge": CpuSample(interval_start=1, elapsed=2, percent=1)},
+        }
     )
     assert isinstance(summarize((first,), 5), Rejected)
     assert isinstance(summarize((first, second), 0), Rejected)
@@ -97,14 +104,18 @@ def test_summarize_labels_mpp_values_without_inventing_freshness() -> None:
     # proc ABI has no timestamp/counter to distinguish an idle stale
     # value from a genuinely constant load. Do not claim realtime usage.
     first = Sample(
-        interval_start=0,
         elapsed=1,
-        cpu={"bridge": 1},
+        cpu={"bridge": CpuSample(interval_start=0, elapsed=1, percent=1)},
         gpu_percent=1,
         gpu_frequency=1,
         mpp_completed_window_load={"core": 42},
     )
-    second = first.model_copy(update={"interval_start": 1, "elapsed": 2})
+    second = first.model_copy(
+        update={
+            "elapsed": 2,
+            "cpu": {"bridge": CpuSample(interval_start=1, elapsed=2, percent=1)},
+        }
+    )
     summary = accepted(summarize((first, second), 0))
     assert summary.mpp_semantics == "last_completed_driver_window_without_freshness"
     assert summary.mpp_completed_window_load["core"].mean == 42
@@ -116,9 +127,12 @@ def test_summarize_cpu_average_accounts_for_unequal_sample_intervals() -> None:
     # average (50%) of the one-second busy and nine-second idle rates.
     samples = tuple(
         Sample(
-            interval_start=start,
             elapsed=elapsed,
-            cpu={"bridge": value},
+            cpu={
+                "bridge": CpuSample(
+                    interval_start=start, elapsed=elapsed, percent=value
+                )
+            },
             gpu_percent=0,
             gpu_frequency=1000000000,
             mpp_completed_window_load={"core": 0},
@@ -139,9 +153,8 @@ def test_summarize_cpu_average_accounts_for_unequal_sample_intervals() -> None:
 )
 def test_summarize_rejects_invalid_cpu_interval(start: float, end: float) -> None:
     sample = Sample(
-        interval_start=start,
         elapsed=end,
-        cpu={"bridge": 1},
+        cpu={"bridge": CpuSample(interval_start=start, elapsed=end, percent=1)},
         gpu_percent=1,
         gpu_frequency=1,
         mpp_completed_window_load={"core": 1},
@@ -151,22 +164,25 @@ def test_summarize_rejects_invalid_cpu_interval(start: float, end: float) -> Non
 
 def test_summarize_rejects_overlapping_intervals() -> None:
     sample = Sample(
-        interval_start=0,
         elapsed=2,
-        cpu={"bridge": 1},
+        cpu={"bridge": CpuSample(interval_start=0, elapsed=2, percent=1)},
         gpu_percent=1,
         gpu_frequency=1,
         mpp_completed_window_load={"core": 1},
     )
-    overlap = sample.model_copy(update={"interval_start": 1, "elapsed": 3})
+    overlap = sample.model_copy(
+        update={
+            "elapsed": 3,
+            "cpu": {"bridge": CpuSample(interval_start=1, elapsed=3, percent=1)},
+        }
+    )
     assert isinstance(summarize((sample, overlap), 0), Rejected)
 
 
 def test_summarize_requires_complete_post_warmup_cpu_interval() -> None:
     sample = Sample(
-        interval_start=0,
         elapsed=10,
-        cpu={"bridge": 50},
+        cpu={"bridge": CpuSample(interval_start=0, elapsed=10, percent=50)},
         gpu_percent=1,
         gpu_frequency=1,
         mpp_completed_window_load={"core": 1},
@@ -177,16 +193,50 @@ def test_summarize_requires_complete_post_warmup_cpu_interval() -> None:
 
 def test_summarize_cpu_average_does_not_assign_load_to_unsampled_gaps() -> None:
     first = Sample(
-        interval_start=0,
         elapsed=1,
-        cpu={"bridge": 100},
+        cpu={"bridge": CpuSample(interval_start=0, elapsed=1, percent=100)},
         gpu_percent=1,
         gpu_frequency=1,
         mpp_completed_window_load={"core": 1},
     )
     second = first.model_copy(
-        update={"interval_start": 9, "elapsed": 10, "cpu": {"bridge": 0}}
+        update={
+            "elapsed": 10,
+            "cpu": {"bridge": CpuSample(interval_start=9, elapsed=10, percent=0)},
+        }
     )
     summary = accepted(summarize((first, second), 0))
     assert summary.cpu["bridge"].observed_seconds == 2
     assert summary.cpu["bridge"].mean_percent == 50
+
+
+def test_summarize_uses_each_source_interval_for_warmup_and_weighting() -> None:
+    samples = (
+        Sample(
+            elapsed=4,
+            cpu={
+                "chromium": CpuSample(interval_start=0, elapsed=2, percent=100),
+                "bridge": CpuSample(interval_start=1, elapsed=4, percent=50),
+            },
+            gpu_percent=0,
+            gpu_frequency=1,
+            mpp_completed_window_load={"core": 0},
+        ),
+        Sample(
+            elapsed=8,
+            cpu={
+                "chromium": CpuSample(interval_start=2, elapsed=7, percent=20),
+                "bridge": CpuSample(interval_start=4, elapsed=8, percent=0),
+            },
+            gpu_percent=0,
+            gpu_frequency=1,
+            mpp_completed_window_load={"core": 0},
+        ),
+    )
+    summary = accepted(summarize(samples, 1))
+    assert summary.cpu["chromium"].observed_seconds == 5
+    assert summary.cpu["chromium"].samples == 1
+    assert summary.cpu["chromium"].mean_percent == 20
+    assert summary.cpu["bridge"].observed_seconds == 7
+    assert summary.cpu["bridge"].samples == 2
+    assert summary.cpu["bridge"].mean_percent == pytest.approx(150 / 7)

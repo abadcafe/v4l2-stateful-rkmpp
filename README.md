@@ -131,10 +131,12 @@ uv run pytest tests/browser
 uv run python -m tests.tools.performance
 ```
 
-`tests/tools/` 根目录只包含工具目录，目前仅有 `performance/`，通过 `python -m tests.tools.performance` 运行，目录内集中放置入口、实现和对应测试。私有 UAPI 的 PyO3 接口与 Rust wire 类型一同位于 `crates/rkmpp-bridge-uapi/`，uv 将同一个 crate 作为本地 Python 依赖构建。所有包位于同一个 Cargo workspace，开发构建使用 dev profile 与根目录 `target/`。浏览器测试和性能工具共同使用的视频扩展功能位于 `tests/support/video_expansion.py`。
+`tests/tools/` 根目录只包含工具目录，目前仅有 `performance/`，通过 `python -m tests.tools.performance` 运行，目录内集中放置入口、实现和对应测试。
 
 性能工具测量 H.264、VP9、AV1 4K30 的 CPU/GPU/MPP 占用与丢帧，报告保存到 `target/benchmarks/`；需对 `/proc/mpp_service/load_interval` 配置 video 组写权限。
 
 性能工具默认不采集合成器 CPU，可用 `--compositor-pid PID` 显式指定；报告中的 GPU、MPP 和合成器负载是共享负载。
 
-性能报告格式为 v4。丢帧率使用完整预热后观察窗口的帧计数差值，并记录窗口起止时间；原始整段播放累计计数另行保留。没有足够的预热后观察帧时报告缺少数据，不生成零丢帧率。
+CPU 原始样本按计数器保存 `interval_start`、`elapsed` 和 `percent`。进程树和服务诊断分别以采集完成时刻标记观测，分别排除跨越预热边界的区间，并按各自实际观测时长计算平均值；采集不是原子快照。硬件样本的 `elapsed` 表示本轮采集完成时间，不替代 CPU 计数器的区间。
+
+丢帧率使用完整预热后观察窗口的帧计数差值，并记录窗口起止时间；原始整段播放累计计数另行保留。没有足够的预热后观察帧时报告缺少数据，不生成零丢帧率。

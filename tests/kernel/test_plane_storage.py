@@ -5,6 +5,7 @@ operations: pytest cases; entities: none; tests: layout, export, mapping lifetim
 
 import errno
 
+import pytest
 from rkmpp_bridge_uapi import VERSION, Message, Reply
 
 from tests.support.dmabuf import read_bytes
@@ -12,6 +13,27 @@ from tests.support.kernel_peer import Peer
 from tests.support.outcome import accepted, present
 from tests.support.queue import Queue, QueueType
 from tests.support.video_formats import enumerate_formats, get_format
+
+
+@pytest.mark.parametrize("kind", [QueueType.OUTPUT, QueueType.CAPTURE])
+def test_map_after_queue_preserves_ownership_and_reuse(
+    raw_session: Peer, kind: QueueType
+) -> None:
+    queue = Queue(raw_session.video.fd, kind)
+    assert accepted(queue.request(2)) == 2
+    accepted(queue.queue(0, 16 if kind == QueueType.OUTPUT else 0))
+    # Mapping a queued buffer is legal; CPU access must wait for its return.
+    with accepted(queue.map(0)) as first, accepted(queue.map(0)) as second:
+        assert accepted(queue.query(0)).flags & 2
+        accepted(queue.stream_off())
+        first[:16] = b"A" * 16
+        assert second[:16] == b"A" * 16
+        accepted(queue.queue(0, 16 if kind == QueueType.OUTPUT else 0))
+        accepted(queue.stream_off())
+        assert first[:16] == b"A" * 16
+    with accepted(queue.map(0)) as again:
+        assert again[:16] == b"A" * 16
+    assert accepted(queue.request(0)) == 0
 
 
 def test_layout_rejects_partial_chroma_pairs_without_publication(

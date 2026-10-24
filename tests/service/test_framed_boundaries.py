@@ -13,7 +13,42 @@ from tests.support.mock_decode import play
 from tests.support.mock_process import Process
 from tests.support.outcome import accepted
 from tests.support.reference import frame_hashes
-from tests.support.stream import Codec, load
+from tests.support.stream import Codec, Packet, load
+
+
+@pytest.mark.parametrize(
+    "codec,file,tail",
+    [
+        (Codec.H264, "h264-yuv420p.h264", b"\x00\x00\x01"),
+        (Codec.HEVC, "hevc-yuv420p.hevc", b"\x00\x00\x01"),
+        (Codec.HEVC, "hevc-yuv420p.hevc", b"\x00\x00\x01\x40"),
+    ],
+)
+@pytest.mark.parametrize("established", [False, True])
+def test_incomplete_annexb_tail_reports_damage_and_preserves_recovery(
+    mock_service: Process,
+    artifacts: Path,
+    codec: Codec,
+    file: str,
+    tail: bytes,
+    established: bool,
+) -> None:
+    source = artifacts / file
+    packets = accepted(load(codec, source))
+    prefix = packets if established else ()
+    bad = Packet(data=packets[0].data + tail, timestamp=0)
+    submissions = (*prefix, bad, *packets)
+    result = accepted(
+        play(mock_service, codec, source, 2, input_count=1, submissions=submissions)
+    )
+    assert result.eos and not result.errors
+    assert tuple(bool(done.flags & 2) for done in result.input_completions) == (
+        tuple(index == len(prefix) for index in range(len(submissions))) * 2
+    )
+    expected = accepted(frame_hashes(source, 8, 256, 128))
+    assert tuple(frame.digest for frame in result.frames) == expected * (
+        4 if established else 2
+    )
 
 
 @pytest.mark.parametrize(
@@ -87,8 +122,6 @@ def test_missing_partition_reports_error_and_recovers_across_reset(
 def test_access_unit_combined_termination_delivers_picture_before_eos(
     mock_service: Process, artifacts: Path, codec: Codec, file: str, tail: bytes
 ) -> None:
-    from tests.support.stream import Packet
-
     stream = artifacts / file
     first = accepted(load(codec, stream))[0]
     result = accepted(

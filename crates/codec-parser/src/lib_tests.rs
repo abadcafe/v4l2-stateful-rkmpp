@@ -4,6 +4,59 @@
 use crate::Validator;
 
 #[test]
+fn test_validate_incomplete_annexb_tail_never_poison_configuration() {
+  for (codec, packet, tails) in [
+    (
+      *b"H264",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/h264-yuv420p.h264"
+      ))[..4454],
+      &[&[0, 0, 1][..], &[0, 0, 0, 1]][..],
+    ),
+    (
+      *b"HEVC",
+      &include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/artifacts/hevc-yuv420p.hevc"
+      ))[..5496],
+      &[&[0, 0, 1][..], &[0, 0, 0, 1], &[0, 0, 1, 0x40]][..],
+    ),
+  ] {
+    let mut seed = Validator::new(u32::from_le_bytes(codec)).unwrap();
+    seed.validate(packet, 1).unwrap();
+    let configuration = seed.configuration();
+    for established in [false, true] {
+      for tail in tails {
+        for input in [packet, configuration.as_slice()] {
+          let mut parser =
+            Validator::new(u32::from_le_bytes(codec)).unwrap();
+          if established {
+            parser.validate(packet, 1).unwrap();
+          }
+          let previous = parser.configuration();
+          let mut truncated = input.to_vec();
+          truncated.extend_from_slice(tail);
+          assert!(
+            parser.validate(&truncated, 1).is_err(),
+            "codec {codec:?}, tail {tail:?}"
+          );
+          assert_eq!(parser.configuration(), previous);
+          parser.reset().unwrap();
+          parser.validate(packet, 1).unwrap();
+        }
+      }
+    }
+    // Annex B trailing_zero_8bits are framing, not a truncated NAL.
+    let mut padded = configuration.to_vec();
+    padded.extend([0; 16]);
+    seed.validate(&padded, 0).unwrap();
+    assert_eq!(seed.configuration(), configuration);
+    seed.reset().unwrap();
+  }
+}
+
+#[test]
 fn test_admit_rejected_update_restores_nonempty_preceding_configuration()
  {
   for (codec, previous, replacement) in [

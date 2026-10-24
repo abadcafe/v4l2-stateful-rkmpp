@@ -60,13 +60,17 @@ class Sampler:
         desktop_pid: int | None,
         initial: cpu.Processes,
         bridge_cpu: float,
+        start: float,
+        process_time: float,
+        bridge_time: float,
     ) -> None:
         self._browser_pid: int = browser_pid
         self._bridge: Running = bridge
         self._bridge_cpu: float = bridge_cpu
         self._desktop_pid: int | None = desktop_pid
-        self._start: float = time.monotonic()
-        self._previous_time: float = self._start
+        self._start: float = start
+        self._process_time: float = process_time
+        self._bridge_time: float = bridge_time
         self._previous: cpu.Processes = initial
         self._identities: dict[int, int] = {
             pid: initial[pid].start
@@ -80,7 +84,9 @@ class Sampler:
     ) -> Result[Sampler]:
         if browser_pid <= 0 or (desktop_pid is not None and desktop_pid <= 0):
             return Rejected(errno.EINVAL, "invalid workload process identity")
+        start = time.monotonic()
         counters = cpu.processes(browser_pid, desktop_pid)
+        process_time = time.monotonic()
         if isinstance(counters, Rejected):
             return counters
         if browser_pid not in counters.value or (
@@ -88,6 +94,7 @@ class Sampler:
         ):
             return Rejected(errno.ESRCH, "workload process disappeared")
         status = service_runtime.measure(bridge)
+        bridge_time = time.monotonic()
         if isinstance(status, Rejected):
             return status
         return Ok(
@@ -97,12 +104,15 @@ class Sampler:
                 desktop_pid,
                 counters.value,
                 status.value.cpu_seconds,
+                start,
+                process_time,
+                bridge_time,
             )
         )
 
     def read(self) -> Result[report.Sample]:
-        now = time.monotonic()
         current = cpu.processes(self._browser_pid, self._desktop_pid)
+        process_time = time.monotonic()
         if isinstance(current, Rejected):
             return current
         for pid, start in self._identities.items():
@@ -112,7 +122,7 @@ class Sampler:
         percentages = cpu.account(
             current.value,
             self._previous,
-            now - self._previous_time,
+            process_time - self._process_time,
             int(os.sysconf("SC_CLK_TCK")),
             self._browser_pid,
             self._desktop_pid,
@@ -120,6 +130,7 @@ class Sampler:
         if isinstance(percentages, Rejected):
             return percentages
         status = service_runtime.measure(self._bridge)
+        bridge_time = time.monotonic()
         if isinstance(status, Rejected):
             return status
         delta = status.value.cpu_seconds - self._bridge_cpu
@@ -127,7 +138,23 @@ class Sampler:
             return Rejected(
                 errno.EINVAL, "service CPU counter decreased within process lifetime"
             )
-        percentages.value["bridge"] = 100 * delta / (now - self._previous_time)
+        if bridge_time <= self._bridge_time:
+            return Rejected(errno.EINVAL, "invalid service CPU interval")
+        # Each source has its own observation completion time. Collection is
+        # sequential, so using one interval invents CPU usage during slow reads.
+        counters = {
+            key: report.CpuSample(
+                interval_start=self._process_time - self._start,
+                elapsed=process_time - self._start,
+                percent=value,
+            )
+            for key, value in percentages.value.items()
+        }
+        counters["bridge"] = report.CpuSample(
+            interval_start=self._bridge_time - self._start,
+            elapsed=bridge_time - self._start,
+            percent=100 * delta / (bridge_time - self._bridge_time),
+        )
         try:
             gpu = gpu_load(
                 Path("/sys/class/devfreq/fb000000.gpu-panthor/load").read_text()
@@ -139,17 +166,16 @@ class Sampler:
             return gpu
         if isinstance(mpp, Rejected):
             return mpp
-        interval_start = self._previous_time - self._start
         self._bridge_cpu = status.value.cpu_seconds
         self._previous = current.value
-        self._previous_time = now
+        self._process_time = process_time
+        self._bridge_time = bridge_time
         return Ok(
             report.Sample(
-                interval_start=interval_start,
-                elapsed=now - self._start,
+                elapsed=time.monotonic() - self._start,
                 gpu_percent=gpu.value[0],
                 gpu_frequency=gpu.value[1],
                 mpp_completed_window_load=mpp.value,
-                cpu=percentages.value,
+                cpu=counters,
             )
         )

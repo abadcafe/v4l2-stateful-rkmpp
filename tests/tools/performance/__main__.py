@@ -48,7 +48,7 @@ class Entry(BaseModel):
 
 
 class Index(BaseModel):
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     started_at: str
     options: Options
     entries: list[Entry] = Field(default_factory=list)
