@@ -1,7 +1,8 @@
 //! module: rkmpp::packet; responsibility: own reusable packets over
 //! persistent input maps. operations: Input new/prepare,
 //! InputAccess bytes/packet/finish, Packet end/consumed/handle;
-//! entities: Input, Packet, InputAccess, Storage, Cache. tests:
+//! entities: Input, Packet, OwnedPacket, InputAccess, Storage, Cache,
+//! Payload. tests:
 //! packet_tests, mpp_tests, V4L2 input ownership.
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -38,6 +39,9 @@ enum Storage {
   Owned { _bytes: Vec<u8> },
 }
 pub struct Packet {
+  owner: Rc<OwnedPacket>,
+}
+struct OwnedPacket {
   handle: NonNull<c_void>,
   storage: Storage,
 }
@@ -129,11 +133,13 @@ impl InputAccess {
       mpp_packet_set_dts(handle.as_ptr(), dts);
     }
     Ok(Packet {
-      handle,
-      storage: Storage::Borrowed {
-        cache: self.cache.clone(),
-        _lease: self.access.clone(),
-      },
+      owner: Rc::new(OwnedPacket {
+        handle,
+        storage: Storage::Borrowed {
+          cache: self.cache.clone(),
+          _lease: self.access.clone(),
+        },
+      }),
     })
   }
 
@@ -149,8 +155,8 @@ impl Packet {
   pub(super) fn end() -> io::Result<Self> {
     let packet = Self::assemble(Vec::new(), &[0], 0, 0)?;
     unsafe {
-      mpp_packet_set_length(packet.handle.as_ptr(), 0);
-      mpp_packet_set_eos(packet.handle.as_ptr());
+      mpp_packet_set_length(packet.handle(), 0);
+      mpp_packet_set_eos(packet.handle());
     }
     Ok(packet)
   }
@@ -192,18 +198,27 @@ impl Packet {
       // Preserve the caller's independent DTS metadata channel.
       mpp_packet_set_dts(handle.as_ptr(), dts);
     }
-    Ok(Self { handle, storage: Storage::Owned { _bytes: bytes } })
+    Ok(Self {
+      owner: Rc::new(OwnedPacket {
+        handle,
+        storage: Storage::Owned { _bytes: bytes },
+      }),
+    })
+  }
+
+  pub(super) fn retain(&self) -> Self {
+    Self { owner: self.owner.clone() }
   }
 
   pub(super) fn consumed(&self) -> bool {
-    unsafe { mpp_packet_get_length(self.handle.as_ptr()) == 0 }
+    unsafe { mpp_packet_get_length(self.handle()) == 0 }
   }
 
   pub(super) fn handle(&self) -> *mut c_void {
-    self.handle.as_ptr()
+    self.owner.handle.as_ptr()
   }
 }
-impl Drop for Packet {
+impl Drop for OwnedPacket {
   fn drop(&mut self) {
     let mut handle = self.handle.as_ptr();
     if let Storage::Borrowed { cache, .. } = &self.storage {

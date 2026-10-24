@@ -1,12 +1,12 @@
 //! module: execution; responsibility: execute bounded transactions on
 //! owned native lanes. operations: Pool start/router/terminated/close,
 //! Router lane, Client call/schedule/reclaim; entities: Pool,
-//! Router, Client, Pending, Limits, Job. tests: execution_tests. State
-//! is created and destroyed inside its lane and need not be Send.
-//! Cancellation before queue reservation never prepares work; queued
-//! transactions retain their receiver separately. Closing rejects new
-//! preparation and drains every accepted transaction on its owning
-//! lane.
+//! Router, Client, Pending, Limits, Job, Assignment. tests:
+//! execution_tests. State is created and destroyed inside its lane and
+//! need not be Send. Cancellation before queue reservation never
+//! prepares work; queued transactions retain their receiver separately.
+//! Closing rejects new preparation and drains every accepted
+//! transaction on its owning lane.
 use std::future::{Future, poll_fn};
 use std::io;
 use std::num::NonZeroUsize;
@@ -20,6 +20,12 @@ mod thread;
 use thread::Thread;
 
 type Job<S> = Box<dyn FnOnce(&mut S) + Send>;
+struct Assignment(Arc<AtomicUsize>);
+impl Drop for Assignment {
+  fn drop(&mut self) {
+    self.0.fetch_sub(1, Ordering::Release);
+  }
+}
 pub(crate) struct Limits {
   pub workers: NonZeroUsize,
   pub backlog: NonZeroUsize,
@@ -41,6 +47,8 @@ pub(crate) struct Client<S> {
   sender: mpsc::Sender<Job<S>>,
   dirty: Arc<AtomicBool>,
   stopping: Arc<AtomicBool>,
+  occupancy: Arc<AtomicUsize>,
+  assignment: Option<Arc<Assignment>>,
 }
 impl<S> Clone for Client<S> {
   fn clone(&self) -> Self {
@@ -48,6 +56,8 @@ impl<S> Clone for Client<S> {
       sender: self.sender.clone(),
       dirty: self.dirty.clone(),
       stopping: self.stopping.clone(),
+      occupancy: self.occupancy.clone(),
+      assignment: self.assignment.clone(),
     }
   }
 }
@@ -85,8 +95,13 @@ impl<S: 'static> Client<S> {
     }
     let work = prepare();
     let (sender, receiver) = oneshot::channel();
+    let assignment = self.assignment.clone();
     permit.send(Box::new(move |state| {
-      let _ = sender.send(work(state));
+      // Cancellation can drop every client before accepted native
+      // work finishes. That work still occupies its logical lane.
+      let result = work(state);
+      drop(assignment);
+      let _ = sender.send(result);
     }));
     Ok(Pending(receiver))
   }
@@ -105,9 +120,21 @@ impl<S: 'static> Client<S> {
 }
 impl<S: 'static> Router<S> {
   pub(crate) fn lane(&self) -> Client<S> {
-    self.lanes
-      [self.next.fetch_add(1, Ordering::Relaxed) % self.lanes.len()]
-    .clone()
+    let start =
+      self.next.fetch_add(1, Ordering::Relaxed) % self.lanes.len();
+    let selected = (0..self.lanes.len())
+      .map(|offset| (start + offset) % self.lanes.len())
+      .min_by_key(|&index| {
+        self.lanes[index].occupancy.load(Ordering::Acquire)
+      })
+      .unwrap();
+    let mut client = self.lanes[selected].clone();
+    client.occupancy.fetch_add(1, Ordering::Relaxed);
+    // One logical assignment survives all clients and their accepted
+    // work. Live sessions keep their original thread affinity.
+    client.assignment =
+      Some(Arc::new(Assignment(client.occupancy.clone())));
+    client
   }
 }
 impl<S: 'static> Pool<S> {
@@ -149,6 +176,8 @@ impl<S: 'static> Pool<S> {
         sender,
         dirty,
         stopping: stopping.clone(),
+        occupancy: Arc::new(AtomicUsize::new(0)),
+        assignment: None,
       });
       workers.push(worker);
     }

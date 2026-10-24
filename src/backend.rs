@@ -4,7 +4,6 @@
 //! V4L2 codec/pixel/source-change/recovery tests.
 use std::collections::VecDeque;
 use std::io;
-use std::num::NonZeroU32;
 
 use rkmpp::{Decoder, Packet};
 use rkmpp_bridge_uapi::wire::Flags;
@@ -38,24 +37,10 @@ mod output_tests;
 use frame::FrameInput;
 use input::InputPool;
 use output::{Output, Status};
-enum Queued {
-  Analyze {
-    index: usize,
-    timestamp: u64,
-    source: crate::timestamp::Source,
-    token: NonZeroU32,
-  },
-  Task {
-    packet: Packet,
-    serial: u64,
-  },
-  Release {
-    index: usize,
-    token: NonZeroU32,
-    damaged: bool,
-  },
-  Eos(Option<u32>),
-}
+mod queue;
+#[cfg(test)]
+mod queue_tests;
+use queue::{Queue, Queued};
 mod flow;
 #[cfg(test)]
 mod flow_tests;
@@ -75,8 +60,8 @@ pub struct Backend {
   layouts: Layouts,
   inputs: InputPool,
   output: Output,
-  packets: VecDeque<Queued>,
-  prepared_tasks: Vec<Queued>,
+  packets: Queue,
+  prepared_tasks: Vec<(Packet, u64)>,
   active_task: Option<u64>,
   pending: Option<FrameInput>,
   presentation: Presentation<FrameInput>,
@@ -94,7 +79,7 @@ impl Backend {
       frontend: None,
       layouts: Layouts::default(),
       inputs: InputPool::default(),
-      packets: VecDeque::with_capacity(64),
+      packets: Queue::default(),
       prepared_tasks: Vec::with_capacity(4),
       active_task: None,
       pending: None,
@@ -150,11 +135,8 @@ impl Backend {
   }
 
   fn abort_drain(&mut self) -> io::Result<()> {
-    if self.state.flow.running()
-      && let Some(index) =
-        self.packets.iter().position(|p| matches!(p, Queued::Eos(..)))
-    {
-      self.packets.remove(index);
+    if self.state.flow.running() {
+      self.packets.abort_drain();
     }
     if self.state.flow.abort() {
       self.resume_natural()?;
@@ -220,12 +202,7 @@ impl Backend {
           extent.offset(),
           extent.length(),
         )?;
-        self.packets.push_back(Queued::Analyze {
-          index: index.get(),
-          timestamp,
-          source,
-          token,
-        });
+        self.packets.submit(index.get(), timestamp, source, token);
         Ok(())
       }
       Action::Capture { count, reuse, .. } => {
@@ -244,7 +221,10 @@ impl Backend {
             ..Default::default()
           });
         }
-        self.packets.push_back(Queued::Eos(None));
+        // An already active drain owns the empty input prefix too.
+        if self.state.flow.running() || !self.packets.is_empty() {
+          self.packets.drain();
+        }
         Ok(())
       }
       Action::Reset { token, scope } => {
@@ -303,7 +283,7 @@ impl Backend {
       return Ok(false);
     }
     let Queued::Analyze { index, timestamp, source, token } =
-      self.packets.pop_front().unwrap()
+      self.packets.pop().unwrap()
     else {
       unreachable!()
     };
@@ -317,11 +297,7 @@ impl Backend {
       Ok(admission) => admission,
       Err(error) if error.kind() == io::ErrorKind::InvalidData => {
         eprintln!("damaged input: {error}");
-        self.packets.push_front(Queued::Release {
-          index,
-          token,
-          damaged: true,
-        });
+        self.packets.damaged(index, token);
         return Ok(true);
       }
       Err(error) => return Err(error),
@@ -331,19 +307,14 @@ impl Backend {
       let serial = self.layouts.push(task.descriptor)?;
       let packet =
         self.inputs.task(index, task.payload, serial, source)?;
-      self.prepared_tasks.push(Queued::Task { packet, serial });
+      self.prepared_tasks.push((packet, serial));
     }
-    self.prepared_tasks.push(Queued::Release {
+    self.packets.expand(
+      &mut self.prepared_tasks,
       index,
       token,
-      damaged: false,
-    });
-    if admission.end {
-      self.prepared_tasks.push(Queued::Eos(Some(token.get())));
-    }
-    for item in self.prepared_tasks.drain(..).rev() {
-      self.packets.push_front(item);
-    }
+      admission.end,
+    );
     Ok(true)
   }
 
@@ -369,7 +340,7 @@ impl Backend {
         Queued::Eos(_) => self.decoder.as_ref().unwrap().idle(),
       };
       if accepted {
-        match self.packets.pop_front().unwrap() {
+        match self.packets.pop().unwrap() {
           Queued::Task { serial, .. } => {
             self.active_task = Some(serial)
           }
@@ -383,7 +354,7 @@ impl Backend {
             if let Some(boundary) = natural {
               self.emit(Message {
                 kind: Reply::Draining as u32,
-                count: boundary,
+                count: boundary.get(),
                 ..Default::default()
               })?;
             }
@@ -422,7 +393,7 @@ impl Backend {
         flags: if damaged { Flags::FrameError as u32 } else { 0 },
         ..Default::default()
       })?;
-      self.packets.pop_front();
+      self.packets.pop();
       progress = true;
     }
     if self.state.flow.running()

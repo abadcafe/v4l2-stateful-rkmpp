@@ -1,11 +1,25 @@
-//! module: picture::plan; responsibility: carry codec-decided picture
-//! identity and reference state without permitting consumers to
-//! reconstruct it. operations: Plan::new, accessors, complete_pair;
-//! entities: Id, Part, Plan; tests: plan_tests and
-//! backend/presentation_tests.
+//! module: picture::plan; responsibility: carry immutable coded-picture
+//! identity and complete complementary-field plans. operations:
+//! new, accessors, complete_pair; entities: Id, Part, Plan, Boundary,
+//! Output;
+//! tests: plan_tests, backend/presentation_tests.
 use codec_parser::Limits;
 
-use super::output::Output;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Boundary {
+  #[default]
+  Continue,
+  Drain,
+  Discard,
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Output {
+  pub order: i32,
+  pub display: bool,
+  pub before: Boundary,
+  pub drain_after: bool,
+}
+
 #[derive(
   Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord,
 )]

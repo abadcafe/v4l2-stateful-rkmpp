@@ -17,6 +17,112 @@ fn limits(workers: usize, backlog: usize) -> Limits {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn test_lane_reuses_idle_worker_after_other_sessions_close() {
+  let pool =
+    Pool::start("execution-churn", limits(2, 4), || (), |_| {})
+      .unwrap();
+  let router = pool.router();
+  let retained = router.lane();
+  let transient = router.lane();
+  let occupied =
+    retained.call(|_| Ok(std::thread::current().id())).await.unwrap();
+  let vacant =
+    transient.call(|_| Ok(std::thread::current().id())).await.unwrap();
+  assert_ne!(occupied, vacant);
+  drop(transient);
+  let replacement = router.lane();
+  assert_eq!(
+    replacement
+      .call(|_| Ok(std::thread::current().id()))
+      .await
+      .unwrap(),
+    vacant
+  );
+  pool.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_lane_counts_a_cloned_client_as_one_retained_assignment() {
+  let pool =
+    Pool::start("execution-assignments", limits(2, 4), || (), |_| {})
+      .unwrap();
+  let router = pool.router();
+  let first = router.lane();
+  let second = router.lane();
+  let first_thread =
+    first.call(|_| Ok(std::thread::current().id())).await.unwrap();
+  let aliases: Vec<_> = (0..8).map(|_| first.clone()).collect();
+  // Equal logical occupancy still uses the rotating tie-breaker;
+  // internal client clones must not skew placement toward the second
+  // lane.
+  let third = router.lane();
+  assert_eq!(
+    third.call(|_| Ok(std::thread::current().id())).await.unwrap(),
+    first_thread
+  );
+  drop(first);
+  drop(third);
+  drop(second);
+  let replacement = router.lane();
+  assert_ne!(
+    replacement
+      .call(|_| Ok(std::thread::current().id()))
+      .await
+      .unwrap(),
+    first_thread
+  );
+  drop(aliases);
+  let freed = router.lane();
+  assert_eq!(
+    freed.call(|_| Ok(std::thread::current().id())).await.unwrap(),
+    first_thread
+  );
+  pool.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_lane_retains_assignment_until_cancelled_client_work_finishes()
+ {
+  let pool =
+    Pool::start("execution-cancelled", limits(2, 4), || (), |_| {})
+      .unwrap();
+  let router = pool.router();
+  let busy = router.lane();
+  let (started, executing) = tokio::sync::oneshot::channel();
+  let (release, wait) = std::sync::mpsc::channel();
+  let blocked = busy
+    .schedule(|| {
+      move |_| {
+        let _ = started.send(());
+        wait.recv().unwrap();
+        Ok(())
+      }
+    })
+    .await
+    .unwrap();
+  executing.await.unwrap();
+  drop(busy);
+  let transient = router.lane();
+  let vacant =
+    transient.call(|_| Ok(std::thread::current().id())).await.unwrap();
+  drop(transient);
+  // The abandoned client still has accepted native work. Releasing
+  // its assignment before that work ends would select its busy lane
+  // on this next rotating tie, despite the other lane being vacant.
+  let replacement = router.lane();
+  release.send(()).unwrap();
+  blocked.await.unwrap();
+  assert_eq!(
+    replacement
+      .call(|_| Ok(std::thread::current().id()))
+      .await
+      .unwrap(),
+    vacant
+  );
+  pool.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn test_call_preserves_non_send_state_and_lane_thread_affinity() {
   let pool = Pool::start(
     "execution-contract",

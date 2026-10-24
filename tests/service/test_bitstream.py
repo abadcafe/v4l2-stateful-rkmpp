@@ -146,6 +146,43 @@ def test_natural_eos_retains_following_sequence_until_resume(
     assert tuple(frame.digest for frame in result.frames) == expected * 2
 
 
+@pytest.mark.parametrize(
+    "codec,file,marker",
+    [
+        (Codec.H264, "h264-yuv420p.h264", b"\x00\x00\x01\x0b"),
+        (Codec.HEVC, "hevc-yuv420p.hevc", b"\x00\x00\x01\x4a\x01"),
+    ],
+)
+@pytest.mark.parametrize("input_count", [1, 8])
+def test_stop_at_natural_eos_resumes_next_sequence_without_duplicate_drain(
+    mock_service: Process,
+    artifacts: Path,
+    codec: Codec,
+    file: str,
+    marker: bytes,
+    input_count: int,
+) -> None:
+    source = artifacts / file
+    original = accepted(load(codec, source))
+    sequence = (*original[:-1], Packet(data=original[-1].data + marker, timestamp=0))
+    # STOP can already be queued when the service discovers the in-band
+    # terminator. Both delimit the same input prefix and must produce one EOS.
+    result = accepted(
+        play(
+            mock_service,
+            codec,
+            source,
+            submissions=sequence * 2,
+            drain_at=len(sequence),
+            input_count=input_count,
+        )
+    )
+    expected = accepted(frame_hashes(source, 8, 256, 128))
+    assert result.eos
+    assert result.drain_frames == (len(expected), 2 * len(expected))
+    assert tuple(frame.digest for frame in result.frames) == expected * 2
+
+
 def test_ten_bit_cropped_output_matches_dithered_reference(
     mock_service: Process, artifacts: Path, tmp_path: Path
 ) -> None:

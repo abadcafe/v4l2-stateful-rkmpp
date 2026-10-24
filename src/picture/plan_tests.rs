@@ -5,7 +5,7 @@
 //! test_complete_pair_rejects_invalid_field_roles_without_mutation.
 use codec_parser::Limits;
 
-use super::{Boundary, Id, Output, Part, Plan};
+use super::plan::{Boundary, Id, Output, Part, Plan};
 #[test]
 fn test_complete_pair_combines_picture_order_and_final_reference_state()
 {

@@ -63,6 +63,7 @@ pub struct Decoder {
   frames: std::collections::VecDeque<Frame>,
   publish_on_completion: bool,
   completion_packet: Option<Packet>,
+  active_packet: Option<Packet>,
   publication_pending: bool,
 }
 unsafe extern "C" fn notify_ready<F: Fn() -> io::Result<()>>(
@@ -132,6 +133,7 @@ impl Decoder {
       frames: std::collections::VecDeque::new(),
       publish_on_completion: coding == super::ffi::MPP_VIDEO_CODING_AV1,
       completion_packet: None,
+      active_packet: None,
       publication_pending: false,
       retired: Vec::new(),
       callback: Box::new(notify),
@@ -235,10 +237,23 @@ impl Decoder {
     if !self.can_decode() {
       return Ok(Submission::Blocked);
     }
+    if self.active_packet.as_ref().is_some_and(|active| {
+      active.handle() != packet.handle() && !active.consumed()
+    }) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "previous coded packet has not been consumed",
+      ));
+    }
+    // The SDK retains a partially consumed packet between decode()
+    // calls, including across info-change. Own its handle and storage
+    // lease independently of the caller until consumption or reset.
+    self.active_packet = Some(packet.retain());
     self.completion_packet = None;
     self.decode(packet.handle())?;
     if packet.consumed() {
       self.publication_pending = self.publish_on_completion;
+      self.active_packet = None;
       return Ok(Submission::Consumed);
     }
     Ok(Submission::Progress)
@@ -323,6 +338,9 @@ impl Decoder {
     if self.publication_pending && !self.parked {
       self.publish()?;
     }
+    if self.active_packet.as_ref().is_some_and(Packet::consumed) {
+      self.active_packet = None;
+    }
     Ok(self.frames.pop_front())
   }
 
@@ -395,6 +413,7 @@ impl Decoder {
       (self.api.reset)(self.context.unwrap().as_ptr())
     })?;
     self.completion_packet = None;
+    self.active_packet = None;
     self.publication_pending = false;
     Ok(())
   }
@@ -410,6 +429,7 @@ impl Decoder {
     self.frames.clear();
     let reset = unsafe { (self.api.reset)(context.as_ptr()) };
     let destroy = unsafe { mpp_destroy(context.as_ptr()) };
+    self.active_packet = None;
     self.group = None;
     self.retired.clear();
     check("reset", reset).and(check("destroy", destroy))

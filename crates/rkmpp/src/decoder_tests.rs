@@ -28,6 +28,77 @@ use super::decoder::{Decoder, Submission};
 use crate::{Input, Packet, Payload};
 
 #[test]
+fn test_packet_retains_input_access_until_parked_task_is_reset() {
+  let stream = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/av1-yuv420p.ivf"
+  ));
+  let first =
+    u32::from_le_bytes(stream[32..36].try_into().unwrap()) as usize;
+  let next = 44 + first;
+  let second =
+    u32::from_le_bytes(stream[next..next + 4].try_into().unwrap())
+      as usize;
+  let mut bytes = stream[44..next].to_vec();
+  bytes.extend_from_slice(&stream[next + 12..next + 12 + second]);
+  let buffer = Buffer::allocate(bytes.len()).unwrap();
+  let mut write = buffer.write().unwrap();
+  write[..bytes.len()].copy_from_slice(&bytes);
+  write.finish().unwrap();
+  let input = Input::new(buffer.clone()).unwrap();
+  let access = input.prepare(0, bytes.len()).unwrap();
+  let packet =
+    access.packet(Payload::Input(0..bytes.len()), 1, 0).unwrap();
+  let mut decoder =
+    Decoder::new(u32::from_le_bytes(*b"AV01"), || Ok(())).unwrap();
+  assert_eq!(decoder.packet(&packet).unwrap(), Submission::Progress);
+  let change = decoder.frame().unwrap().unwrap();
+  assert!(change.info().info_change);
+  assert!(!decoder.idle());
+  drop(packet);
+  drop(access);
+  drop(input);
+  // The SDK has parked a task behind info-change. Dropping the caller's
+  // packet must not unmap its input or return that storage to a writer.
+  assert_eq!(
+    buffer.write().err().unwrap().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+  decoder.reset().unwrap();
+  buffer.write().unwrap().finish().unwrap();
+  decoder.close().unwrap();
+}
+
+#[test]
+fn test_packet_returns_consumed_input_before_output_reconfiguration() {
+  let stream = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/artifacts/h264-yuv420p.h264"
+  ));
+  let bytes = &stream[..4454];
+  let buffer = Buffer::allocate(bytes.len()).unwrap();
+  let mut write = buffer.write().unwrap();
+  write[..bytes.len()].copy_from_slice(bytes);
+  write.finish().unwrap();
+  let input = Input::new(buffer.clone()).unwrap();
+  let access = input.prepare(0, bytes.len()).unwrap();
+  let packet =
+    access.packet(Payload::Input(0..bytes.len()), 1, 0).unwrap();
+  let mut decoder =
+    Decoder::new(u32::from_le_bytes(*b"H264"), || Ok(())).unwrap();
+  assert_eq!(decoder.packet(&packet).unwrap(), Submission::Consumed);
+  assert!(decoder.frame().unwrap().unwrap().info().info_change);
+  assert!(!decoder.idle());
+  drop(packet);
+  drop(access);
+  drop(input);
+  // Output reconfiguration parks an independent native task. Once
+  // its input is consumed, the caller can reuse that input storage.
+  buffer.write().unwrap().finish().unwrap();
+  decoder.close().unwrap();
+}
+
+#[test]
 fn test_packet_unknown_h264_level_preserves_bounded_picture_output() {
   // External failure, reproduced with the rockchip_mpp 1.3.10 SDK:
   // a complete IDR with level_idc=255 is

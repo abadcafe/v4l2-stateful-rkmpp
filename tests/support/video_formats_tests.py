@@ -7,12 +7,15 @@ operations: pytest cases; entities: none; tests:
 
 """
 
+import ctypes
 import errno
 from pathlib import Path
 
 import pytest
 
-from tests.support.outcome import Rejected, accepted
+from tests.support import syscalls
+from tests.support.format_abi import Format
+from tests.support.outcome import Ok, Rejected, Result, accepted
 from tests.support.queue import QueueType
 from tests.support.stream import Codec
 from tests.support.syscalls import open_fd
@@ -23,6 +26,33 @@ from tests.support.video_formats import (
     selection,
     set_format,
 )
+
+
+@pytest.mark.parametrize("planes", [0, 1, 8, 9, 255])
+def test_format_operations_validate_driver_plane_count_against_the_abi(
+    monkeypatch: pytest.MonkeyPatch, planes: int
+) -> None:
+    def malformed(
+        fd: int,
+        request: int,
+        payload: ctypes.Structure | syscalls.WireBuffer | int = 0,
+    ) -> Result[int]:
+        assert fd == 123 and request & 0xFF in (4, 5)
+        assert isinstance(payload, Format)
+        payload.fmt.data[180] = planes
+        return Ok(0)
+
+    monkeypatch.setattr(syscalls, "ioctl", malformed)
+    for result in (
+        get_format(123, QueueType.OUTPUT),
+        set_format(123, QueueType.OUTPUT, Codec.H264.fourcc),
+    ):
+        if planes in (1, 8):
+            assert isinstance(result, Ok)
+            assert result.value.planes == planes
+            assert len(result.value.sizes) == len(result.value.strides) == planes
+        else:
+            assert isinstance(result, Rejected) and result.code == errno.EPROTO
 
 
 @pytest.mark.parametrize("value", [-1, 1 << 32, 1 << 128])

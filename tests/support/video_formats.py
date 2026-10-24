@@ -10,11 +10,12 @@ import struct
 
 from pydantic import BaseModel
 
+from tests.support import syscalls
 from tests.support.format_abi import Format, FormatDescription, Selection
 from tests.support.outcome import Ok, Rejected, Result
-from tests.support.syscalls import command, ioctl
 
 _U32_MAX = (1 << 32) - 1
+_VIDEO_MAX_PLANES = 8
 
 
 class VideoFormat(BaseModel):
@@ -30,25 +31,31 @@ class VideoFormat(BaseModel):
     transfer: int
 
 
-def _describe(payload: Format) -> VideoFormat:
+def _describe(payload: Format) -> Result[VideoFormat]:
     data = bytes(payload.fmt.data)
     width, height, fourcc, _, colorspace = struct.unpack_from("<5I", data)
     planes = data[180]
-    return VideoFormat(
-        width=width,
-        height=height,
-        fourcc=fourcc,
-        planes=planes,
-        sizes=tuple(
-            struct.unpack_from("<I", data, 20 + 20 * i)[0] for i in range(planes)
-        ),
-        strides=tuple(
-            struct.unpack_from("<I", data, 24 + 20 * i)[0] for i in range(planes)
-        ),
-        colorspace=colorspace,
-        ycbcr=data[182],
-        quantization=data[183],
-        transfer=data[184],
+    # v4l2_pix_format_mplane contains exactly VIDEO_MAX_PLANES entries.
+    # Validate the driver's count before indexing its fixed ABI storage.
+    if not 1 <= planes <= _VIDEO_MAX_PLANES:
+        return Rejected(errno.EPROTO, "driver returned an invalid video plane count")
+    return Ok(
+        VideoFormat(
+            width=width,
+            height=height,
+            fourcc=fourcc,
+            planes=planes,
+            sizes=tuple(
+                struct.unpack_from("<I", data, 20 + 20 * i)[0] for i in range(planes)
+            ),
+            strides=tuple(
+                struct.unpack_from("<I", data, 24 + 20 * i)[0] for i in range(planes)
+            ),
+            colorspace=colorspace,
+            ycbcr=data[182],
+            quantization=data[183],
+            transfer=data[184],
+        )
     )
 
 
@@ -56,8 +63,10 @@ def get_format(fd: int, kind: int) -> Result[VideoFormat]:
     if not 0 <= kind <= _U32_MAX:
         return Rejected(errno.EINVAL, "queue type outside unsigned 32-bit ABI")
     payload = Format(kind=kind)
-    result = ioctl(fd, command(3, "V", 4, ctypes.sizeof(payload)), payload)
-    return Ok(_describe(payload)) if isinstance(result, Ok) else result
+    result = syscalls.ioctl(
+        fd, syscalls.command(3, "V", 4, ctypes.sizeof(payload)), payload
+    )
+    return _describe(payload) if isinstance(result, Ok) else result
 
 
 def set_format(
@@ -77,8 +86,10 @@ def set_format(
     struct.pack_into("<I", data, 20, size)
     data[180] = 1
     payload.fmt.data[:] = data
-    result = ioctl(fd, command(3, "V", 5, ctypes.sizeof(payload)), payload)
-    return Ok(_describe(payload)) if isinstance(result, Ok) else result
+    result = syscalls.ioctl(
+        fd, syscalls.command(3, "V", 5, ctypes.sizeof(payload)), payload
+    )
+    return _describe(payload) if isinstance(result, Ok) else result
 
 
 def enumerate_formats(fd: int, kind: int) -> Result[list[int]]:
@@ -87,7 +98,9 @@ def enumerate_formats(fd: int, kind: int) -> Result[list[int]]:
     formats: list[int] = []
     while True:
         payload = FormatDescription(index=len(formats), kind=kind)
-        result = ioctl(fd, command(3, "V", 2, ctypes.sizeof(payload)), payload)
+        result = syscalls.ioctl(
+            fd, syscalls.command(3, "V", 2, ctypes.sizeof(payload)), payload
+        )
         if isinstance(result, Rejected):
             return Ok(formats) if result.code == errno.EINVAL else result
         formats.append(payload.pixelformat)
@@ -97,7 +110,9 @@ def selection(fd: int, kind: int) -> Result[tuple[int, int]]:
     if not 0 <= kind <= _U32_MAX:
         return Rejected(errno.EINVAL, "queue type outside unsigned 32-bit ABI")
     payload = Selection(kind=kind, target=0x100)
-    result = ioctl(fd, command(3, "V", 94, ctypes.sizeof(payload)), payload)
+    result = syscalls.ioctl(
+        fd, syscalls.command(3, "V", 94, ctypes.sizeof(payload)), payload
+    )
     return (
         Ok((payload.rect.width, payload.rect.height))
         if isinstance(result, Ok)
