@@ -131,8 +131,12 @@ def test_capture_source_change_resets_only_capture_and_keeps_input_valid(
 
 @pytest.mark.parametrize("draining", [False, True])
 @pytest.mark.parametrize("dequeue_last", [False, True])
+@pytest.mark.parametrize("size", [6144, 8192])
 def test_capture_source_change_reuses_sufficient_pool_without_streamoff(
-    packet_session: tuple[Peer, tuple[Message, ...]], draining: bool, dequeue_last: bool
+    packet_session: tuple[Peer, tuple[Message, ...]],
+    draining: bool,
+    dequeue_last: bool,
+    size: int,
 ) -> None:
     peer, packets = packet_session
     capture = Queue(peer.video.fd, QueueType.CAPTURE)
@@ -157,7 +161,7 @@ def test_capture_source_change_reuses_sufficient_pool_without_streamoff(
         height=64,
         stride=64,
         rows=64,
-        size=6144,
+        size=size,
         format=1,
     )
     assert present(accepted(peer.service.exchange([layout])).result(0)) == 0

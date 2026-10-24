@@ -114,7 +114,11 @@ void rb_format_set(struct rb_format *f,
                                   .rows = ALIGN(p->height, 16),
                                   .format = RB_FMT_NV12,
                                   .count = RB_MIN_CAPTURE};
-  f->layout.size = f->layout.stride * f->layout.rows * 3 / 2;
+  /* MPP's generic YUV420 allocation includes 3/2 pixel data and 1/2
+   * additional information per aligned luma sample. Reserve both before
+   * parsing; the decoded layout still supplies the authoritative capacity.
+   * Extra capacity does not change the NV12 stride or chroma offset. */
+  f->layout.size = f->layout.stride * f->layout.rows * 2;
 }
 int rb_format_update(struct rb_format *f, const struct rb_message *m) {
   u64 right = (u64)m->crop_left + m->width;
@@ -129,10 +133,8 @@ int rb_format_update(struct rb_format *f, const struct rb_message *m) {
       m->coded_height < bottom || m->coded_height > 8192 ||
       m->rows < m->coded_height || m->rows > 16384 || (m->rows & 1) ||
       m->stride < ALIGN(m->coded_width, 2) || m->stride > 65536 ||
-      (m->stride & 1) ||
-      m->size < (u64)m->stride * m->rows * 3 / 2 ||
-      m->size > 128 * 1024 * 1024 ||
-      m->format != RB_FMT_NV12)
+      (m->stride & 1) || m->size < (u64)m->stride * m->rows * 3 / 2 ||
+      m->size > 128 * 1024 * 1024 || m->format != RB_FMT_NV12)
     return -EINVAL;
   f->layout = *m;
   f->input.width = m->coded_width;
@@ -140,7 +142,7 @@ int rb_format_update(struct rb_format *f, const struct rb_message *m) {
   return 0;
 }
 int rb_format_validate_frame(const struct rb_format *f,
-                              const struct rb_message *m) {
+                             const struct rb_message *m) {
   u32 payload = f->layout.stride * f->layout.rows * 3 / 2;
   /* A successful image must cover the complete linear NV12 payload.
    * bytesused may also include SDK padding within the negotiated capacity.
@@ -186,8 +188,7 @@ int rb_format_selection(const struct rb_format *f, struct v4l2_selection *s) {
         (struct v4l2_rect){.width = f->input.width, .height = f->input.height};
     break;
   case V4L2_SEL_TGT_COMPOSE_PADDED:
-    s->r = (struct v4l2_rect){.width = m->stride,
-                              .height = m->rows};
+    s->r = (struct v4l2_rect){.width = m->stride, .height = m->rows};
     break;
   default:
     return -EINVAL;

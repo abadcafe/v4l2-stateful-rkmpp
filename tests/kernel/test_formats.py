@@ -62,7 +62,7 @@ def test_video_capability_and_format_enumeration(video: Video) -> None:
         capture.planes,
         capture.strides,
         capture.sizes,
-    ) == (64, 64, 1, (64,), (6144,))
+    ) == (64, 64, 1, (64,), (8192,))
     assert accepted(selection(video.fd, QueueType.CAPTURE)) == (64, 64)
 
 
@@ -214,9 +214,18 @@ def test_selection_invalid_queue_or_target_is_rejected(
     assert isinstance(result, Rejected) and result.code == errno.EINVAL
 
 
-@pytest.mark.parametrize(("width", "height"), [(1920, 1080), (1280, 720)])
+@pytest.mark.parametrize(
+    ("width", "height", "expected"),
+    [
+        (64, 64, (64, 64, 8192)),
+        (1280, 720, (1280, 720, 1843200)),
+        (1279, 719, (1280, 720, 1843200)),
+        (1920, 1080, (1920, 1088, 4177920)),
+        (8192, 8192, (8192, 8192, 134217728)),
+    ],
+)
 def test_output_format_immediately_updates_provisional_capture(
-    video: Video, width: int, height: int
+    video: Video, width: int, height: int, expected: tuple[int, int, int]
 ) -> None:
     _ = accepted(
         set_format(
@@ -224,9 +233,8 @@ def test_output_format_immediately_updates_provisional_capture(
         )
     )
     capture = accepted(get_format(video.fd, QueueType.CAPTURE))
-    assert capture.width >= width and capture.height >= height
-    assert capture.strides[0] >= width
-    assert capture.sizes[0] >= capture.strides[0] * capture.height * 3 // 2
+    assert (capture.strides[0], capture.height, capture.sizes[0]) == expected
+    assert capture.width == capture.strides[0]
     assert accepted(selection(video.fd, QueueType.CAPTURE)) == (width, height)
     for target in (0, 1, 2):
         value = Selection(kind=QueueType.CAPTURE, target=target)
